@@ -8,11 +8,8 @@ import { MODA_SUPPORTED_LANGUAGE_TAGS } from "@modainteract/moda-interact-shared
 
 import { storeCategoryTranslationPublicationTestInternals } from "../../../src/services/store-category-translation-publication.service.js";
 
-const {
-  canonicalSnapshot,
-  hashSnapshot,
-  buildPublicationPayload,
-} = storeCategoryTranslationPublicationTestInternals;
+const { canonicalSnapshot, hashSnapshot, buildPublicationPayload } =
+  storeCategoryTranslationPublicationTestInternals;
 
 function fixtureSnapshot() {
   return canonicalSnapshot({
@@ -77,7 +74,8 @@ function translationItems() {
       ...source,
       sourceLanguageTag: "en",
       targetLanguageTag: locale,
-      translatedText: locale === "en" ? source.sourceText : `${locale}:${source.sourceText}`,
+      translatedText:
+        locale === "en" ? source.sourceText : `${locale}:${source.sourceText}`,
       status: CommerceStoreCategoryTranslationItemStatus.AVAILABLE,
     })),
   );
@@ -89,7 +87,6 @@ describe("Store Category translation publication", () => {
       "ea2bf18cfb8a54698afbbf604ef53a50bfb75fb3f68f1d8d6cf6e3365647d8fd",
     );
   });
-
 
   it("sorts mapping identities before hashing so query order cannot change freshness", () => {
     const base = fixtureSnapshot();
@@ -126,9 +123,15 @@ describe("Store Category translation publication", () => {
     });
 
     expect(payload).not.toBeNull();
-    expect(payload?.categoryTranslations).toHaveLength(MODA_SUPPORTED_LANGUAGE_TAGS.length);
-    expect(payload?.mappingTranslations).toHaveLength(MODA_SUPPORTED_LANGUAGE_TAGS.length);
-    expect(payload?.categoryTranslations.find((row) => row.locale === "en")).toMatchObject({
+    expect(payload?.categoryTranslations).toHaveLength(
+      MODA_SUPPORTED_LANGUAGE_TAGS.length,
+    );
+    expect(payload?.mappingTranslations).toHaveLength(
+      MODA_SUPPORTED_LANGUAGE_TAGS.length,
+    );
+    expect(
+      payload?.categoryTranslations.find((row) => row.locale === "en"),
+    ).toMatchObject({
       displayName: "Apparel",
       description: "Clothing and accessories",
     });
@@ -149,12 +152,17 @@ describe("Store Category translation publication", () => {
     expect(buildPublicationPayload({ ...args, items: incomplete })).toBeNull();
 
     const pending = translationItems();
-    pending[0] = { ...pending[0], status: CommerceStoreCategoryTranslationItemStatus.PENDING };
+    pending[0] = {
+      ...pending[0],
+      status: CommerceStoreCategoryTranslationItemStatus.PENDING,
+    };
     expect(buildPublicationPayload({ ...args, items: pending })).toBeNull();
 
     const sourceMismatch = translationItems();
     sourceMismatch[0] = { ...sourceMismatch[0], sourceText: "Different" };
-    expect(buildPublicationPayload({ ...args, items: sourceMismatch })).toBeNull();
+    expect(
+      buildPublicationPayload({ ...args, items: sourceMismatch }),
+    ).toBeNull();
 
     const duplicate = translationItems();
     duplicate[1] = { ...duplicate[1], ...duplicate[0], id: duplicate[1].id };

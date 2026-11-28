@@ -51,10 +51,9 @@ function client({
 
 describe("PostContractRecoveryPolicyResolver", () => {
   it("resolves recovery-only policy for an onboarded merchant whose Shopify contract ended", async () => {
-    const policy = await new PostContractRecoveryPolicyResolver(client()).resolve(
-      "shop-1",
-      now,
-    );
+    const policy = await new PostContractRecoveryPolicyResolver(
+      client(),
+    ).resolve("shop-1", now);
 
     expect(policy).toMatchObject({
       mode: "POST_CONTRACT_DURABLE_CREDITS",
@@ -123,32 +122,41 @@ describe("PostContractRecoveryPolicyResolver", () => {
     });
   });
   it("preserves the post-contract error for invalid outbound overrides", async () => {
-    await expect(new PostContractRecoveryPolicyResolver(client({
-      override: {
-        outboundSoftLimit: 9,
-        outboundHardLimit: 8,
-        expiresAt: null,
-      },
-    })).resolve("shop-1", now)).rejects.toMatchObject<Partial<PostContractRecoveryPolicyError>>({
+    await expect(
+      new PostContractRecoveryPolicyResolver(
+        client({
+          override: {
+            outboundSoftLimit: 9,
+            outboundHardLimit: 8,
+            expiresAt: null,
+          },
+        }),
+      ).resolve("shop-1", now),
+    ).rejects.toMatchObject<Partial<PostContractRecoveryPolicyError>>({
       name: "PostContractRecoveryPolicyError",
       reason: "INVALID_CONFIGURATION",
-      message: "Invalid post-contract recovery policy for shop shop-1: shop soft limit exceeds shop hard limit",
+      message:
+        "Invalid post-contract recovery policy for shop shop-1: shop soft limit exceeds shop hard limit",
     });
   });
 
   it("preserves the post-contract error for invalid terminal reserved slots", async () => {
-    await expect(new PostContractRecoveryPolicyResolver(client({
-      override: {
-        outboundSoftLimit: null,
-        outboundHardLimit: null,
-        terminalMessageReservedSlots: 15,
-        expiresAt: null,
-      },
-    })).resolve("shop-1", now)).rejects.toMatchObject<Partial<PostContractRecoveryPolicyError>>({
+    await expect(
+      new PostContractRecoveryPolicyResolver(
+        client({
+          override: {
+            outboundSoftLimit: null,
+            outboundHardLimit: null,
+            terminalMessageReservedSlots: 15,
+            expiresAt: null,
+          },
+        }),
+      ).resolve("shop-1", now),
+    ).rejects.toMatchObject<Partial<PostContractRecoveryPolicyError>>({
       name: "PostContractRecoveryPolicyError",
       reason: "INVALID_CONFIGURATION",
-      message: "Invalid post-contract recovery policy for shop shop-1: terminalMessageReservedSlots must be at least 1 and less than the effective hard limit",
+      message:
+        "Invalid post-contract recovery policy for shop shop-1: terminalMessageReservedSlots must be at least 1 and less than the effective hard limit",
     });
   });
-
 });

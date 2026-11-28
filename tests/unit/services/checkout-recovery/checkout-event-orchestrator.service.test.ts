@@ -66,20 +66,25 @@ function createHarness({
     }),
   };
   const pendingRecoveryCandidateService = {
-    withCheckoutLock: vi.fn(async (
-      _shopId: string,
-      _checkoutToken: string,
-      callback: () => Promise<unknown>,
-    ) => {
-      order.push("checkout-lock");
-      return callback();
-    }),
+    withCheckoutLock: vi.fn(
+      async (
+        _shopId: string,
+        _checkoutToken: string,
+        callback: () => Promise<unknown>,
+      ) => {
+        order.push("checkout-lock");
+        return callback();
+      },
+    ),
     scheduleFromCheckoutCreated: vi.fn(async () => pendingResult),
     refreshCandidateActivity: vi.fn(async () => {
       order.push("pending-refresh");
       return pendingResult;
     }),
-    scheduleFromCheckoutUpdated: vi.fn(async () => ({ outcome: "enqueued", jobId: "restart-1" })),
+    scheduleFromCheckoutUpdated: vi.fn(async () => ({
+      outcome: "enqueued",
+      jobId: "restart-1",
+    })),
   };
   const shopExecutionEligibilityService = {
     resolveShopById: vi.fn(async () => shopResult),
@@ -140,12 +145,14 @@ describe("CheckoutEventOrchestratorService", () => {
     };
     const harness = createHarness({ pendingResult: scheduled });
 
-    await expect(harness.service.handleCheckoutCreatedContract({
-      ...event,
-      checkoutCartToken: "cart-1",
-      checkoutCreatedAt: "2026-10-03T07:00:00.000Z",
-      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=event",
-    })).resolves.toEqual({
+    await expect(
+      harness.service.handleCheckoutCreatedContract({
+        ...event,
+        checkoutCartToken: "cart-1",
+        checkoutCreatedAt: "2026-10-03T07:00:00.000Z",
+        abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=event",
+      }),
+    ).resolves.toEqual({
       kind: "scheduled",
       outcome: "enqueued",
       delayMinutes: 45,
@@ -153,23 +160,32 @@ describe("CheckoutEventOrchestratorService", () => {
       checkoutToken: event.checkoutToken,
       source: "v2",
     });
-    expect(harness.pendingRecoveryCandidateService.scheduleFromCheckoutCreated).toHaveBeenCalledOnce();
+    expect(
+      harness.pendingRecoveryCandidateService.scheduleFromCheckoutCreated,
+    ).toHaveBeenCalledOnce();
     expect(harness.findLatestRecovery).not.toHaveBeenCalled();
   });
 
   it.each([
     ["discarded-shop-unavailable", "shop-unavailable"],
     ["discarded-subscription-frozen", "subscription-frozen"],
-  ])("maps checkout-created %s to its contract result", async (outcome, reason) => {
-    const harness = createHarness({ pendingResult: { outcome, shopDomain: event.shopDomain } });
+  ])(
+    "maps checkout-created %s to its contract result",
+    async (outcome, reason) => {
+      const harness = createHarness({
+        pendingResult: { outcome, shopDomain: event.shopDomain },
+      });
 
-    await expect(harness.service.handleCheckoutCreatedContract({
-      ...event,
-      cartToken: null,
-      checkoutCreatedAt: null,
-      abandonedCheckoutUrl: null,
-    })).resolves.toMatchObject({ kind: "ignored", reason, source: "v2" });
-  });
+      await expect(
+        harness.service.handleCheckoutCreatedContract({
+          ...event,
+          cartToken: null,
+          checkoutCreatedAt: null,
+          abandonedCheckoutUrl: null,
+        }),
+      ).resolves.toMatchObject({ kind: "ignored", reason, source: "v2" });
+    },
+  );
 
   it("checks the exact shop row and eligibility before pending candidate refresh", async () => {
     const harness = createHarness();
@@ -188,24 +204,37 @@ describe("CheckoutEventOrchestratorService", () => {
         },
       },
     });
-    expect(harness.shopExecutionEligibilityService.evaluateResolvedShop).toHaveBeenCalledWith(
-      shop,
-      "recovery",
-    );
-    expect(harness.order.slice(0, 3)).toEqual(["shop-read", "eligibility", "pending-refresh"]);
+    expect(
+      harness.shopExecutionEligibilityService.evaluateResolvedShop,
+    ).toHaveBeenCalledWith(shop, "recovery");
+    expect(harness.order.slice(0, 3)).toEqual([
+      "shop-read",
+      "eligibility",
+      "pending-refresh",
+    ]);
   });
 
   it("returns a matching pending candidate before durable recovery or Shopify reads", async () => {
-    const harness = createHarness({ pendingResult: { outcome: "rescheduled", jobId: "candidate-1" } });
+    const harness = createHarness({
+      pendingResult: { outcome: "rescheduled", jobId: "candidate-1" },
+    });
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
+    await expect(
+      harness.service.handleCheckoutUpdatedContract(event),
+    ).resolves.toEqual({
       kind: "pending",
       outcome: "rescheduled",
       jobId: "candidate-1",
     });
     expect(harness.findLatestRecovery).not.toHaveBeenCalled();
-    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
-    expect(harness.order).toEqual(["shop-read", "eligibility", "pending-refresh"]);
+    expect(
+      harness.abandonedCheckoutLookupService.lookup,
+    ).not.toHaveBeenCalled();
+    expect(harness.order).toEqual([
+      "shop-read",
+      "eligibility",
+      "pending-refresh",
+    ]);
   });
 
   it("passes independently supplied lookup context into pending candidate refresh", async () => {
@@ -214,11 +243,15 @@ describe("CheckoutEventOrchestratorService", () => {
       cartToken: "cart-1",
       abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=update",
     };
-    const harness = createHarness({ pendingResult: { outcome: "rescheduled", jobId: "candidate-1" } });
+    const harness = createHarness({
+      pendingResult: { outcome: "rescheduled", jobId: "candidate-1" },
+    });
 
     await harness.service.handleCheckoutUpdatedContract(update);
 
-    expect(harness.pendingRecoveryCandidateService.refreshCandidateActivity).toHaveBeenCalledWith({
+    expect(
+      harness.pendingRecoveryCandidateService.refreshCandidateActivity,
+    ).toHaveBeenCalledWith({
       shopId: shop.id,
       checkoutToken: event.checkoutToken,
       cartToken: null,
@@ -232,12 +265,16 @@ describe("CheckoutEventOrchestratorService", () => {
   it("schedules a checkout update with no candidate or durable recovery", async () => {
     const harness = createHarness({ recovery: null });
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
+    await expect(
+      harness.service.handleCheckoutUpdatedContract(event),
+    ).resolves.toEqual({
       kind: "pending",
       outcome: "enqueued",
       jobId: "restart-1",
     });
-    expect(harness.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated).toHaveBeenCalledWith({
+    expect(
+      harness.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated,
+    ).toHaveBeenCalledWith({
       shopDomain: event.shopDomain,
       checkoutToken: event.checkoutToken,
       cartToken: undefined,
@@ -245,35 +282,58 @@ describe("CheckoutEventOrchestratorService", () => {
       abandonedCheckoutUrl: undefined,
       activityAt,
     });
-    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
+    expect(
+      harness.abandonedCheckoutLookupService.lookup,
+    ).not.toHaveBeenCalled();
     expect(harness.database.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
 
   it("re-enters no-recovery scheduling when an active candidate cannot be rescheduled", async () => {
     const harness = createHarness({
-      pendingResult: { outcome: "not-reschedulable", state: "active", jobId: "candidate-1" },
+      pendingResult: {
+        outcome: "not-reschedulable",
+        state: "active",
+        jobId: "candidate-1",
+      },
       recovery: null,
     });
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
+    await expect(
+      harness.service.handleCheckoutUpdatedContract(event),
+    ).resolves.toEqual({
       kind: "pending",
       outcome: "enqueued",
       jobId: "restart-1",
     });
-    expect(harness.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated).toHaveBeenCalledOnce();
-    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
+    expect(
+      harness.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated,
+    ).toHaveBeenCalledOnce();
+    expect(
+      harness.abandonedCheckoutLookupService.lookup,
+    ).not.toHaveBeenCalled();
   });
 
-  it.each(["COMPLETED", "CANCELLED"])("never reopens terminal recovery %s", async (status) => {
-    const harness = createHarness({ recovery: { ...activeRecovery, status } });
+  it.each(["COMPLETED", "CANCELLED"])(
+    "never reopens terminal recovery %s",
+    async (status) => {
+      const harness = createHarness({
+        recovery: { ...activeRecovery, status },
+      });
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
-      kind: "ignored",
-      reason: `terminal-${status.toLowerCase()}`,
-    });
-    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
-    expect(harness.database.checkoutRecovery.updateMany).not.toHaveBeenCalled();
-  });
+      await expect(
+        harness.service.handleCheckoutUpdatedContract(event),
+      ).resolves.toEqual({
+        kind: "ignored",
+        reason: `terminal-${status.toLowerCase()}`,
+      });
+      expect(
+        harness.abandonedCheckoutLookupService.lookup,
+      ).not.toHaveBeenCalled();
+      expect(
+        harness.database.checkoutRecovery.updateMany,
+      ).not.toHaveBeenCalled();
+    },
+  );
 
   it("refreshes an updated DETECTED recovery before scheduling policy-delayed re-entry", async () => {
     const recovery = {
@@ -282,22 +342,31 @@ describe("CheckoutEventOrchestratorService", () => {
       admissionBlockReason: null,
     };
     const latestActivity = new Date(activityAt);
-    const harness = createHarness({ recovery, latestActivity, recoveryDelayMinutes: 45 });
+    const harness = createHarness({
+      recovery,
+      latestActivity,
+      recoveryDelayMinutes: 45,
+    });
     harness.resumeSchedule.mockImplementation(async () => {
       harness.order.push("resume-schedule");
       return "resume-1";
     });
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
+    await expect(
+      harness.service.handleCheckoutUpdatedContract(event),
+    ).resolves.toEqual({
       kind: "pending",
       outcome: "suppression-resume-scheduled",
       jobId: "resume-1",
     });
-    expect(harness.resumeSchedule).toHaveBeenCalledWith({
-      shopId: shop.id,
-      recoveryId: recovery.id,
-      trigger: `recipient-suppression-${recovery.id}-checkout-update-${latestActivity.getTime()}`,
-    }, new Date(latestActivity.getTime() + 45 * 60_000));
+    expect(harness.resumeSchedule).toHaveBeenCalledWith(
+      {
+        shopId: shop.id,
+        recoveryId: recovery.id,
+        trigger: `recipient-suppression-${recovery.id}-checkout-update-${latestActivity.getTime()}`,
+      },
+      new Date(latestActivity.getTime() + 45 * 60_000),
+    );
     expect(harness.database.checkoutRecovery.updateMany).toHaveBeenCalledWith({
       where: {
         id: recovery.id,
@@ -306,10 +375,17 @@ describe("CheckoutEventOrchestratorService", () => {
       },
       data: { lastExternalActivityAt: new Date(activityAt) },
     });
-    expect(harness.abandonedCheckoutLookupService.lookup).toHaveBeenCalledOnce();
+    expect(
+      harness.abandonedCheckoutLookupService.lookup,
+    ).toHaveBeenCalledOnce();
     expect(harness.database.$transaction).toHaveBeenCalledOnce();
-    expect(harness.database.checkoutRecovery.updateMany).toHaveBeenNthCalledWith(2, {
-      where: { id: recovery.id, status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] } },
+    expect(
+      harness.database.checkoutRecovery.updateMany,
+    ).toHaveBeenNthCalledWith(2, {
+      where: {
+        id: recovery.id,
+        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+      },
       data: {
         currency: currentCheckout.currencyCode,
         totalPrice: currentCheckout.totalPrice,
@@ -317,23 +393,31 @@ describe("CheckoutEventOrchestratorService", () => {
         lineItems: currentCheckout.lineItems,
       },
     });
-    expect(harness.order.indexOf("transaction")).toBeLessThan(harness.order.indexOf("latest-activity-read"));
+    expect(harness.order.indexOf("transaction")).toBeLessThan(
+      harness.order.indexOf("latest-activity-read"),
+    );
     expect(harness.order.lastIndexOf("activity-or-refresh-write")).toBeLessThan(
       harness.order.indexOf("resume-schedule"),
     );
-    expect(harness.recoveryPolicyResolver.resolve).toHaveBeenCalledWith(shop.id);
+    expect(harness.recoveryPolicyResolver.resolve).toHaveBeenCalledWith(
+      shop.id,
+    );
   });
 
   it("schedules a new pending generation from durable EXPIRED recovery state", async () => {
     const expiredRecovery = { ...activeRecovery, status: "EXPIRED" };
     const harness = createHarness({ recovery: expiredRecovery });
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
+    await expect(
+      harness.service.handleCheckoutUpdatedContract(event),
+    ).resolves.toEqual({
       kind: "pending",
       outcome: "enqueued",
       jobId: "restart-1",
     });
-    expect(harness.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated).toHaveBeenCalledWith({
+    expect(
+      harness.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated,
+    ).toHaveBeenCalledWith({
       shopDomain: event.shopDomain,
       checkoutToken: event.checkoutToken,
       cartToken: expiredRecovery.cartToken,
@@ -341,14 +425,18 @@ describe("CheckoutEventOrchestratorService", () => {
       abandonedCheckoutUrl: expiredRecovery.checkoutUrl,
       activityAt,
     });
-    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
+    expect(
+      harness.abandonedCheckoutLookupService.lookup,
+    ).not.toHaveBeenCalled();
     expect(harness.database.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
 
   it("records monotonic activity before looking up and refreshing from current Shopify data", async () => {
     const harness = createHarness();
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
+    await expect(
+      harness.service.handleCheckoutUpdatedContract(event),
+    ).resolves.toEqual({
       kind: "refreshed",
       recoveryId: activeRecovery.id,
       status: activeRecovery.status,
@@ -364,7 +452,9 @@ describe("CheckoutEventOrchestratorService", () => {
       "transaction",
       "activity-or-refresh-write",
     ]);
-    expect(harness.database.checkoutRecovery.updateMany).toHaveBeenNthCalledWith(1, {
+    expect(
+      harness.database.checkoutRecovery.updateMany,
+    ).toHaveBeenNthCalledWith(1, {
       where: {
         id: activeRecovery.id,
         status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
@@ -380,8 +470,13 @@ describe("CheckoutEventOrchestratorService", () => {
       abandonedCheckoutUrl: activeRecovery.checkoutUrl,
       checkoutCreatedAt: activeRecovery.detectedAt.toISOString(),
     });
-    expect(harness.database.checkoutRecovery.updateMany).toHaveBeenNthCalledWith(2, {
-      where: { id: activeRecovery.id, status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] } },
+    expect(
+      harness.database.checkoutRecovery.updateMany,
+    ).toHaveBeenNthCalledWith(2, {
+      where: {
+        id: activeRecovery.id,
+        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+      },
       data: {
         currency: currentCheckout.currencyCode,
         totalPrice: currentCheckout.totalPrice,
@@ -392,34 +487,52 @@ describe("CheckoutEventOrchestratorService", () => {
   });
 
   it("throws provider failures after recording activity and does not refresh the recovery", async () => {
-    const harness = createHarness({ lookupOutcome: { kind: "provider-error", message: "Shopify unavailable" } });
+    const harness = createHarness({
+      lookupOutcome: { kind: "provider-error", message: "Shopify unavailable" },
+    });
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).rejects.toThrow(
+    await expect(
+      harness.service.handleCheckoutUpdatedContract(event),
+    ).rejects.toThrow(
       `Abandoned checkout provider error while refreshing recovery ${activeRecovery.id}: Shopify unavailable`,
     );
     expect(harness.database.checkoutRecovery.updateMany).toHaveBeenCalledOnce();
-    expect(harness.order.indexOf("activity-or-refresh-write")).toBeLessThan(harness.order.indexOf("shopify-lookup"));
+    expect(harness.order.indexOf("activity-or-refresh-write")).toBeLessThan(
+      harness.order.indexOf("shopify-lookup"),
+    );
   });
 
   it.each([
     ["not-found", { kind: "not-found" }],
     ["ambiguous", { kind: "ambiguous", matched: 2 }],
-    ["bounded-limit-exceeded", { kind: "bounded-limit-exceeded", candidateCount: 21 }],
-  ])("discards a %s Shopify lookup without basket refresh", async (_kind, lookupOutcome) => {
-    const harness = createHarness({ lookupOutcome });
+    [
+      "bounded-limit-exceeded",
+      { kind: "bounded-limit-exceeded", candidateCount: 21 },
+    ],
+  ])(
+    "discards a %s Shopify lookup without basket refresh",
+    async (_kind, lookupOutcome) => {
+      const harness = createHarness({ lookupOutcome });
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
-      kind: "discarded",
-      reason: `lookup-${_kind}`,
-    });
-    expect(harness.database.checkoutRecovery.updateMany).toHaveBeenCalledOnce();
-    expect(harness.database.$transaction).not.toHaveBeenCalled();
-  });
+      await expect(
+        harness.service.handleCheckoutUpdatedContract(event),
+      ).resolves.toEqual({
+        kind: "discarded",
+        reason: `lookup-${_kind}`,
+      });
+      expect(
+        harness.database.checkoutRecovery.updateMany,
+      ).toHaveBeenCalledOnce();
+      expect(harness.database.$transaction).not.toHaveBeenCalled();
+    },
+  );
 
   it("ignores a refresh whose status-guarded update loses a transition race", async () => {
     const harness = createHarness({ updatedCount: 0 });
 
-    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
+    await expect(
+      harness.service.handleCheckoutUpdatedContract(event),
+    ).resolves.toEqual({
       kind: "ignored",
       reason: "already-transitioned",
     });
@@ -434,11 +547,9 @@ describe("CheckoutEventOrchestratorService", () => {
       checkoutToken: event.checkoutToken,
     });
 
-    expect(harness.pendingRecoveryCandidateService.withCheckoutLock).toHaveBeenCalledWith(
-      shop.id,
-      event.checkoutToken,
-      expect.any(Function),
-    );
+    expect(
+      harness.pendingRecoveryCandidateService.withCheckoutLock,
+    ).toHaveBeenCalledWith(shop.id, event.checkoutToken, expect.any(Function));
     expect(harness.database.checkoutRecovery.updateMany).toHaveBeenCalledWith({
       where: {
         id: activeRecovery.id,
@@ -450,45 +561,71 @@ describe("CheckoutEventOrchestratorService", () => {
   });
 
   it("refreshes only pending cart activity without Shopify lookup or recovery creation", async () => {
-    const harness = createHarness({ pendingResult: { outcome: "cancelled", jobId: "candidate-cart" } });
+    const harness = createHarness({
+      pendingResult: { outcome: "cancelled", jobId: "candidate-cart" },
+    });
 
-    await expect(harness.service.handleCartActivityContract({
-      shopId: shop.id,
-      shopDomain: event.shopDomain,
-      cartToken: "cart-1",
-      isEmpty: true,
-      activityAt,
-    })).resolves.toEqual({ kind: "pending", outcome: "cancelled", jobId: "candidate-cart" });
-    expect(harness.pendingRecoveryCandidateService.refreshCandidateActivity).toHaveBeenCalledWith({
+    await expect(
+      harness.service.handleCartActivityContract({
+        shopId: shop.id,
+        shopDomain: event.shopDomain,
+        cartToken: "cart-1",
+        isEmpty: true,
+        activityAt,
+      }),
+    ).resolves.toEqual({
+      kind: "pending",
+      outcome: "cancelled",
+      jobId: "candidate-cart",
+    });
+    expect(
+      harness.pendingRecoveryCandidateService.refreshCandidateActivity,
+    ).toHaveBeenCalledWith({
       shopId: shop.id,
       checkoutToken: null,
       cartToken: "cart-1",
       activityAt,
       isEmpty: true,
     });
-    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
+    expect(
+      harness.abandonedCheckoutLookupService.lookup,
+    ).not.toHaveBeenCalled();
     expect(harness.findLatestRecovery).not.toHaveBeenCalled();
   });
 
   it("stops unavailable or ineligible shops before refreshing cart activity", async () => {
     const unavailable = createHarness({ shopResult: null });
-    await expect(unavailable.service.handleCartActivityContract({
-      shopId: shop.id,
-      shopDomain: event.shopDomain,
-      cartToken: "cart-1",
-      isEmpty: false,
-      activityAt,
-    })).resolves.toEqual({ kind: "ignored", reason: "shop-unavailable" });
-    expect(unavailable.pendingRecoveryCandidateService.refreshCandidateActivity).not.toHaveBeenCalled();
+    await expect(
+      unavailable.service.handleCartActivityContract({
+        shopId: shop.id,
+        shopDomain: event.shopDomain,
+        cartToken: "cart-1",
+        isEmpty: false,
+        activityAt,
+      }),
+    ).resolves.toEqual({ kind: "ignored", reason: "shop-unavailable" });
+    expect(
+      unavailable.pendingRecoveryCandidateService.refreshCandidateActivity,
+    ).not.toHaveBeenCalled();
 
-    const denied = createHarness({ eligibility: { allowed: false, shopId: shop.id, reason: "CONTRACT_REQUIRED" } });
-    await expect(denied.service.handleCartActivityContract({
-      shopId: shop.id,
-      shopDomain: event.shopDomain,
-      cartToken: "cart-1",
-      isEmpty: false,
-      activityAt,
-    })).resolves.toEqual({ kind: "ignored", reason: "contract-required" });
-    expect(denied.pendingRecoveryCandidateService.refreshCandidateActivity).not.toHaveBeenCalled();
+    const denied = createHarness({
+      eligibility: {
+        allowed: false,
+        shopId: shop.id,
+        reason: "CONTRACT_REQUIRED",
+      },
+    });
+    await expect(
+      denied.service.handleCartActivityContract({
+        shopId: shop.id,
+        shopDomain: event.shopDomain,
+        cartToken: "cart-1",
+        isEmpty: false,
+        activityAt,
+      }),
+    ).resolves.toEqual({ kind: "ignored", reason: "contract-required" });
+    expect(
+      denied.pendingRecoveryCandidateService.refreshCandidateActivity,
+    ).not.toHaveBeenCalled();
   });
 });

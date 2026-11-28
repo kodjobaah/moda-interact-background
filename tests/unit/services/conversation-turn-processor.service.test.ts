@@ -1,24 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RenderConversationResponseInput, WrapperRenderResult } from "../../../src/services/conversation-wrappers/contracts.js";
+import type {
+  RenderConversationResponseInput,
+  WrapperRenderResult,
+} from "../../../src/services/conversation-wrappers/contracts.js";
 
 vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
-vi.mock(
-  "../../../src/services/outbound-whatsapp-admission.service.js",
-  () => ({
-    runCommerceAgentAfterAdmission: async (input: any) => {
-      if (input.admission.terminal) {
-        await input.sendPreparedText({
-          ...input.admission,
-          to: input.to,
-          text: "terminal response",
-        });
-        return null;
-      }
-      const result = await input.runAgent(input.context);
-      return result;
-    },
-  }),
-);
+vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
+  runCommerceAgentAfterAdmission: async (input: any) => {
+    if (input.admission.terminal) {
+      await input.sendPreparedText({
+        ...input.admission,
+        to: input.to,
+        text: "terminal response",
+      });
+      return null;
+    }
+    const result = await input.runAgent(input.context);
+    return result;
+  },
+}));
 
 import {
   ConversationTurnProcessor,
@@ -86,9 +86,15 @@ function harness(overrides: Partial<any> = {}) {
     admitSettledTurn: vi.fn().mockResolvedValue({ kind: "allowed" }),
   };
   const aiWrapper = {
-    renderConversationResponse: vi.fn(async (input: RenderConversationResponseInput): Promise<WrapperRenderResult> => ({
-      kind: "no-wrapper" as const, body: input.responseBody, reason: "NOT_CONFIGURED" as const,
-    })),
+    renderConversationResponse: vi.fn(
+      async (
+        input: RenderConversationResponseInput,
+      ): Promise<WrapperRenderResult> => ({
+        kind: "no-wrapper" as const,
+        body: input.responseBody,
+        reason: "NOT_CONFIGURED" as const,
+      }),
+    ),
   };
   const runAgent = vi.fn().mockResolvedValue({
     replyText: "reply",
@@ -112,9 +118,9 @@ function harness(overrides: Partial<any> = {}) {
       conversationMaxSettleWindowMs: 10_000,
     }),
   };
-  const loadTurn=vi.fn().mockResolvedValue(loaded);
+  const loadTurn = vi.fn().mockResolvedValue(loaded);
   const processor = new ConversationTurnProcessor({
-    currentRouteActive:overrides.currentRouteActive,
+    currentRouteActive: overrides.currentRouteActive,
     queue,
     conversation,
     admission,
@@ -144,7 +150,13 @@ function harness(overrides: Partial<any> = {}) {
   };
 }
 
-const facadeContext = { harness, state, first, ConversationTurnProcessor, PROCESSING_LEASE_MS };
+const facadeContext = {
+  harness,
+  state,
+  first,
+  ConversationTurnProcessor,
+  PROCESSING_LEASE_MS,
+};
 
 // Type-only import by case modules; no runtime cycle.
 export type ConversationTurnFacadeContext = typeof facadeContext;
@@ -162,11 +174,17 @@ describe("ConversationTurnProcessor", () => {
 
 // Preserve the original standalone regression outside the describe block.
 it("does not persist model language or send when the version/lease is stale", async () => {
- const test = harness();test.conversation.hasChanged
-  .mockResolvedValueOnce(false)
-  .mockResolvedValueOnce(true);
- await test.processor.process({conversationId:"conversation-1",observedVersion:3});
- expect(test.conversation.applyDetectedLanguage).not.toHaveBeenCalled();expect(test.admission.sendPreparedText).not.toHaveBeenCalled();expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
+  const test = harness();
+  test.conversation.hasChanged
+    .mockResolvedValueOnce(false)
+    .mockResolvedValueOnce(true);
+  await test.processor.process({
+    conversationId: "conversation-1",
+    observedVersion: 3,
+  });
+  expect(test.conversation.applyDetectedLanguage).not.toHaveBeenCalled();
+  expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
+  expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
 });
 
 it("re-enqueues a newer inbound before reserving an AGENT outbound", async () => {
@@ -176,11 +194,17 @@ it("re-enqueues a newer inbound before reserving an AGENT outbound", async () =>
     .mockResolvedValueOnce(state())
     .mockResolvedValueOnce(state({ inboundVersion: 4 }));
 
-  await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+  await test.processor.process({
+    conversationId: "conversation-1",
+    observedVersion: 3,
+  });
 
   expect(test.admission.reserve).not.toHaveBeenCalled();
   expect(test.runAgent).not.toHaveBeenCalled();
-  expect(test.conversation.releaseTurn).toHaveBeenCalledWith("conversation-1", 3);
+  expect(test.conversation.releaseTurn).toHaveBeenCalledWith(
+    "conversation-1",
+    3,
+  );
   expect(test.queue.add).toHaveBeenCalledWith(
     "process-conversation-turn",
     { conversationId: "conversation-1", observedVersion: 4 },
@@ -190,27 +214,49 @@ it("re-enqueues a newer inbound before reserving an AGENT outbound", async () =>
 
 it("suppresses a recovery AI turn in HUMAN mode without losing customer ingress", async () => {
   const test = harness();
-    test.conversation.getTurnState.mockResolvedValue(state({
+  test.conversation.getTurnState.mockResolvedValue(
+    state({
       pendingAiControlRevision: 3,
       controlRevision: 3,
-    }));
+    }),
+  );
   const ownership = {
-    readTurnOwnership: vi.fn().mockResolvedValue({ conversationId: "conversation-1", shopId: "shop-1", recoveryId: "recovery", mode: "HUMAN", revision: 3 }),
-    checkAutomatedTurn: vi.fn().mockResolvedValue({ kind: "suppressed", reason: "human-controlled", phase: "before-agent" }),
+    readTurnOwnership: vi.fn().mockResolvedValue({
+      conversationId: "conversation-1",
+      shopId: "shop-1",
+      recoveryId: "recovery",
+      mode: "HUMAN",
+      revision: 3,
+    }),
+    checkAutomatedTurn: vi.fn().mockResolvedValue({
+      kind: "suppressed",
+      reason: "human-controlled",
+      phase: "before-agent",
+    }),
   };
   const processor = new ConversationTurnProcessor({
-    queue: test.queue, conversation: test.conversation,
-    admission: test.admission, abuseAdmission: test.abuseAdmission,
+    queue: test.queue,
+    conversation: test.conversation,
+    admission: test.admission,
+    abuseAdmission: test.abuseAdmission,
     ownership,
     loadTurn: vi.fn().mockResolvedValue(test.loaded),
-    runAgent: test.runAgent, aiWrapper: test.aiWrapper, getResult: (result: any) => result,
+    runAgent: test.runAgent,
+    aiWrapper: test.aiWrapper,
+    getResult: (result: any) => result,
     now: () => new Date(first.getTime() + 20_000),
-    runtimeConfig: test.runtimeConfig, logger: test.logger,
+    runtimeConfig: test.runtimeConfig,
+    logger: test.logger,
   });
-  await processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+  await processor.process({
+    conversationId: "conversation-1",
+    observedVersion: 3,
+  });
   expect(ownership.checkAutomatedTurn).toHaveBeenCalledWith({
-    conversationId: "conversation-1", expectedRevision: 3,
-    phase: "before-agent", shopId: "shop-1",
+    conversationId: "conversation-1",
+    expectedRevision: 3,
+    phase: "before-agent",
+    shopId: "shop-1",
   });
   expect(test.runAgent).not.toHaveBeenCalled();
   expect(test.admission.reserve).not.toHaveBeenCalled();
@@ -219,60 +265,195 @@ it("suppresses a recovery AI turn in HUMAN mode without losing customer ingress"
 
 it("does not send a model result after HUMAN takeover and subsequent AI resume", async () => {
   const test = harness();
-  test.conversation.getTurnState.mockResolvedValue(state({
-    pendingAiControlRevision: 2,
-    controlRevision: 2,
-  }));
+  test.conversation.getTurnState.mockResolvedValue(
+    state({
+      pendingAiControlRevision: 2,
+      controlRevision: 2,
+    }),
+  );
   const ownership = {
-    readTurnOwnership: vi.fn().mockResolvedValue({ conversationId: "conversation-1", shopId: "shop-1", recoveryId: "recovery", mode: "AI", revision: 2 }),
-    checkAutomatedTurn: vi.fn().mockResolvedValueOnce({ kind: "allowed", phase: "before-agent" })
+    readTurnOwnership: vi.fn().mockResolvedValue({
+      conversationId: "conversation-1",
+      shopId: "shop-1",
+      recoveryId: "recovery",
+      mode: "AI",
+      revision: 2,
+    }),
+    checkAutomatedTurn: vi
+      .fn()
+      .mockResolvedValueOnce({ kind: "allowed", phase: "before-agent" })
       .mockResolvedValueOnce({ kind: "allowed", phase: "before-agent" })
       .mockResolvedValueOnce({ kind: "allowed", phase: "after-await" })
-      .mockResolvedValueOnce({ kind: "suppressed", reason: "stale-control-revision", phase: "after-await" }),
+      .mockResolvedValueOnce({
+        kind: "suppressed",
+        reason: "stale-control-revision",
+        phase: "after-await",
+      }),
   };
   const processor = new ConversationTurnProcessor({
-    queue: test.queue, conversation: test.conversation,
-    admission: test.admission, abuseAdmission: test.abuseAdmission,
-    ownership, loadTurn: vi.fn().mockResolvedValue(test.loaded),
-    runAgent: test.runAgent, aiWrapper: test.aiWrapper, getResult: (result: any) => result,
+    queue: test.queue,
+    conversation: test.conversation,
+    admission: test.admission,
+    abuseAdmission: test.abuseAdmission,
+    ownership,
+    loadTurn: vi.fn().mockResolvedValue(test.loaded),
+    runAgent: test.runAgent,
+    aiWrapper: test.aiWrapper,
+    getResult: (result: any) => result,
     now: () => new Date(first.getTime() + 20_000),
-    runtimeConfig: test.runtimeConfig, logger: test.logger,
+    runtimeConfig: test.runtimeConfig,
+    logger: test.logger,
   });
-  await processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+  await processor.process({
+    conversationId: "conversation-1",
+    observedVersion: 3,
+  });
   expect(test.runAgent).toHaveBeenCalledOnce();
   expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
   expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
   expect(ownership.checkAutomatedTurn).toHaveBeenNthCalledWith(4, {
-    conversationId: "conversation-1", expectedRevision: 2, phase: "after-await", shopId: "shop-1",
+    conversationId: "conversation-1",
+    expectedRevision: 2,
+    phase: "after-await",
+    shopId: "shop-1",
   });
 });
 
-it('does not dispatch or replace context when media composition outlives the host turn signal',async()=>{
- const test=harness();const controller=new AbortController();
- test.runAgent.mockResolvedValue({replyText:'A grounded tree answer',commercePresentation:{signal:controller.signal}});
- test.aiWrapper.renderConversationResponse.mockImplementation(async()=>{controller.abort();return {kind:'no-wrapper',reason:'NOT_CONFIGURED',body:'A grounded tree answer',deliveryPlan:{schemaVersion:1,kind:'TEXT',body:'A grounded tree answer'}};});
- await test.processor.process({conversationId:'conversation-1',observedVersion:3});
- expect(test.admission.sendPreparedText).not.toHaveBeenCalled();expect(test.admission.failPrepared).toHaveBeenCalledWith('message-1');
+it("does not dispatch or replace context when media composition outlives the host turn signal", async () => {
+  const test = harness();
+  const controller = new AbortController();
+  test.runAgent.mockResolvedValue({
+    replyText: "A grounded tree answer",
+    commercePresentation: { signal: controller.signal },
+  });
+  test.aiWrapper.renderConversationResponse.mockImplementation(async () => {
+    controller.abort();
+    return {
+      kind: "no-wrapper",
+      reason: "NOT_CONFIGURED",
+      body: "A grounded tree answer",
+      deliveryPlan: {
+        schemaVersion: 1,
+        kind: "TEXT",
+        body: "A grounded tree answer",
+      },
+    };
+  });
+  await test.processor.process({
+    conversationId: "conversation-1",
+    observedVersion: 3,
+  });
+  expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
+  expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
 });
 
-it('a HUMAN takeover while handback moderation awaits prevents model and provider work',async()=>{
- const t=harness();t.conversation.getTurnState.mockResolvedValue(state({pendingAiControlRevision:3,controlRevision:3,controlMode:'AI'}));let mode='AI';
- const ownership={readTurnOwnership:vi.fn(async()=>({conversationId:'conversation-1',shopId:'shop-1',recoveryId:null,mode,revision:3})),checkAutomatedTurn:vi.fn(async()=>mode==='AI'?{kind:'allowed',ownership:{mode:'AI',revision:3}}:{kind:'suppressed',reason:'human-controlled',phase:'before-agent'})};
- const processor=new ConversationTurnProcessor({queue:t.queue,conversation:t.conversation,admission:t.admission,abuseAdmission:t.abuseAdmission,ownership:ownership as never,moderation:{moderatePending:async(_id,_pending,deadline)=>{expect(deadline).toEqual(new Date(first.getTime()+20000+PROCESSING_LEASE_MS));mode='HUMAN';return 'allowed';}},loadTurn:vi.fn().mockResolvedValue(t.loaded),runAgent:t.runAgent,aiWrapper:t.aiWrapper,getResult:(r:any)=>r,now:()=>new Date(first.getTime()+20000),runtimeConfig:t.runtimeConfig,logger:t.logger});
- await processor.process({conversationId:'conversation-1',observedVersion:3});expect(t.runAgent).not.toHaveBeenCalled();expect(t.admission.reserve).not.toHaveBeenCalled();expect(t.admission.sendPreparedText).not.toHaveBeenCalled();
+it("a HUMAN takeover while handback moderation awaits prevents model and provider work", async () => {
+  const t = harness();
+  t.conversation.getTurnState.mockResolvedValue(
+    state({
+      pendingAiControlRevision: 3,
+      controlRevision: 3,
+      controlMode: "AI",
+    }),
+  );
+  let mode = "AI";
+  const ownership = {
+    readTurnOwnership: vi.fn(async () => ({
+      conversationId: "conversation-1",
+      shopId: "shop-1",
+      recoveryId: null,
+      mode,
+      revision: 3,
+    })),
+    checkAutomatedTurn: vi.fn(async () =>
+      mode === "AI"
+        ? { kind: "allowed", ownership: { mode: "AI", revision: 3 } }
+        : {
+            kind: "suppressed",
+            reason: "human-controlled",
+            phase: "before-agent",
+          },
+    ),
+  };
+  const processor = new ConversationTurnProcessor({
+    queue: t.queue,
+    conversation: t.conversation,
+    admission: t.admission,
+    abuseAdmission: t.abuseAdmission,
+    ownership: ownership as never,
+    moderation: {
+      moderatePending: async (_id, _pending, deadline) => {
+        expect(deadline).toEqual(
+          new Date(first.getTime() + 20000 + PROCESSING_LEASE_MS),
+        );
+        mode = "HUMAN";
+        return "allowed";
+      },
+    },
+    loadTurn: vi.fn().mockResolvedValue(t.loaded),
+    runAgent: t.runAgent,
+    aiWrapper: t.aiWrapper,
+    getResult: (r: any) => r,
+    now: () => new Date(first.getTime() + 20000),
+    runtimeConfig: t.runtimeConfig,
+    logger: t.logger,
+  });
+  await processor.process({
+    conversationId: "conversation-1",
+    observedVersion: 3,
+  });
+  expect(t.runAgent).not.toHaveBeenCalled();
+  expect(t.admission.reserve).not.toHaveBeenCalled();
+  expect(t.admission.sendPreparedText).not.toHaveBeenCalled();
 });
 
-it('carries the original AI claim deadline into optional media after a slow model and respects an earlier host deadline',async()=>{
- let current=first.getTime()+20000;const t=harness({now:()=>new Date(current)}),claimedAt=current,hostDeadline=claimedAt+90000;
- t.runAgent.mockImplementation(async()=>{current+=60000;return {replyText:'Grounded answer',commercePresentation:{deadlineAt:hostDeadline}};});
- await t.processor.process({conversationId:'conversation-1',observedVersion:3});expect(t.aiWrapper.renderConversationResponse).toHaveBeenCalledWith(expect.objectContaining({mediaDeadlineAt:hostDeadline}));
+it("carries the original AI claim deadline into optional media after a slow model and respects an earlier host deadline", async () => {
+  let current = first.getTime() + 20000;
+  const t = harness({ now: () => new Date(current) }),
+    claimedAt = current,
+    hostDeadline = claimedAt + 90000;
+  t.runAgent.mockImplementation(async () => {
+    current += 60000;
+    return {
+      replyText: "Grounded answer",
+      commercePresentation: { deadlineAt: hostDeadline },
+    };
+  });
+  await t.processor.process({
+    conversationId: "conversation-1",
+    observedVersion: 3,
+  });
+  expect(t.aiWrapper.renderConversationResponse).toHaveBeenCalledWith(
+    expect.objectContaining({ mediaDeadlineAt: hostDeadline }),
+  );
 });
 
-describe('sender ownership before delayed model work',()=>{
- it('rejects expired/released owner before state, context, capacity or model access',async()=>{
-  const currentRouteActive=vi.fn(async()=>false),f=harness({currentRouteActive});await f.processor.process({conversationId:'conversation-1',observedVersion:3});expect(f.conversation.getTurnState).not.toHaveBeenCalled();expect(f.loadTurn).not.toHaveBeenCalled();expect(f.admission.reserve).not.toHaveBeenCalled();expect(f.runAgent).not.toHaveBeenCalled();
- });
- it('rechecks owner after turn claim before context or model',async()=>{
-  const currentRouteActive=vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false),f=harness({currentRouteActive});await f.processor.process({conversationId:'conversation-1',observedVersion:3});expect(f.conversation.claimTurn).toHaveBeenCalled();expect(f.loadTurn).not.toHaveBeenCalled();expect(f.runAgent).not.toHaveBeenCalled();expect(f.admission.reserve).not.toHaveBeenCalled();
- });
+describe("sender ownership before delayed model work", () => {
+  it("rejects expired/released owner before state, context, capacity or model access", async () => {
+    const currentRouteActive = vi.fn(async () => false),
+      f = harness({ currentRouteActive });
+    await f.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
+    expect(f.conversation.getTurnState).not.toHaveBeenCalled();
+    expect(f.loadTurn).not.toHaveBeenCalled();
+    expect(f.admission.reserve).not.toHaveBeenCalled();
+    expect(f.runAgent).not.toHaveBeenCalled();
+  });
+  it("rechecks owner after turn claim before context or model", async () => {
+    const currentRouteActive = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false),
+      f = harness({ currentRouteActive });
+    await f.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
+    expect(f.conversation.claimTurn).toHaveBeenCalled();
+    expect(f.loadTurn).not.toHaveBeenCalled();
+    expect(f.runAgent).not.toHaveBeenCalled();
+    expect(f.admission.reserve).not.toHaveBeenCalled();
+  });
 });

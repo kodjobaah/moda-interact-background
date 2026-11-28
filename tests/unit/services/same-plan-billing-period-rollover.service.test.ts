@@ -48,7 +48,14 @@ const provider = {
 function transactionHarness(overrides: Record<string, unknown> = {}) {
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
-    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }, { eventHandle: "pack-meter" }] }) },
+    merchantPricingPlan: {
+      findUnique: vi.fn().mockResolvedValue({
+        usageEvents: [
+          { eventHandle: "recovery-meter" },
+          { eventHandle: "pack-meter" },
+        ],
+      }),
+    },
     subscription: {
       findUnique: vi.fn().mockResolvedValue({
         id: "subscription-1",
@@ -80,53 +87,99 @@ function transactionHarness(overrides: Record<string, unknown> = {}) {
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     usageEvent: { updateMany: vi.fn() },
-    usageReservation: { aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }), updateMany: vi.fn() },
+    usageReservation: {
+      aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }),
+      updateMany: vi.fn(),
+    },
     ...overrides,
   };
   return transaction;
 }
 
 describe("SamePlanBillingPeriodRolloverService", () => {
-  it.each(["FROZEN", "NO_CONTRACT", "CANCELED"])("does not transition %s subscriptions", async (status) => {
-    const transaction = transactionHarness({
-      subscription: { ...transactionHarness().subscription, findUnique: vi.fn().mockResolvedValue({
-        id: "subscription-1",
+  it.each(["FROZEN", "NO_CONTRACT", "CANCELED"])(
+    "does not transition %s subscriptions",
+    async (status) => {
+      const transaction = transactionHarness({
+        subscription: {
+          ...transactionHarness().subscription,
+          findUnique: vi.fn().mockResolvedValue({
+            id: "subscription-1",
+            shopId: "shop-1",
+            planId: "plan-paid",
+            status,
+            billingPeriodId: "period-old",
+            currentPeriodStart: currentStart,
+            currentPeriodEnd: currentEnd,
+            nextReconcileAt: null,
+            billingPeriod: {
+              id: "period-old",
+              periodStart: currentStart,
+              periodEnd: currentEnd,
+              status: "OPEN",
+            },
+          }),
+        },
+      });
+      const database = {
+        $transaction: vi.fn(
+          async (callback: (value: typeof transaction) => unknown) =>
+            callback(transaction),
+        ),
+      };
+
+      const result = await new SamePlanBillingPeriodRolloverService(
+        database as never,
+      ).transition({
         shopId: "shop-1",
-        planId: "plan-paid",
-        status,
-        billingPeriodId: "period-old",
-        currentPeriodStart: currentStart,
-        currentPeriodEnd: currentEnd,
-        nextReconcileAt: null,
-        billingPeriod: { id: "period-old", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
-      }) },
-    });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+        subscriptionId: "subscription-1",
+        provider,
+        plan,
+        now: new Date("2026-10-01T00:00:01.000Z"),
+      });
 
-    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
-      shopId: "shop-1",
-      subscriptionId: "subscription-1",
-      provider,
-      plan,
-      now: new Date("2026-10-01T00:00:01.000Z"),
-    });
-
-    expect(result).toEqual({ kind: "not-applicable" });
-    expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
-    expect(transaction.subscription.update).not.toHaveBeenCalled();
-  });
-
+      expect(result).toEqual({ kind: "not-applicable" });
+      expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
+      expect(transaction.subscription.update).not.toHaveBeenCalled();
+    },
+  );
 
   it("rolls over a Paid plan without requiring its optional App Events reporting handle", async () => {
     const transaction = transactionHarness();
-    transaction.merchantPricingPlan.findUnique.mockResolvedValue({ usageEvents: [{ eventHandle: "pack-meter" }] });
+    transaction.merchantPricingPlan.findUnique.mockResolvedValue({
+      usageEvents: [{ eventHandle: "pack-meter" }],
+    });
     transaction.billingPeriodEntitlementCounter.findUnique
-      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 0, version: 1 })
-      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 100, version: 2 });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
-    const providerWithoutReportingHandle = { ...provider, usageEventHandles: ["pack-meter"] };
+      .mockResolvedValueOnce({
+        id: "counter-old",
+        grantedQuantity: 100,
+        committedQuantity: 0,
+        reservedQuantity: 0,
+        forfeitedQuantity: 0,
+        version: 1,
+      })
+      .mockResolvedValueOnce({
+        id: "counter-old",
+        grantedQuantity: 100,
+        committedQuantity: 0,
+        reservedQuantity: 0,
+        forfeitedQuantity: 100,
+        version: 2,
+      });
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
+    const providerWithoutReportingHandle = {
+      ...provider,
+      usageEventHandles: ["pack-meter"],
+    };
 
-    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    const result = await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider: providerWithoutReportingHandle,
@@ -135,13 +188,23 @@ describe("SamePlanBillingPeriodRolloverService", () => {
     });
 
     expect(result.kind).toBe("transitioned");
-    expect(transaction.billingPeriodEntitlementCounter.findUnique).toHaveBeenCalledTimes(2);
-    expect(transaction.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ forfeitedQuantity: { increment: 100 } }),
-    }));
-    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ unmappedShopifyUsageEventHandles: [] }),
-    }));
+    expect(
+      transaction.billingPeriodEntitlementCounter.findUnique,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      transaction.billingPeriodEntitlementCounter.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          forfeitedQuantity: { increment: 100 },
+        }),
+      }),
+    );
+    expect(transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ unmappedShopifyUsageEventHandles: [] }),
+      }),
+    );
   });
 
   it("fails closed when a successor has incompatible canonical identity", async () => {
@@ -163,33 +226,47 @@ describe("SamePlanBillingPeriodRolloverService", () => {
         }),
       },
     });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await expect(new SamePlanBillingPeriodRolloverService(database as never).transition({
-      shopId: "shop-1",
-      subscriptionId: "subscription-1",
-      provider,
-      plan,
-      now: new Date("2026-10-01T00:00:01.000Z"),
-    })).rejects.toThrow("incompatible successor");
+    await expect(
+      new SamePlanBillingPeriodRolloverService(database as never).transition({
+        shopId: "shop-1",
+        subscriptionId: "subscription-1",
+        provider,
+        plan,
+        now: new Date("2026-10-01T00:00:01.000Z"),
+      }),
+    ).rejects.toThrow("incompatible successor");
     expect(transaction.subscription.update).not.toHaveBeenCalled();
   });
 
   it("fails closed for an overlapping non-identical provider cycle", async () => {
     const transaction = transactionHarness();
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await expect(new SamePlanBillingPeriodRolloverService(database as never).transition({
-      shopId: "shop-1",
-      subscriptionId: "subscription-1",
-      provider: {
-        ...provider,
-        currentPeriodStart: new Date("2026-09-15T00:00:00.000Z"),
-        currentPeriodEnd: new Date("2026-10-15T00:00:00.000Z"),
-      },
-      plan,
-      now: new Date("2026-10-01T00:00:01.000Z"),
-    })).rejects.toThrow("overlaps");
+    await expect(
+      new SamePlanBillingPeriodRolloverService(database as never).transition({
+        shopId: "shop-1",
+        subscriptionId: "subscription-1",
+        provider: {
+          ...provider,
+          currentPeriodStart: new Date("2026-09-15T00:00:00.000Z"),
+          currentPeriodEnd: new Date("2026-10-15T00:00:00.000Z"),
+        },
+        plan,
+        now: new Date("2026-10-01T00:00:01.000Z"),
+      }),
+    ).rejects.toThrow("overlaps");
     expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
     expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
     expect(transaction.subscription.update).not.toHaveBeenCalled();
@@ -214,17 +291,26 @@ describe("SamePlanBillingPeriodRolloverService", () => {
         }),
       },
     });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await expect(new SamePlanBillingPeriodRolloverService(database as never).transition({
-      shopId: "shop-1",
-      subscriptionId: "subscription-1",
-      provider,
-      plan,
-      now: new Date("2026-10-01T00:00:01.000Z"),
-    })).rejects.toThrow("closed successor");
+    await expect(
+      new SamePlanBillingPeriodRolloverService(database as never).transition({
+        shopId: "shop-1",
+        subscriptionId: "subscription-1",
+        provider,
+        plan,
+        now: new Date("2026-10-01T00:00:01.000Z"),
+      }),
+    ).rejects.toThrow("closed successor");
     expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
-    expect(transaction.billingPeriodEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expect(
+      transaction.billingPeriodEntitlementCounter.upsert,
+    ).not.toHaveBeenCalled();
     expect(transaction.subscription.update).not.toHaveBeenCalled();
   });
 
@@ -247,10 +333,19 @@ describe("SamePlanBillingPeriodRolloverService", () => {
         forfeitedQuantity: 80,
         version: 2,
       });
-    transaction.usageReservation.aggregate.mockResolvedValue({ _sum: { quantity: 10 } });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    transaction.usageReservation.aggregate.mockResolvedValue({
+      _sum: { quantity: 10 },
+    });
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider,
@@ -258,15 +353,26 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       now: new Date("2026-10-01T00:00:01.000Z"),
     });
 
-    expect(transaction.usageReservation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: { status: "RELEASED", releaseReason: "PERIOD_CLOSED" },
-    }));
-    expect(transaction.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ reservedQuantity: { decrement: 10 }, forfeitedQuantity: { increment: 80 } }),
-    }));
-    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "CLOSED" }),
-    }));
+    expect(transaction.usageReservation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { status: "RELEASED", releaseReason: "PERIOD_CLOSED" },
+      }),
+    );
+    expect(
+      transaction.billingPeriodEntitlementCounter.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reservedQuantity: { decrement: 10 },
+          forfeitedQuantity: { increment: 80 },
+        }),
+      }),
+    );
+    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "CLOSED" }),
+      }),
+    );
   });
 
   it("aborts before releasing or closing when reservation aggregate mismatches the counter", async () => {
@@ -279,16 +385,25 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       forfeitedQuantity: 0,
       version: 1,
     });
-    transaction.usageReservation.aggregate.mockResolvedValue({ _sum: { quantity: 9 } });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    transaction.usageReservation.aggregate.mockResolvedValue({
+      _sum: { quantity: 9 },
+    });
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await expect(new SamePlanBillingPeriodRolloverService(database as never).transition({
-      shopId: "shop-1",
-      subscriptionId: "subscription-1",
-      provider,
-      plan,
-      now: new Date("2026-10-01T00:00:01.000Z"),
-    })).rejects.toThrow("counter is inconsistent");
+    await expect(
+      new SamePlanBillingPeriodRolloverService(database as never).transition({
+        shopId: "shop-1",
+        subscriptionId: "subscription-1",
+        provider,
+        plan,
+        now: new Date("2026-10-01T00:00:01.000Z"),
+      }),
+    ).rejects.toThrow("counter is inconsistent");
 
     expect(transaction.usageReservation.updateMany).not.toHaveBeenCalled();
     expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
@@ -299,14 +414,37 @@ describe("SamePlanBillingPeriodRolloverService", () => {
   it("moves only old PENDING and RETRYABLE events to bounded attention", async () => {
     const transaction = transactionHarness();
     transaction.subscription.findUnique.mockResolvedValue({
-      id: "subscription-1", shopId: "shop-1", planId: "plan-free", status: "ACTIVE", billingPeriodId: "period-old",
-      currentPeriodStart: currentStart, currentPeriodEnd: currentEnd, nextReconcileAt: null,
-      billingPeriod: { id: "period-old", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
+      id: "subscription-1",
+      shopId: "shop-1",
+      planId: "plan-free",
+      status: "ACTIVE",
+      billingPeriodId: "period-old",
+      currentPeriodStart: currentStart,
+      currentPeriodEnd: currentEnd,
+      nextReconcileAt: null,
+      billingPeriod: {
+        id: "period-old",
+        periodStart: currentStart,
+        periodEnd: currentEnd,
+        status: "OPEN",
+      },
     });
-    const freeProvider = { ...provider, planHandle: "free-2026", usageEventHandles: [], currentPeriodStart: successorStart };
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const freeProvider = {
+      ...provider,
+      planHandle: "free-2026",
+      usageEventHandles: [],
+      currentPeriodStart: successorStart,
+    };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider: freeProvider,
@@ -315,7 +453,10 @@ describe("SamePlanBillingPeriodRolloverService", () => {
     });
 
     expect(transaction.usageEvent.updateMany).toHaveBeenCalledWith({
-      where: { billingPeriodId: "period-old", shopifyReportState: { in: ["PENDING", "RETRYABLE"] } },
+      where: {
+        billingPeriodId: "period-old",
+        shopifyReportState: { in: ["PENDING", "RETRYABLE"] },
+      },
       data: expect.objectContaining({
         shopifyReportState: "NEEDS_ATTENTION",
         nextReportAt: null,
@@ -327,14 +468,37 @@ describe("SamePlanBillingPeriodRolloverService", () => {
   it("does not overwrite old REPORTED or IN_FLIGHT events during rollover", async () => {
     const transaction = transactionHarness();
     transaction.subscription.findUnique.mockResolvedValue({
-      id: "subscription-1", shopId: "shop-1", planId: "plan-free", status: "ACTIVE", billingPeriodId: "period-old",
-      currentPeriodStart: currentStart, currentPeriodEnd: currentEnd, nextReconcileAt: null,
-      billingPeriod: { id: "period-old", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
+      id: "subscription-1",
+      shopId: "shop-1",
+      planId: "plan-free",
+      status: "ACTIVE",
+      billingPeriodId: "period-old",
+      currentPeriodStart: currentStart,
+      currentPeriodEnd: currentEnd,
+      nextReconcileAt: null,
+      billingPeriod: {
+        id: "period-old",
+        periodStart: currentStart,
+        periodEnd: currentEnd,
+        status: "OPEN",
+      },
     });
-    const freeProvider = { ...provider, planHandle: "free-2026", usageEventHandles: [], currentPeriodStart: successorStart };
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const freeProvider = {
+      ...provider,
+      planHandle: "free-2026",
+      usageEventHandles: [],
+      currentPeriodStart: successorStart,
+    };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider: freeProvider,
@@ -348,7 +512,11 @@ describe("SamePlanBillingPeriodRolloverService", () => {
   });
 
   it("leaves an old pack purchase REQUESTED when its event is closed before reporting", async () => {
-    const purchase = { status: "REQUESTED", currentAmount: 0, activatedAt: null };
+    const purchase = {
+      status: "REQUESTED",
+      currentAmount: 0,
+      activatedAt: null,
+    };
     const transaction = transactionHarness({
       recoveryCreditPurchase: {
         findUnique: vi.fn().mockResolvedValue(purchase),
@@ -356,14 +524,37 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       },
     });
     transaction.subscription.findUnique.mockResolvedValue({
-      id: "subscription-1", shopId: "shop-1", planId: "plan-free", status: "ACTIVE", billingPeriodId: "period-old",
-      currentPeriodStart: currentStart, currentPeriodEnd: currentEnd, nextReconcileAt: null,
-      billingPeriod: { id: "period-old", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
+      id: "subscription-1",
+      shopId: "shop-1",
+      planId: "plan-free",
+      status: "ACTIVE",
+      billingPeriodId: "period-old",
+      currentPeriodStart: currentStart,
+      currentPeriodEnd: currentEnd,
+      nextReconcileAt: null,
+      billingPeriod: {
+        id: "period-old",
+        periodStart: currentStart,
+        periodEnd: currentEnd,
+        status: "OPEN",
+      },
     });
-    const freeProvider = { ...provider, planHandle: "free-2026", usageEventHandles: [], currentPeriodStart: successorStart };
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const freeProvider = {
+      ...provider,
+      planHandle: "free-2026",
+      usageEventHandles: [],
+      currentPeriodStart: successorStart,
+    };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider: freeProvider,
@@ -371,18 +562,43 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       now: new Date("2026-10-01T00:00:01.000Z"),
     });
 
-    expect(purchase).toEqual({ status: "REQUESTED", currentAmount: 0, activatedAt: null });
+    expect(purchase).toEqual({
+      status: "REQUESTED",
+      currentAmount: 0,
+      activatedAt: null,
+    });
     expect(transaction.recoveryCreditPurchase.update).not.toHaveBeenCalled();
   });
 
   it("creates an exact Paid successor snapshot and included grant", async () => {
     const transaction = transactionHarness();
     transaction.billingPeriodEntitlementCounter.findUnique
-      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 0, version: 1 })
-      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 100, version: 2 });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+      .mockResolvedValueOnce({
+        id: "counter-old",
+        grantedQuantity: 100,
+        committedQuantity: 0,
+        reservedQuantity: 0,
+        forfeitedQuantity: 0,
+        version: 1,
+      })
+      .mockResolvedValueOnce({
+        id: "counter-old",
+        grantedQuantity: 100,
+        committedQuantity: 0,
+        reservedQuantity: 0,
+        forfeitedQuantity: 100,
+        version: 2,
+      });
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider,
@@ -433,12 +649,33 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       },
     });
     transaction.billingPeriodEntitlementCounter.findUnique
-      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 0, version: 1 })
-      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 100, version: 2 })
+      .mockResolvedValueOnce({
+        id: "counter-old",
+        grantedQuantity: 100,
+        committedQuantity: 0,
+        reservedQuantity: 0,
+        forfeitedQuantity: 0,
+        version: 1,
+      })
+      .mockResolvedValueOnce({
+        id: "counter-old",
+        grantedQuantity: 100,
+        committedQuantity: 0,
+        reservedQuantity: 0,
+        forfeitedQuantity: 100,
+        version: 2,
+      })
       .mockResolvedValueOnce(existingCounter);
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider,
@@ -446,8 +683,25 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       now: new Date("2026-10-01T00:00:01.000Z"),
     });
 
-    expect(existingCounter).toEqual({ id: "counter-new", grantedQuantity: 100, committedQuantity: 7, reservedQuantity: 3, forfeitedQuantity: 2 });
-    expect(transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {}, create: expect.objectContaining({ committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 0 }) }));
+    expect(existingCounter).toEqual({
+      id: "counter-new",
+      grantedQuantity: 100,
+      committedQuantity: 7,
+      reservedQuantity: 3,
+      forfeitedQuantity: 2,
+    });
+    expect(
+      transaction.billingPeriodEntitlementCounter.upsert,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: {},
+        create: expect.objectContaining({
+          committedQuantity: 0,
+          reservedQuantity: 0,
+          forfeitedQuantity: 0,
+        }),
+      }),
+    );
   });
 
   it("emits one Paid capacity hint while allowing the generic hook for Free rollover", async () => {
@@ -459,12 +713,40 @@ describe("SamePlanBillingPeriodRolloverService", () => {
     });
     const transaction = transactionHarness();
     transaction.billingPeriodEntitlementCounter.findUnique
-      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 0, version: 1 })
-      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 100, version: 2 });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
-    const service = new SamePlanBillingPeriodRolloverService(database as never, afterTransitionCommitted);
+      .mockResolvedValueOnce({
+        id: "counter-old",
+        grantedQuantity: 100,
+        committedQuantity: 0,
+        reservedQuantity: 0,
+        forfeitedQuantity: 0,
+        version: 1,
+      })
+      .mockResolvedValueOnce({
+        id: "counter-old",
+        grantedQuantity: 100,
+        committedQuantity: 0,
+        reservedQuantity: 0,
+        forfeitedQuantity: 100,
+        version: 2,
+      });
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
+    const service = new SamePlanBillingPeriodRolloverService(
+      database as never,
+      afterTransitionCommitted,
+    );
 
-    await service.transition({ shopId: "shop-1", subscriptionId: "subscription-1", provider, plan, now: new Date("2026-10-01T00:00:01.000Z") });
+    await service.transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider,
+      plan,
+      now: new Date("2026-10-01T00:00:01.000Z"),
+    });
     expect(afterTransitionCommitted).toHaveBeenCalledOnce();
     expect(capacityResumeHint).toHaveBeenCalledOnce();
 
@@ -472,54 +754,156 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       subscription: {
         ...transactionHarness().subscription,
         findUnique: vi.fn().mockResolvedValue({
-          id: "subscription-1", shopId: "shop-1", planId: "plan-paid", status: "ACTIVE", billingPeriodId: "period-new",
-          currentPeriodStart: successorStart, currentPeriodEnd: successorEnd, nextReconcileAt: null,
-          billingPeriod: { id: "period-new", periodStart: successorStart, periodEnd: successorEnd, status: "OPEN" },
+          id: "subscription-1",
+          shopId: "shop-1",
+          planId: "plan-paid",
+          status: "ACTIVE",
+          billingPeriodId: "period-new",
+          currentPeriodStart: successorStart,
+          currentPeriodEnd: successorEnd,
+          nextReconcileAt: null,
+          billingPeriod: {
+            id: "period-new",
+            periodStart: successorStart,
+            periodEnd: successorEnd,
+            status: "OPEN",
+          },
         }),
       },
     });
-    const replayDatabase = { $transaction: vi.fn(async (callback: (value: typeof replayTransaction) => unknown) => callback(replayTransaction)) };
-    await new SamePlanBillingPeriodRolloverService(replayDatabase as never, afterTransitionCommitted).transition({ shopId: "shop-1", subscriptionId: "subscription-1", provider, plan, now: new Date("2026-10-01T00:00:01.000Z") });
+    const replayDatabase = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof replayTransaction) => unknown) =>
+          callback(replayTransaction),
+      ),
+    };
+    await new SamePlanBillingPeriodRolloverService(
+      replayDatabase as never,
+      afterTransitionCommitted,
+    ).transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider,
+      plan,
+      now: new Date("2026-10-01T00:00:01.000Z"),
+    });
 
     const freeTransaction = transactionHarness({
       subscription: {
         ...transactionHarness().subscription,
         findUnique: vi.fn().mockResolvedValue({
-          id: "subscription-1", shopId: "shop-1", planId: "plan-free", status: "ACTIVE", billingPeriodId: "period-old",
-          currentPeriodStart: currentStart, currentPeriodEnd: currentEnd, nextReconcileAt: null,
-          billingPeriod: { id: "period-old", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
+          id: "subscription-1",
+          shopId: "shop-1",
+          planId: "plan-free",
+          status: "ACTIVE",
+          billingPeriodId: "period-old",
+          currentPeriodStart: currentStart,
+          currentPeriodEnd: currentEnd,
+          nextReconcileAt: null,
+          billingPeriod: {
+            id: "period-old",
+            periodStart: currentStart,
+            periodEnd: currentEnd,
+            status: "OPEN",
+          },
         }),
       },
     });
-    const freeDatabase = { $transaction: vi.fn(async (callback: (value: typeof freeTransaction) => unknown) => callback(freeTransaction)) };
-    const freeResult = await new SamePlanBillingPeriodRolloverService(freeDatabase as never, afterTransitionCommitted).transition({ shopId: "shop-1", subscriptionId: "subscription-1", provider: { ...provider, planHandle: "free-2026", usageEventHandles: [], currentPeriodStart: successorStart }, plan: freePlan, now: new Date("2026-10-01T00:00:01.000Z") });
+    const freeDatabase = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof freeTransaction) => unknown) =>
+          callback(freeTransaction),
+      ),
+    };
+    const freeResult = await new SamePlanBillingPeriodRolloverService(
+      freeDatabase as never,
+      afterTransitionCommitted,
+    ).transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider: {
+        ...provider,
+        planHandle: "free-2026",
+        usageEventHandles: [],
+        currentPeriodStart: successorStart,
+      },
+      plan: freePlan,
+      now: new Date("2026-10-01T00:00:01.000Z"),
+    });
 
     expect(afterTransitionCommitted).toHaveBeenCalledTimes(2);
-    expect(freeResult).toMatchObject({ kind: "transitioned", planKind: "FREE" });
-    expect(afterTransitionCommitted).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ planKind: "FREE" }));
+    expect(freeResult).toMatchObject({
+      kind: "transitioned",
+      planKind: "FREE",
+    });
+    expect(afterTransitionCommitted).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ planKind: "FREE" }),
+    );
     expect(capacityResumeHint).toHaveBeenCalledOnce();
   });
 
   it("rotates an existing pack-enabled Free period without counters or lifetime-state mutation", async () => {
-    const lifetimeCounter = { grantedQuantity: 5, committedQuantity: 2, reservedQuantity: 1 };
-    const purchase = { status: "REQUESTED", currentAmount: 0, activatedAt: null };
+    const lifetimeCounter = {
+      grantedQuantity: 5,
+      committedQuantity: 2,
+      reservedQuantity: 1,
+    };
+    const purchase = {
+      status: "REQUESTED",
+      currentAmount: 0,
+      activatedAt: null,
+    };
     const transaction = transactionHarness({
       subscription: {
         ...transactionHarness().subscription,
         findUnique: vi.fn().mockResolvedValue({
-          id: "subscription-1", shopId: "shop-1", planId: "plan-free", status: "ACTIVE", billingPeriodId: "period-old",
-          currentPeriodStart: currentStart, currentPeriodEnd: currentEnd, nextReconcileAt: null,
-          billingPeriod: { id: "period-old", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
+          id: "subscription-1",
+          shopId: "shop-1",
+          planId: "plan-free",
+          status: "ACTIVE",
+          billingPeriodId: "period-old",
+          currentPeriodStart: currentStart,
+          currentPeriodEnd: currentEnd,
+          nextReconcileAt: null,
+          billingPeriod: {
+            id: "period-old",
+            periodStart: currentStart,
+            periodEnd: currentEnd,
+            status: "OPEN",
+          },
         }),
       },
-      shopEntitlementCounter: { findUnique: vi.fn().mockResolvedValue(lifetimeCounter), update: vi.fn() },
-      recoveryCreditPurchase: { findUnique: vi.fn().mockResolvedValue(purchase), update: vi.fn() },
+      shopEntitlementCounter: {
+        findUnique: vi.fn().mockResolvedValue(lifetimeCounter),
+        update: vi.fn(),
+      },
+      recoveryCreditPurchase: {
+        findUnique: vi.fn().mockResolvedValue(purchase),
+        update: vi.fn(),
+      },
     });
-    const packEnabledFreePlan = { ...freePlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: "pack-meter" };
-    const freeProvider = { ...provider, planHandle: "free-2026", usageEventHandles: ["pack-meter"], currentPeriodStart: successorStart };
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const packEnabledFreePlan = {
+      ...freePlan,
+      recoveryCreditPackEnabled: true,
+      shopifyRecoveryCreditPackEventHandle: "pack-meter",
+    };
+    const freeProvider = {
+      ...provider,
+      planHandle: "free-2026",
+      usageEventHandles: ["pack-meter"],
+      currentPeriodStart: successorStart,
+    };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    const result = await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider: freeProvider,
@@ -533,48 +917,104 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       nextReconcileAt: new Date("2026-10-31T23:55:00.000Z"),
       planKind: "FREE",
     });
-    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "CLOSED", closeReason: "RENEWED_SAME_PLAN" }),
-    }));
-    expect(transaction.billingPeriod.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ planKindSnapshot: "FREE", includedRecoveryCreditsGranted: null }),
-    }));
-    expect(transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
-    expect(transaction.billingPeriodEntitlementCounter.upsert).not.toHaveBeenCalled();
-    expect(transaction.shopEntitlementCounter.findUnique).not.toHaveBeenCalled();
+    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "CLOSED",
+          closeReason: "RENEWED_SAME_PLAN",
+        }),
+      }),
+    );
+    expect(transaction.billingPeriod.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          planKindSnapshot: "FREE",
+          includedRecoveryCreditsGranted: null,
+        }),
+      }),
+    );
+    expect(
+      transaction.billingPeriodEntitlementCounter.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(
+      transaction.billingPeriodEntitlementCounter.upsert,
+    ).not.toHaveBeenCalled();
+    expect(
+      transaction.shopEntitlementCounter.findUnique,
+    ).not.toHaveBeenCalled();
     expect(transaction.shopEntitlementCounter.update).not.toHaveBeenCalled();
-    expect(transaction.recoveryCreditPurchase.findUnique).not.toHaveBeenCalled();
+    expect(
+      transaction.recoveryCreditPurchase.findUnique,
+    ).not.toHaveBeenCalled();
     expect(transaction.recoveryCreditPurchase.update).not.toHaveBeenCalled();
-    expect(transaction.usageEvent.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { billingPeriodId: "period-old", shopifyReportState: { in: ["PENDING", "RETRYABLE"] } },
-      data: expect.objectContaining({ shopifyReportState: "NEEDS_ATTENTION", providerErrorCode: "PERIOD_CLOSED_BEFORE_REPORT" }),
-    }));
-    expect(lifetimeCounter).toEqual({ grantedQuantity: 5, committedQuantity: 2, reservedQuantity: 1 });
-    expect(purchase).toEqual({ status: "REQUESTED", currentAmount: 0, activatedAt: null });
+    expect(transaction.usageEvent.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          billingPeriodId: "period-old",
+          shopifyReportState: { in: ["PENDING", "RETRYABLE"] },
+        },
+        data: expect.objectContaining({
+          shopifyReportState: "NEEDS_ATTENTION",
+          providerErrorCode: "PERIOD_CLOSED_BEFORE_REPORT",
+        }),
+      }),
+    );
+    expect(lifetimeCounter).toEqual({
+      grantedQuantity: 5,
+      committedQuantity: 2,
+      reservedQuantity: 1,
+    });
+    expect(purchase).toEqual({
+      status: "REQUESTED",
+      currentAmount: 0,
+      activatedAt: null,
+    });
   });
 
   it.each([
     ["at", new Date("2026-10-01T00:00:00.000Z")],
     ["after", new Date("2026-10-01T00:00:01.000Z")],
-  ])("returns provider-cycle-lag when the provider still reports the old cycle %s the boundary", async (_label, now) => {
-    const transaction = transactionHarness();
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+  ])(
+    "returns provider-cycle-lag when the provider still reports the old cycle %s the boundary",
+    async (_label, now) => {
+      const transaction = transactionHarness();
+      const database = {
+        $transaction: vi.fn(
+          async (callback: (value: typeof transaction) => unknown) =>
+            callback(transaction),
+        ),
+      };
 
-    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
-      shopId: "shop-1",
-      subscriptionId: "subscription-1",
-      provider: { ...provider, currentPeriodStart: currentStart, currentPeriodEnd: currentEnd },
-      plan,
-      now,
-    });
+      const result = await new SamePlanBillingPeriodRolloverService(
+        database as never,
+      ).transition({
+        shopId: "shop-1",
+        subscriptionId: "subscription-1",
+        provider: {
+          ...provider,
+          currentPeriodStart: currentStart,
+          currentPeriodEnd: currentEnd,
+        },
+        plan,
+        now,
+      });
 
-    expect(result).toEqual({ kind: "provider-cycle-lag", billingPeriodId: "period-old", nextReconcileAt: null });
-    expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
-    expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
-    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ unmappedShopifyUsageEventHandles: [] }),
-    }));
-  });
+      expect(result).toEqual({
+        kind: "provider-cycle-lag",
+        billingPeriodId: "period-old",
+        nextReconcileAt: null,
+      });
+      expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
+      expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
+      expect(transaction.subscription.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            unmappedShopifyUsageEventHandles: [],
+          }),
+        }),
+      );
+    },
+  );
 
   it("schedules the next Paid pre-close boundary after a contiguous rollover", async () => {
     const transaction = transactionHarness();
@@ -596,9 +1036,16 @@ describe("SamePlanBillingPeriodRolloverService", () => {
         version: 2,
         reservedQuantity: 0,
       });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    const result = await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider,
@@ -612,12 +1059,22 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       nextReconcileAt: new Date("2026-10-31T23:55:00.000Z"),
       planKind: "PAID_METERED",
     });
-    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "CLOSED", closeReason: "RENEWED_SAME_PLAN" }),
-    }));
-    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ billingPeriodId: "period-new", nextReconcileAt: new Date("2026-10-31T23:55:00.000Z") }),
-    }));
+    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "CLOSED",
+          closeReason: "RENEWED_SAME_PLAN",
+        }),
+      }),
+    );
+    expect(transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          billingPeriodId: "period-new",
+          nextReconcileAt: new Date("2026-10-31T23:55:00.000Z"),
+        }),
+      }),
+    );
   });
 
   it("creates only the provider cycle when a Paid rollover has a gap", async () => {
@@ -639,9 +1096,16 @@ describe("SamePlanBillingPeriodRolloverService", () => {
         forfeitedQuantity: 100,
         version: 2,
       });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider: {
@@ -653,9 +1117,14 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       now: new Date("2026-11-01T00:00:01.000Z"),
     });
 
-    expect(transaction.billingPeriod.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ periodStart: new Date("2026-11-01T00:00:00.000Z"), periodEnd: new Date("2026-12-01T00:00:00.000Z") }),
-    }));
+    expect(transaction.billingPeriod.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          periodStart: new Date("2026-11-01T00:00:00.000Z"),
+          periodEnd: new Date("2026-12-01T00:00:00.000Z"),
+        }),
+      }),
+    );
     expect(transaction.billingPeriod.create.mock.calls).toHaveLength(1);
   });
 
@@ -672,25 +1141,50 @@ describe("SamePlanBillingPeriodRolloverService", () => {
           currentPeriodStart: currentStart,
           currentPeriodEnd: currentEnd,
           nextReconcileAt: new Date("2026-10-01T00:00:00.000Z"),
-          billingPeriod: { id: "period-old", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
+          billingPeriod: {
+            id: "period-old",
+            periodStart: currentStart,
+            periodEnd: currentEnd,
+            status: "OPEN",
+          },
         }),
       },
     });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    const result = await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
-      provider: { ...provider, planHandle: "free-2026", usageEventHandles: [], currentPeriodStart: successorStart },
+      provider: {
+        ...provider,
+        planHandle: "free-2026",
+        usageEventHandles: [],
+        currentPeriodStart: successorStart,
+      },
       plan: freePlan,
       now: new Date("2026-10-01T00:00:01.000Z"),
     });
 
-    expect(result).toMatchObject({ kind: "transitioned", planKind: "FREE", nextReconcileAt: null });
-    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ nextReconcileAt: null }),
-    }));
-    expect(transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      kind: "transitioned",
+      planKind: "FREE",
+      nextReconcileAt: null,
+    });
+    expect(transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ nextReconcileAt: null }),
+      }),
+    );
+    expect(
+      transaction.billingPeriodEntitlementCounter.findUnique,
+    ).not.toHaveBeenCalled();
   });
 
   it("reuses an already-open successor without duplicating its grant", async () => {
@@ -722,7 +1216,12 @@ describe("SamePlanBillingPeriodRolloverService", () => {
           currentPeriodStart: currentStart,
           currentPeriodEnd: currentEnd,
           nextReconcileAt: null,
-          billingPeriod: { id: "period-old", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
+          billingPeriod: {
+            id: "period-old",
+            periodStart: currentStart,
+            periodEnd: currentEnd,
+            status: "OPEN",
+          },
         }),
       },
     });
@@ -743,9 +1242,16 @@ describe("SamePlanBillingPeriodRolloverService", () => {
         forfeitedQuantity: 100,
         version: 2,
       });
-    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const database = {
+      $transaction: vi.fn(
+        async (callback: (value: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
 
-    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
+    const result = await new SamePlanBillingPeriodRolloverService(
+      database as never,
+    ).transition({
       shopId: "shop-1",
       subscriptionId: "subscription-1",
       provider,
@@ -753,8 +1259,14 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       now: new Date("2026-10-01T00:00:01.000Z"),
     });
 
-    expect(result).toMatchObject({ kind: "transitioned", billingPeriodId: "period-new", planKind: "PAID_METERED" });
+    expect(result).toMatchObject({
+      kind: "transitioned",
+      billingPeriodId: "period-new",
+      planKind: "PAID_METERED",
+    });
     expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
-    expect(transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalled();
+    expect(
+      transaction.billingPeriodEntitlementCounter.upsert,
+    ).toHaveBeenCalled();
   });
 });

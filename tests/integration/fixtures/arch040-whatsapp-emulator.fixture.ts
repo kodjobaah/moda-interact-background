@@ -39,10 +39,16 @@ export class Arch040WhatsAppEmulator {
   private callbackServer: Server | null = null;
   private emulator: EmulatorRuntime | null = null;
   private port: number | null = null;
-  private observer: ((request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) => void) | null = null;
+  private observer:
+    | ((
+        request: import("node:http").IncomingMessage,
+        response: import("node:http").ServerResponse,
+      ) => void)
+    | null = null;
 
   get baseUrl(): string {
-    if (this.port === null) throw new Error("ARCH-040 WhatsApp emulator is not running");
+    if (this.port === null)
+      throw new Error("ARCH-040 WhatsApp emulator is not running");
     return `http://${this.host}:${this.port}`;
   }
 
@@ -59,14 +65,19 @@ export class Arch040WhatsAppEmulator {
   }
 
   async start(): Promise<void> {
-    if (this.emulator) throw new Error("ARCH-040 WhatsApp emulator already started");
+    if (this.emulator)
+      throw new Error("ARCH-040 WhatsApp emulator already started");
     this.callbackServer = createServer((request, response) => {
       if (request.method !== "POST" || request.url !== "/webhook") {
         response.writeHead(404).end();
         return;
       }
       request.resume();
-      request.on("end", () => response.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}'));
+      request.on("end", () =>
+        response
+          .writeHead(200, { "content-type": "application/json" })
+          .end('{"ok":true}'),
+      );
     });
     try {
       await new Promise<void>((resolve, reject) => {
@@ -74,7 +85,8 @@ export class Arch040WhatsAppEmulator {
         this.callbackServer!.listen(0, this.host, resolve);
       });
       const callbackAddress = this.callbackServer.address();
-      if (!callbackAddress || typeof callbackAddress === "string") throw new Error("Webhook callback did not bind");
+      if (!callbackAddress || typeof callbackAddress === "string")
+        throw new Error("Webhook callback did not bind");
 
       const { WhatsAppEmulator } = await import("@whatsapp-cloudapi/emulator");
       this.emulator = new WhatsAppEmulator({
@@ -100,7 +112,8 @@ export class Arch040WhatsAppEmulator {
       const response = await fetch(`${this.baseUrl}/debug/health`, {
         signal: AbortSignal.timeout(2_000),
       });
-      if (!response.ok) throw new Error(`WhatsApp emulator health returned ${response.status}`);
+      if (!response.ok)
+        throw new Error(`WhatsApp emulator health returned ${response.status}`);
     } catch (error) {
       await this.cleanup().catch(() => {});
       throw error;
@@ -115,14 +128,20 @@ export class Arch040WhatsAppEmulator {
       if (address && typeof address !== "string") return address;
       await delay(10);
     }
-    throw new Error(`WhatsApp emulator did not expose a bound port within ${timeoutMs}ms`);
+    throw new Error(
+      `WhatsApp emulator did not expose a bound port within ${timeoutMs}ms`,
+    );
   }
 
   private observeOutboundRequests(): void {
     const server = this.emulator!.getServer();
     const expectedPath = `/${this.apiVersion}/${this.phoneNumberId}/messages`;
     this.observer = (request, response) => {
-      if (request.method !== "POST" || request.url?.split("?")[0] !== expectedPath) return;
+      if (
+        request.method !== "POST" ||
+        request.url?.split("?")[0] !== expectedPath
+      )
+        return;
       const chunks: Buffer[] = [];
       let body: OutboundMessage["body"] | null = null;
       let bodyReady = false;
@@ -136,12 +155,20 @@ export class Arch040WhatsAppEmulator {
       };
       request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
       request.once("end", () => {
-        try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as OutboundMessage["body"]; }
-        catch { body = null; }
+        try {
+          body = JSON.parse(
+            Buffer.concat(chunks).toString("utf8"),
+          ) as OutboundMessage["body"];
+        } catch {
+          body = null;
+        }
         bodyReady = true;
         record();
       });
-      response.once("finish", () => { responseFinished = true; record(); });
+      response.once("finish", () => {
+        responseFinished = true;
+        record();
+      });
     };
     server.on("request", this.observer);
   }
@@ -152,15 +179,23 @@ export class Arch040WhatsAppEmulator {
       if (this.messages.length >= count) return this.messages.slice();
       await delay(25);
     }
-    throw new Error(`Expected ${count} WhatsApp messages; received ${this.messages.length}`);
+    throw new Error(
+      `Expected ${count} WhatsApp messages; received ${this.messages.length}`,
+    );
   }
 
-  async assertNoAdditionalMessages({ count = this.messages.length, quietMs = 750 }: {
-    count?: number; quietMs?: number;
+  async assertNoAdditionalMessages({
+    count = this.messages.length,
+    quietMs = 750,
+  }: {
+    count?: number;
+    quietMs?: number;
   } = {}): Promise<void> {
     await delay(quietMs);
     if (this.messages.length !== count) {
-      throw new Error(`Expected ${count} WhatsApp messages; received ${this.messages.length}`);
+      throw new Error(
+        `Expected ${count} WhatsApp messages; received ${this.messages.length}`,
+      );
     }
   }
 
@@ -180,9 +215,10 @@ export class Arch040WhatsAppEmulator {
       this.observer = null;
       const callback = this.callbackServer;
       this.callbackServer = null;
-      if (callback) await new Promise<void>((resolve, reject) => {
-        callback.close((error) => error ? reject(error) : resolve());
-      });
+      if (callback)
+        await new Promise<void>((resolve, reject) => {
+          callback.close((error) => (error ? reject(error) : resolve()));
+        });
     }
   }
 }

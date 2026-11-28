@@ -38,8 +38,12 @@ export function resolveRecoveryInternationalContext(
     countryCode:
       currentContext.countryCode ??
       eventContext?.countryCode ??
-      safelyNormalize(merchantDefaults?.defaultCountryCode, normalizeCountryCode),
-    currencyCode: currentContext.currencyCode ?? eventContext?.currencyCode ?? null,
+      safelyNormalize(
+        merchantDefaults?.defaultCountryCode,
+        normalizeCountryCode,
+      ),
+    currencyCode:
+      currentContext.currencyCode ?? eventContext?.currencyCode ?? null,
     timeZone:
       currentContext.timeZone ??
       eventContext?.timeZone ??

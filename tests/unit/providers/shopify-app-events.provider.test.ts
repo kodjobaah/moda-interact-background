@@ -75,7 +75,10 @@ describe("ShopifyAppEventsClient", () => {
       .mockResolvedValue(response(202));
     const client = createClient(fetchImpl);
 
-    await Promise.all([client.createBillingEvent(event), client.createBillingEvent(event)]);
+    await Promise.all([
+      client.createBillingEvent(event),
+      client.createBillingEvent(event),
+    ]);
 
     expect(fetchImpl).toHaveBeenCalledTimes(3);
     expect(fetchImpl.mock.calls[0]?.[0]).toBe(
@@ -161,7 +164,9 @@ describe("ShopifyAppEventsClient", () => {
       idempotency_key: event.idempotencyKey,
       attributes: { value: 1 },
     });
-    expect(JSON.stringify(fetchImpl.mock.calls[1])).not.toContain("app-client-secret");
+    expect(JSON.stringify(fetchImpl.mock.calls[1])).not.toContain(
+      "app-client-secret",
+    );
   });
 
   it("rejects an overlong idempotency key and zero values before fetching", async () => {
@@ -177,17 +182,22 @@ describe("ShopifyAppEventsClient", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it.each(["-0.25", "-0.5"])("submits finite fractional correction %s", async (value) => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(tokenResponse())
-      .mockResolvedValueOnce(response(202));
-    const client = createClient(fetchImpl);
+  it.each(["-0.25", "-0.5"])(
+    "submits finite fractional correction %s",
+    async (value) => {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(tokenResponse())
+        .mockResolvedValueOnce(response(202));
+      const client = createClient(fetchImpl);
 
-    await client.createBillingEvent({ ...event, value });
+      await client.createBillingEvent({ ...event, value });
 
-    expect(JSON.parse(fetchImpl.mock.calls[1]?.[1]?.body as string).attributes).toEqual({ value });
-  });
+      expect(
+        JSON.parse(fetchImpl.mock.calls[1]?.[1]?.body as string).attributes,
+      ).toEqual({ value });
+    },
+  );
 
   it("refreshes exactly once after an expired-token 401", async () => {
     const fetchImpl = vi
@@ -211,24 +221,26 @@ describe("ShopifyAppEventsClient", () => {
     const retryResponses = [response(202), response(202)];
     let tokenRequests = 0;
     let eventRequests = 0;
-    const fetchImpl = vi.fn().mockImplementation(async (input: string | URL | Request) => {
-      if (String(input) === "https://api.shopify.com/auth/access_token") {
-        tokenRequests += 1;
-        if (tokenRequests === 1) {
-          return tokenResponse("token-1");
+    const fetchImpl = vi
+      .fn()
+      .mockImplementation(async (input: string | URL | Request) => {
+        if (String(input) === "https://api.shopify.com/auth/access_token") {
+          tokenRequests += 1;
+          if (tokenRequests === 1) {
+            return tokenResponse("token-1");
+          }
+          if (tokenRequests === 2) {
+            return tokenResponse("token-2");
+          }
+          throw new Error("unexpected token-3 refresh");
         }
-        if (tokenRequests === 2) {
-          return tokenResponse("token-2");
-        }
-        throw new Error("unexpected token-3 refresh");
-      }
 
-      eventRequests += 1;
-      if (eventRequests <= 2) {
-        return initialResponses[eventRequests - 1]?.promise;
-      }
-      return retryResponses[eventRequests - 3];
-    });
+        eventRequests += 1;
+        if (eventRequests <= 2) {
+          return initialResponses[eventRequests - 1]?.promise;
+        }
+        return retryResponses[eventRequests - 3];
+      });
     const client = createClient(fetchImpl);
 
     const firstSend = client.createBillingEvent(event);
@@ -243,10 +255,15 @@ describe("ShopifyAppEventsClient", () => {
 
     expect(tokenRequests).toBe(2);
     const eventCalls = fetchImpl.mock.calls.filter(
-      ([input]) => String(input) === "https://api.shopify.com/app/2026-07/events",
+      ([input]) =>
+        String(input) === "https://api.shopify.com/app/2026-07/events",
     );
     expect(eventCalls).toHaveLength(4);
-    expect(eventCalls.map(([, init]) => (init?.headers as Record<string, string>).Authorization)).toEqual([
+    expect(
+      eventCalls.map(
+        ([, init]) => (init?.headers as Record<string, string>).Authorization,
+      ),
+    ).toEqual([
       "Bearer token-1",
       "Bearer token-1",
       "Bearer token-2",
@@ -313,7 +330,9 @@ describe("ShopifyAppEventsClient", () => {
       .mockResolvedValueOnce(response(status));
     const client = createClient(fetchImpl);
 
-    await expect(client.createBillingEvent(event)).rejects.toMatchObject({ kind });
+    await expect(client.createBillingEvent(event)).rejects.toMatchObject({
+      kind,
+    });
   });
 
   it("classifies period and meter errors as needs-attention", async () => {
@@ -339,7 +358,9 @@ describe("ShopifyAppEventsClient", () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error("socket closed"));
     const client = createClient(fetchImpl);
 
-    const thrown = await client.createBillingEvent(event).catch((error: unknown) => error);
+    const thrown = await client
+      .createBillingEvent(event)
+      .catch((error: unknown) => error);
     expect(thrown).toMatchObject({ kind: "transport", retryable: true });
     expect(String(thrown)).not.toContain("app-client-secret");
   });

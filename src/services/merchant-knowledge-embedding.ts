@@ -9,7 +9,10 @@ export interface MerchantKnowledgeEmbeddingConfig {
 }
 
 export class MerchantKnowledgeEmbeddingError extends Error {
-  constructor(readonly code: string, readonly retryable: boolean) {
+  constructor(
+    readonly code: string,
+    readonly retryable: boolean,
+  ) {
     super(code);
     this.name = "MerchantKnowledgeEmbeddingError";
   }
@@ -39,11 +42,13 @@ export class MerchantKnowledgeEmbeddingService {
     readonly config: MerchantKnowledgeEmbeddingConfig,
     client?: OpenAIEmbeddingClient,
   ) {
-    this.client = client ?? new OpenAI({
-      apiKey: config.apiKey,
-      baseURL: "https://api.openai.com/v1",
-      maxRetries: 0,
-    });
+    this.client =
+      client ??
+      new OpenAI({
+        apiKey: config.apiKey,
+        baseURL: "https://api.openai.com/v1",
+        maxRetries: 0,
+      });
   }
 
   async embed(content: string): Promise<number[]> {
@@ -60,20 +65,28 @@ export class MerchantKnowledgeEmbeddingService {
         typeof error === "object" && error !== null && "status" in error
           ? error.status
           : undefined;
-      const retryable = typeof status !== "number" || status === 429 || status >= 500;
+      const retryable =
+        typeof status !== "number" || status === 429 || status >= 500;
       throw new MerchantKnowledgeEmbeddingError(
-        retryable ? "EMBEDDING_PROVIDER_TEMPORARY" : "EMBEDDING_PROVIDER_REJECTED",
+        retryable
+          ? "EMBEDDING_PROVIDER_TEMPORARY"
+          : "EMBEDDING_PROVIDER_REJECTED",
         retryable,
       );
     }
 
     const vector = response.data[0]?.embedding;
     if (
-      !Array.isArray(vector)
-      || vector.length !== this.config.dimensions
-      || !vector.every((value) => typeof value === "number" && Number.isFinite(value))
+      !Array.isArray(vector) ||
+      vector.length !== this.config.dimensions ||
+      !vector.every(
+        (value) => typeof value === "number" && Number.isFinite(value),
+      )
     ) {
-      throw new MerchantKnowledgeEmbeddingError("EMBEDDING_VECTOR_INVALID", false);
+      throw new MerchantKnowledgeEmbeddingError(
+        "EMBEDDING_VECTOR_INVALID",
+        false,
+      );
     }
     return vector;
   }

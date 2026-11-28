@@ -10,21 +10,27 @@ export const MERCHANT_PRICING_TRANSLATION_JOB_NAMES = {
 
 const TranslationBatchIdSchema = z.string().trim().min(1).max(255);
 
-export const MerchantPricingTranslationBatchSubmitJobSchema = z.object({
-  schemaVersion: z.literal(MERCHANT_PRICING_TRANSLATION_SCHEMA_VERSION),
-  translationBatchId: TranslationBatchIdSchema,
-}).strict();
+export const MerchantPricingTranslationBatchSubmitJobSchema = z
+  .object({
+    schemaVersion: z.literal(MERCHANT_PRICING_TRANSLATION_SCHEMA_VERSION),
+    translationBatchId: TranslationBatchIdSchema,
+  })
+  .strict();
 
-export const MerchantPricingTranslationBatchPollJobSchema = z.object({
-  schemaVersion: z.literal(MERCHANT_PRICING_TRANSLATION_SCHEMA_VERSION),
-  translationBatchId: TranslationBatchIdSchema,
-  pollSequence: z.number().int().min(1),
-}).strict();
+export const MerchantPricingTranslationBatchPollJobSchema = z
+  .object({
+    schemaVersion: z.literal(MERCHANT_PRICING_TRANSLATION_SCHEMA_VERSION),
+    translationBatchId: TranslationBatchIdSchema,
+    pollSequence: z.number().int().min(1),
+  })
+  .strict();
 
-export const MerchantPricingTranslationBatchResultsJobSchema = z.object({
-  schemaVersion: z.literal(MERCHANT_PRICING_TRANSLATION_SCHEMA_VERSION),
-  translationBatchId: TranslationBatchIdSchema,
-}).strict();
+export const MerchantPricingTranslationBatchResultsJobSchema = z
+  .object({
+    schemaVersion: z.literal(MERCHANT_PRICING_TRANSLATION_SCHEMA_VERSION),
+    translationBatchId: TranslationBatchIdSchema,
+  })
+  .strict();
 
 export type MerchantPricingTranslationBatchSubmitJob = z.infer<
   typeof MerchantPricingTranslationBatchSubmitJobSchema
@@ -36,7 +42,9 @@ export type MerchantPricingTranslationBatchResultsJob = z.infer<
   typeof MerchantPricingTranslationBatchResultsJobSchema
 >;
 
-export function createMerchantPricingTranslationBatchSubmitJobId(batchId: string): string {
+export function createMerchantPricingTranslationBatchSubmitJobId(
+  batchId: string,
+): string {
   return `merchant-pricing-translation-batch-submit-${batchId}`;
 }
 
@@ -47,6 +55,8 @@ export function createMerchantPricingTranslationBatchPollJobId(
   return `merchant-pricing-translation-batch-poll-${batchId}-${pollSequence}`;
 }
 
-export function createMerchantPricingTranslationBatchResultsJobId(batchId: string): string {
+export function createMerchantPricingTranslationBatchResultsJobId(
+  batchId: string,
+): string {
   return `merchant-pricing-translation-batch-results-${batchId}`;
 }

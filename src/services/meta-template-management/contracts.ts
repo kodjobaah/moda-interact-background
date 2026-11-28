@@ -1,27 +1,35 @@
 import { createHash } from "node:crypto";
 
 /** BG003-local service contracts, not a new Messaging or authoring wire schema. */
-export type ProviderStatus = "APPROVED" | "PENDING" | "REJECTED" | "PAUSED" | "DISABLED" | "UNKNOWN";
+export type ProviderStatus =
+  "APPROVED" | "PENDING" | "REJECTED" | "PAUSED" | "DISABLED" | "UNKNOWN";
 export type MetaCategory = "MARKETING" | "UTILITY" | "AUTHENTICATION";
 export type MetaComponent = Readonly<Record<string, unknown>>;
-export type TemplateIdentity = Readonly<{ wabaId: string; name: string; language: string; id?: string | null }>;
-export type ProviderTemplate = TemplateIdentity & Readonly<{
-  id: string;
-  category: string;
-  status: string;
-  components: MetaComponent[];
+export type TemplateIdentity = Readonly<{
+  wabaId: string;
+  name: string;
+  language: string;
+  id?: string | null;
 }>;
-export type PreparedRegistration = TemplateIdentity & Readonly<{
-  registrationId: string;
-  localeId: string;
-  category: MetaCategory;
-  components: MetaComponent[];
-  contentHash: string;
-  updatedAt: Date;
-  submittedAt: Date | null;
-  submissionState: string;
-  providerId: string | null;
-}>;
+export type ProviderTemplate = TemplateIdentity &
+  Readonly<{
+    id: string;
+    category: string;
+    status: string;
+    components: MetaComponent[];
+  }>;
+export type PreparedRegistration = TemplateIdentity &
+  Readonly<{
+    registrationId: string;
+    localeId: string;
+    category: MetaCategory;
+    components: MetaComponent[];
+    contentHash: string;
+    updatedAt: Date;
+    submittedAt: Date | null;
+    submissionState: string;
+    providerId: string | null;
+  }>;
 export type SubmissionOutcome =
   | { kind: "submitted" | "already-submitted"; providerId: string }
   | { kind: "busy"; code: string; retryAt?: string; wabaId?: string }
@@ -32,7 +40,10 @@ export type MetaTextEquivalenceEvidence = Readonly<{
   rawObservedContentHash: string;
   expectedContentHash: string;
 }>;
-export type ReconcileOutcome = { kind: "current" | "unconfirmed" | "drift" | "stale"; status?: ProviderStatus };
+export type ReconcileOutcome = {
+  kind: "current" | "unconfirmed" | "drift" | "stale";
+  status?: ProviderStatus;
+};
 
 /** A verified Messaging observation, not the unagreed queue payload. Only the owning
  * Messaging task can define and emit the cross-service job. */
@@ -63,7 +74,10 @@ export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
     const object = value as Record<string, unknown>;
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+    return `{${Object.keys(object)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
 }
@@ -91,25 +105,44 @@ export function observedContentHash(components: MetaComponent[]): string {
 
 /** Validates only the frozen Meta transport shape, NEVER reparses an Admin AST. */
 export function validatedComponents(value: unknown): MetaComponent[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 20 ||
-      value.some((c) => !c || Array.isArray(c) || typeof c !== "object")) {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > 20 ||
+    value.some((c) => !c || Array.isArray(c) || typeof c !== "object")
+  ) {
     throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
   }
   const components = value as MetaComponent[];
   for (const component of components) {
     if (component.type !== "HEADER") continue;
     const example = component.example;
-    const imageExample = example && typeof example === "object" && !Array.isArray(example)
-      ? example as Record<string, unknown> : undefined;
-    if (component.format === "IMAGE" && example !== undefined && example !== null &&
-        (typeof example !== "object" || Array.isArray(example))) {
+    const imageExample =
+      example && typeof example === "object" && !Array.isArray(example)
+        ? (example as Record<string, unknown>)
+        : undefined;
+    if (
+      component.format === "IMAGE" &&
+      example !== undefined &&
+      example !== null &&
+      (typeof example !== "object" || Array.isArray(example))
+    ) {
       throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
     }
-    if (component.format === "IMAGE" && imageExample && Object.keys(imageExample).length > 0) {
-      throw new MetaManagementError(Object.hasOwn(imageExample, "header_handle")
-        ? "UNTRUSTED_IMAGE_SAMPLE_HANDLE" : "INVALID_COMPILED_COMPONENTS", "blocked");
+    if (
+      component.format === "IMAGE" &&
+      imageExample &&
+      Object.keys(imageExample).length > 0
+    ) {
+      throw new MetaManagementError(
+        Object.hasOwn(imageExample, "header_handle")
+          ? "UNTRUSTED_IMAGE_SAMPLE_HANDLE"
+          : "INVALID_COMPILED_COMPONENTS",
+        "blocked",
+      );
     }
-    const hasHandle = !!imageExample && Object.hasOwn(imageExample, "header_handle");
+    const hasHandle =
+      !!imageExample && Object.hasOwn(imageExample, "header_handle");
     if (component.format !== "IMAGE" && hasHandle) {
       throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
     }
@@ -120,19 +153,31 @@ export function validatedComponents(value: unknown): MetaComponent[] {
 /** Final provider boundary. IMAGE examples are accepted only after the trusted
  * uploader has produced a handle and the service has copied it into the payload. */
 export function validatedProviderComponents(value: unknown): MetaComponent[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 20 ||
-      value.some((c) => !c || Array.isArray(c) || typeof c !== "object")) {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > 20 ||
+    value.some((c) => !c || Array.isArray(c) || typeof c !== "object")
+  ) {
     throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
   }
   for (const component of value as MetaComponent[]) {
     if (component.type !== "HEADER") continue;
     const example = component.example;
-    const handles = example && typeof example === "object" && !Array.isArray(example)
-      ? (example as Record<string, unknown>).header_handle : undefined;
-    if (component.format === "IMAGE" && (!Array.isArray(handles) || handles.length !== 1 ||
-        typeof handles[0] !== "string" || handles[0].length < 5 || handles[0].length > 4096 ||
+    const handles =
+      example && typeof example === "object" && !Array.isArray(example)
+        ? (example as Record<string, unknown>).header_handle
+        : undefined;
+    if (
+      component.format === "IMAGE" &&
+      (!Array.isArray(handles) ||
+        handles.length !== 1 ||
+        typeof handles[0] !== "string" ||
+        handles[0].length < 5 ||
+        handles[0].length > 4096 ||
         /^(?:https?:\/\/|data:|file:)/i.test(handles[0]) ||
-        !/^[A-Za-z0-9+/_:.=-]+$/.test(handles[0]))) {
+        !/^[A-Za-z0-9+/_:.=-]+$/.test(handles[0]))
+    ) {
       throw new MetaManagementError("IMAGE_SAMPLE_HANDLE_REQUIRED", "blocked");
     }
     if (component.format !== "IMAGE" && handles !== undefined) {
@@ -143,16 +188,24 @@ export function validatedProviderComponents(value: unknown): MetaComponent[] {
 }
 
 export function parseProviderStatus(value: string): ProviderStatus {
-  return (["APPROVED", "PENDING", "REJECTED", "PAUSED", "DISABLED"] as const).find((v) => v === value) ?? "UNKNOWN";
+  return (
+    (["APPROVED", "PENDING", "REJECTED", "PAUSED", "DISABLED"] as const).find(
+      (v) => v === value,
+    ) ?? "UNKNOWN"
+  );
 }
 
 export function safeMetaError(error: unknown): { code: string; name: string } {
   // Provider responses, URLs, credentials, payloads and customer content never enter logs.
-  if (error instanceof MetaManagementError) return {
-    code: error.code,
-    name: error.name.slice(0, 64),
-    ...(error.diagnostics ?? {}),
+  if (error instanceof MetaManagementError)
+    return {
+      code: error.code,
+      name: error.name.slice(0, 64),
+      ...(error.diagnostics ?? {}),
+    };
+  return {
+    code: "UNEXPECTED_ERROR",
+    name: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+    ...(error instanceof Error ? { origin: "sdk_exception" } : {}),
   };
-  return { code: "UNEXPECTED_ERROR", name: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
-    ...(error instanceof Error ? { origin: "sdk_exception" } : {}) };
 }

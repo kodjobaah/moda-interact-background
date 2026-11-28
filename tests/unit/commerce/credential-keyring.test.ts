@@ -1,13 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-vi.mock("../../../src/services/platform-configuration/consumers.js", async () => {
-  const { parseCredentialKeyring } = await import("@modainteract/moda-interact-shared/security/credentials/node");
-  return { readCommerceKeyring: async () => parseCredentialKeyring(process.env.MODA_ENCRYPTION_KEYS_JSON) };
-});
+vi.mock(
+  "../../../src/services/platform-configuration/consumers.js",
+  async () => {
+    const { parseCredentialKeyring } =
+      await import("@modainteract/moda-interact-shared/security/credentials/node");
+    return {
+      readCommerceKeyring: async () =>
+        parseCredentialKeyring(process.env.MODA_ENCRYPTION_KEYS_JSON),
+    };
+  },
+);
 import { readCanonicalCredentialKeyring as readCommerceCredentialKeyring } from "../../../src/commerce/credential-keyring.js";
 
 const secret = Buffer.alloc(32, 7).toString("base64");
 
-beforeEach(() => vi.stubEnv("MODA_ENCRYPTION_KEYS_JSON", JSON.stringify({ active: secret })));
+beforeEach(() =>
+  vi.stubEnv("MODA_ENCRYPTION_KEYS_JSON", JSON.stringify({ active: secret })),
+);
 afterEach(() => vi.unstubAllEnvs());
 
 describe("readCommerceCredentialKeyring (Shared parser)", () => {
@@ -31,28 +40,49 @@ describe("readCommerceCredentialKeyring (Shared parser)", () => {
     ["a scalar", '"value"'],
     ["a blank key id", JSON.stringify({ "  ": secret })],
     ["an overlong key id", JSON.stringify({ ["k".repeat(65)]: secret })],
-    ["the former 128-character key ID", JSON.stringify({ ["k".repeat(128)]: secret })],
+    [
+      "the former 128-character key ID",
+      JSON.stringify({ ["k".repeat(128)]: secret }),
+    ],
     ["invalid base64", JSON.stringify({ active: "not base64!" })],
-    ["a short key", JSON.stringify({ active: Buffer.alloc(16).toString("base64") })],
+    [
+      "a short key",
+      JSON.stringify({ active: Buffer.alloc(16).toString("base64") }),
+    ],
     ["an empty keyring", "{}"],
     ["duplicate key ids", `{"active":"${secret}","active":"${secret}"}`],
-    ["escaped duplicate key ids", `{"active":"${secret}","a\\u0063tive":"${secret}"}`],
+    [
+      "escaped duplicate key ids",
+      `{"active":"${secret}","a\\u0063tive":"${secret}"}`,
+    ],
   ])("rejects %s with a bounded error", async (_label, value) => {
     vi.stubEnv("MODA_ENCRYPTION_KEYS_JSON", value);
-    await expect(readCommerceCredentialKeyring()).rejects.toThrow("Commerce credential keyring is invalid");
+    await expect(readCommerceCredentialKeyring()).rejects.toThrow(
+      "Commerce credential keyring is invalid",
+    );
   });
 
   it("never falls back to service-specific keyring variables", async () => {
     vi.stubEnv("MODA_ENCRYPTION_KEYS_JSON", undefined);
-    vi.stubEnv("MODA_WOO_REST_READ_KEYRING", JSON.stringify({ active: secret }));
-    await expect(readCommerceCredentialKeyring()).rejects.toThrow("Commerce credential keyring is invalid");
+    vi.stubEnv(
+      "MODA_WOO_REST_READ_KEYRING",
+      JSON.stringify({ active: secret }),
+    );
+    await expect(readCommerceCredentialKeyring()).rejects.toThrow(
+      "Commerce credential keyring is invalid",
+    );
   });
 
   it("does not expose key material in errors or console output", async () => {
-    vi.stubEnv("MODA_ENCRYPTION_KEYS_JSON", JSON.stringify({ active: "bad-secret-material" }));
+    vi.stubEnv(
+      "MODA_ENCRYPTION_KEYS_JSON",
+      JSON.stringify({ active: "bad-secret-material" }),
+    );
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      await expect(readCommerceCredentialKeyring()).rejects.toThrow("Commerce credential keyring is invalid");
+      await expect(readCommerceCredentialKeyring()).rejects.toThrow(
+        "Commerce credential keyring is invalid",
+      );
       expect(log).not.toHaveBeenCalled();
     } finally {
       log.mockRestore();

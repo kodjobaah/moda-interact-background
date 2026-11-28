@@ -25,11 +25,13 @@ export class StoreCategoryTranslationBatchAssemblyService {
     limit: number,
   ): Promise<StoreCategoryTranslationBatchAssembly | null> {
     return this.database.$transaction(async (transaction) => {
-      const runs = await transaction.$queryRaw<Array<{
-        id: string;
-        provider: string;
-        providerModelId: string;
-      }>>(Prisma.sql`
+      const runs = await transaction.$queryRaw<
+        Array<{
+          id: string;
+          provider: string;
+          providerModelId: string;
+        }>
+      >(Prisma.sql`
         SELECT "id", "provider", "providerModelId"
         FROM "commerce"."CommerceStoreCategoryTranslationRun"
         WHERE "id" = ${runId} AND "status" = 'PROCESSING'
@@ -38,7 +40,9 @@ export class StoreCategoryTranslationBatchAssemblyService {
       const run = runs[0];
       if (!run) return null;
 
-      const candidates = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      const candidates = await transaction.$queryRaw<
+        Array<{ id: string }>
+      >(Prisma.sql`
         SELECT "id"
         FROM "commerce"."CommerceStoreCategoryTranslationItem"
         WHERE "runId" = ${runId}

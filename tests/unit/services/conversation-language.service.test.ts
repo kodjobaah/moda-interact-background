@@ -58,7 +58,10 @@ describe("ConversationLanguageService", () => {
         merchantLanguageTag: "de-DE",
         platformLanguageTag: "en-US",
       }),
-    ).toMatchObject({ languageTag: "de-DE", languageSource: "merchant-default" });
+    ).toMatchObject({
+      languageTag: "de-DE",
+      languageSource: "merchant-default",
+    });
 
     expect(
       service.resolveInitialLanguage({
@@ -66,7 +69,10 @@ describe("ConversationLanguageService", () => {
         currentLanguageSource: null,
         platformLanguageTag: "en-US",
       }),
-    ).toMatchObject({ languageTag: "en-US", languageSource: "platform-default" });
+    ).toMatchObject({
+      languageTag: "en-US",
+      languageSource: "platform-default",
+    });
   });
 
   it.each([

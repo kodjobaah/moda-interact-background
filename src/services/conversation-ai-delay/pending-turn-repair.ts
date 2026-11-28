@@ -9,7 +9,10 @@ import {
   backgroundRuntimeConfigService,
   type BackgroundRuntimeConfigSnapshot,
 } from "../../runtime/background-runtime-config.js";
-import { PROCESSING_LEASE_MS, type ConversationTurnJob } from "../conversation-turn-processor.service.js";
+import {
+  PROCESSING_LEASE_MS,
+  type ConversationTurnJob,
+} from "../conversation-turn-processor.service.js";
 import { resolveEligibleAt } from "./eligibility.js";
 
 export const PENDING_TURN_REPAIR_PAGE_SIZE = 100;
@@ -23,9 +26,12 @@ const logger = createLogger({
 type RepairDatabase = Pick<PrismaClient, "$queryRawUnsafe">;
 type RepairQueue = Pick<Queue<ConversationTurnJob>, "add" | "getJob">;
 type RepairJob = Pick<Job<ConversationTurnJob>, "getState" | "retry">;
-type RuntimeConfigReader = Pick<{
-  current(): BackgroundRuntimeConfigSnapshot;
-}, "current">;
+type RuntimeConfigReader = Pick<
+  {
+    current(): BackgroundRuntimeConfigSnapshot;
+  },
+  "current"
+>;
 
 type Candidate = {
   id: string;
@@ -53,7 +59,10 @@ export class PendingTurnRepairService {
     private readonly queue: RepairQueue,
     private readonly runtimeConfig: RuntimeConfigReader = backgroundRuntimeConfigService,
     private readonly now: () => Date = () => new Date(),
-    private readonly log: Pick<StructuredLogger, "info" | "warn" | "error"> = logger,
+    private readonly log: Pick<
+      StructuredLogger,
+      "info" | "warn" | "error"
+    > = logger,
   ) {}
 
   async runPass(): Promise<PendingTurnRepairResult> {
@@ -65,14 +74,18 @@ export class PendingTurnRepairService {
       oldestDueLagMs: null,
     };
     const now = this.now();
-    if (!Number.isFinite(now.getTime())) throw new TypeError("Pending turn repair clock must return a valid Date");
+    if (!Number.isFinite(now.getTime()))
+      throw new TypeError("Pending turn repair clock must return a valid Date");
     const staleBefore = new Date(now.getTime() - PROCESSING_LEASE_MS);
     const config = this.runtimeConfig.current();
 
     try {
       while (result.scanned < PENDING_TURN_REPAIR_MAX_PER_PASS) {
         const remaining = PENDING_TURN_REPAIR_MAX_PER_PASS - result.scanned;
-        const page = await this.readPage(staleBefore, Math.min(PENDING_TURN_REPAIR_PAGE_SIZE, remaining));
+        const page = await this.readPage(
+          staleBefore,
+          Math.min(PENDING_TURN_REPAIR_PAGE_SIZE, remaining),
+        );
         if (page.length === 0) {
           if (this.cursor) this.cursor = null;
           break;
@@ -90,7 +103,10 @@ export class PendingTurnRepairService {
           const delay = Math.max(0, eligibleAt - now.getTime());
           if (!Number.isFinite(delay)) {
             result.skipped++;
-            this.cursor = { deadline: candidate.pendingAiNotBeforeAt, id: candidate.id };
+            this.cursor = {
+              deadline: candidate.pendingAiNotBeforeAt,
+              id: candidate.id,
+            };
             this.log.warn("whatsapp.turn.repair.candidate_skipped", {
               conversationId: candidate.id,
               observedVersion: candidate.inboundVersion,
@@ -108,7 +124,11 @@ export class PendingTurnRepairService {
 
           const jobId = `conversation-turn__${candidate.id}__${candidate.inboundVersion}`;
           try {
-            const outcome = await this.enqueueCandidate(candidate, jobId, delay);
+            const outcome = await this.enqueueCandidate(
+              candidate,
+              jobId,
+              delay,
+            );
             result[outcome]++;
           } catch (error) {
             result.failed++;
@@ -116,13 +136,17 @@ export class PendingTurnRepairService {
               conversationId: candidate.id,
               observedVersion: candidate.inboundVersion,
               jobId,
-              errorMessage: error instanceof Error ? error.message : String(error),
+              errorMessage:
+                error instanceof Error ? error.message : String(error),
               error,
             });
             throw error;
           }
 
-          this.cursor = { deadline: candidate.pendingAiNotBeforeAt, id: candidate.id };
+          this.cursor = {
+            deadline: candidate.pendingAiNotBeforeAt,
+            id: candidate.id,
+          };
         }
 
         if (page.length < Math.min(PENDING_TURN_REPAIR_PAGE_SIZE, remaining)) {
@@ -144,13 +168,18 @@ export class PendingTurnRepairService {
     jobId: string,
     delay: number,
   ): Promise<"requeued" | "skipped"> {
-    const existing = await this.queue.getJob(jobId) as RepairJob | undefined | null;
+    const existing = (await this.queue.getJob(jobId)) as
+      RepairJob | undefined | null;
     if (existing) return this.retryFailedJob(existing, delay);
 
-    await this.queue.add("process-conversation-turn", {
-      conversationId: candidate.id,
-      observedVersion: candidate.inboundVersion,
-    }, { jobId, delay, removeOnComplete: true });
+    await this.queue.add(
+      "process-conversation-turn",
+      {
+        conversationId: candidate.id,
+        observedVersion: candidate.inboundVersion,
+      },
+      { jobId, delay, removeOnComplete: true },
+    );
     return "requeued";
   }
 
@@ -162,7 +191,10 @@ export class PendingTurnRepairService {
     if (state !== "failed" || delay > 0) return "skipped";
 
     try {
-      await job.retry("failed", { resetAttemptsMade: true, resetAttemptsStarted: true });
+      await job.retry("failed", {
+        resetAttemptsMade: true,
+        resetAttemptsStarted: true,
+      });
       return "requeued";
     } catch (error) {
       let stateAfterRetry: string;
@@ -176,9 +208,13 @@ export class PendingTurnRepairService {
     }
   }
 
-  private async readPage(staleBefore: Date, limit: number): Promise<Candidate[]> {
+  private async readPage(
+    staleBefore: Date,
+    limit: number,
+  ): Promise<Candidate[]> {
     const cursor = this.cursor;
-    return this.database.$queryRawUnsafe<Candidate[]>(`
+    return this.database.$queryRawUnsafe<Candidate[]>(
+      `
       SELECT "id", "inboundVersion", "pendingAiNotBeforeAt",
         "pendingTurnStartedAt", "lastInboundAt"
       FROM "whatsapp"."Conversation"
@@ -193,9 +229,10 @@ export class PendingTurnRepairService {
           ("pendingAiNotBeforeAt", "id") > ($1::timestamptz, $2::text))
       ORDER BY "pendingAiNotBeforeAt", "id"
       LIMIT $4`,
-    cursor?.deadline ?? null,
-    cursor?.id ?? null,
-    staleBefore,
-    limit);
+      cursor?.deadline ?? null,
+      cursor?.id ?? null,
+      staleBefore,
+      limit,
+    );
   }
 }

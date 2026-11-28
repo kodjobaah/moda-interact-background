@@ -1,7 +1,10 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { canonicalWhatsAppSender, matchesRegisteredPhone } from "./phone.js";
 
-export type NoContactReader = Pick<PrismaClient | Prisma.TransactionClient, "$queryRawUnsafe">;
+export type NoContactReader = Pick<
+  PrismaClient | Prisma.TransactionClient,
+  "$queryRawUnsafe"
+>;
 
 type StoredNoContact = {
   phone: string;
@@ -19,7 +22,8 @@ export async function hasLocalNoContact(
 ): Promise<boolean> {
   const canonical = canonicalWhatsAppSender(input.recipient);
   if (!canonical) return false; // Not a match; recipient validation is a separate provider boundary.
-  const blocked = await database.$queryRawUnsafe<StoredNoContact[]>(`
+  const blocked = await database.$queryRawUnsafe<StoredNoContact[]>(
+    `
     SELECT cp."phone", cp."whatsappCanonicalPhone", s."defaultCountryCode"
     FROM "commerce"."CustomerPhone" cp
     JOIN "commerce"."Customer" c ON c."id" = cp."customerId"
@@ -27,6 +31,11 @@ export async function hasLocalNoContact(
     WHERE cp."endedAt" IS NULL AND cp."whatsappNoContact" = TRUE
       AND (cp."whatsappCanonicalPhone" = $1 OR cp."whatsappCanonicalPhone" IS NULL)
       AND ($2::text IS NULL OR c."shopId" = $2)
-  `, canonical, input.shopId ?? null);
-  return blocked.some((phone) => matchesRegisteredPhone(phone, canonical, phone.defaultCountryCode));
+  `,
+    canonical,
+    input.shopId ?? null,
+  );
+  return blocked.some((phone) =>
+    matchesRegisteredPhone(phone, canonical, phone.defaultCountryCode),
+  );
 }

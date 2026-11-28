@@ -54,12 +54,12 @@ export function mapCheckoutCreatedContractInput(
   event: ShopifyRecoveryEvent,
 ): CheckoutCreatedContractInput {
   if (event.eventType !== "checkout.created") {
-      throw new Error(
+    throw new Error(
       `Invalid checkout event type for checkout-created handler: ${event.eventType}`,
-      );
-    }
+    );
+  }
 
-    return {
+  return {
     shopDomain: event.tenant.shopDomain,
     checkoutToken: event.payload.checkoutToken,
     cartToken: event.payload.cartToken,
@@ -69,71 +69,71 @@ export function mapCheckoutCreatedContractInput(
       ? { internationalContext: event.internationalContext }
       : {}),
     activityAt: event.occurredAt ?? event.receivedAt,
-    };
-  }
+  };
+}
 
 export function mapCheckoutUpdatedContractInput(
   event: ShopifyRecoveryEvent,
 ): CheckoutUpdatedContractInput {
   if (event.eventType !== "checkout.updated") {
-      throw new Error(
+    throw new Error(
       `Invalid checkout event type for checkout-updated handler: ${event.eventType}`,
-      );
-    }
+    );
+  }
 
-    return {
+  return {
     shopDomain: event.tenant.shopDomain,
     checkoutToken: event.payload.checkoutToken,
-    ...( "cartToken" in event.payload && event.payload.cartToken !== undefined
+    ...("cartToken" in event.payload && event.payload.cartToken !== undefined
       ? { cartToken: event.payload.cartToken }
       : {}),
-    ...( "checkoutCreatedAt" in event.payload && event.payload.checkoutCreatedAt !== undefined
+    ...("checkoutCreatedAt" in event.payload &&
+    event.payload.checkoutCreatedAt !== undefined
       ? { checkoutCreatedAt: event.payload.checkoutCreatedAt }
       : {}),
-    ...( "abandonedCheckoutUrl" in event.payload && event.payload.abandonedCheckoutUrl !== undefined
+    ...("abandonedCheckoutUrl" in event.payload &&
+    event.payload.abandonedCheckoutUrl !== undefined
       ? { abandonedCheckoutUrl: event.payload.abandonedCheckoutUrl }
       : {}),
     ...(event.internationalContext
       ? { internationalContext: event.internationalContext }
       : {}),
     activityAt: event.occurredAt ?? event.receivedAt,
-    };
-  }
+  };
+}
 
 export function mapCartActivityContractInput(
   event: ShopifyRecoveryEvent,
 ): CartActivityContractInput {
   if (event.eventType !== "cart.activity") {
-      throw new Error(
+    throw new Error(
       `Invalid event type for cart-activity handler: ${event.eventType}`,
-      );
-    }
+    );
+  }
 
-    return {
+  return {
     shopId: event.tenant.shopId,
     shopDomain: event.tenant.shopDomain,
     cartToken: event.payload.cartToken,
     isEmpty: event.payload.isEmpty,
     activityAt: event.occurredAt ?? event.receivedAt,
-    };
-  }
+  };
+}
 
 export function mapOrderCompletedContractInput(
   event: ShopifyRecoveryEvent,
 ): OrderCompletedContractInput {
   if (event.eventType !== "order.completed") {
-      throw new Error(
+    throw new Error(
       `Invalid event type for order-completed handler: ${event.eventType}`,
-      );
-    }
+    );
+  }
 
-    return {
+  return {
     shopDomain: event.tenant.shopDomain,
     orderId: event.payload.orderId,
     checkoutToken: event.payload.checkoutToken,
     cartToken: event.payload.cartToken,
     completedAt: event.payload.completedAt,
-    };
-  }
-
-
+  };
+}

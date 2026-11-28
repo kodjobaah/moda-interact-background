@@ -3,9 +3,13 @@ import { safeParseShopifyWhatsAppConsentSyncJobV1 } from "@modainteract/moda-int
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import type { ShopifyWhatsAppConsentServicePort } from "./shopify-whatsapp-consent.service.js";
 
-type ConsentSynchroniser = Pick<ShopifyWhatsAppConsentServicePort, "syncCustomer">;
+type ConsentSynchroniser = Pick<
+  ShopifyWhatsAppConsentServicePort,
+  "syncCustomer"
+>;
 type ConsentLogger = Pick<StructuredLogger, "info" | "warn">;
-export type ConsentSyncJobOutcome = "updated" | "unchanged" | "skipped" | "stale";
+export type ConsentSyncJobOutcome =
+  "updated" | "unchanged" | "skipped" | "stale";
 
 /** Retry only transient read/write failures. The producer's checkout-events queue
  * already has a bounded, exponential three-attempt retry policy. */
@@ -45,8 +49,11 @@ export async function processShopifyWhatsAppConsentSyncJob(
     });
   } catch (error) {
     logger.warn("shopify.whatsapp_consent.sync_job", {
-      shopId, outcome: "retry", reasonCode: "SYNC_EXCEPTION",
-      errorMessage: error instanceof Error ? error.message : String(error), error,
+      shopId,
+      outcome: "retry",
+      reasonCode: "SYNC_EXCEPTION",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error,
     });
     throw new ShopifyConsentSyncRetryableError("SYNC_EXCEPTION");
   }
@@ -62,7 +69,9 @@ export async function processShopifyWhatsAppConsentSyncJob(
     // An absent, inactive, mismatched, or ambiguous shop/customer is never
     // fabricated from a phone number, and cannot authorise a recovery.
     logger.info("shopify.whatsapp_consent.sync_job", {
-      shopId, outcome: "skipped", reasonCode,
+      shopId,
+      outcome: "skipped",
+      reasonCode,
     });
     return "skipped";
   }
@@ -71,13 +80,17 @@ export async function processShopifyWhatsAppConsentSyncJob(
     // A newer provider observation already won the database monotonic fence.
     // Retrying an older observation must never roll back the local projection.
     logger.info("shopify.whatsapp_consent.sync_job", {
-      shopId, outcome: "stale", reasonCode,
+      shopId,
+      outcome: "stale",
+      reasonCode,
     });
     return "stale";
   }
 
   logger.warn("shopify.whatsapp_consent.sync_job", {
-    shopId, outcome: "retry", reasonCode,
+    shopId,
+    outcome: "retry",
+    reasonCode,
   });
   throw new ShopifyConsentSyncRetryableError(reasonCode);
 }

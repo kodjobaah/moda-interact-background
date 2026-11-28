@@ -43,7 +43,10 @@ const NOTICE_REASON = {
   INSTALLATION_INACTIVE: null,
   BASKET_EMPTY: null,
   BASKET_INVALID: null,
-} as const satisfies Record<WooAdmissionDenialReason, RecoveryConsentNoticeReason | null>;
+} as const satisfies Record<
+  WooAdmissionDenialReason,
+  RecoveryConsentNoticeReason | null
+>;
 
 const WOO_MONEY = /^(?:0|[1-9][0-9]{0,9})(?:\.[0-9]{1,2})?$/;
 const CURRENCY = /^[A-Z]{3}$/;
@@ -63,29 +66,56 @@ function contextFromAcceptedCandidate(
   denial: WooDeniedAdmission,
   candidate: WooPendingCandidate | null,
 ): RecoveryConsentCheckoutContext | undefined {
-  if (!candidate || candidate.source !== "woocommerce" ||
-    candidate.shopId !== denial.shopId || candidate.checkoutToken !== denial.checkoutToken ||
-    !SOURCE_ID.test(candidate.lastEventId) || !validActivity(candidate.lastActivityAt)) {
+  if (
+    !candidate ||
+    candidate.source !== "woocommerce" ||
+    candidate.shopId !== denial.shopId ||
+    candidate.checkoutToken !== denial.checkoutToken ||
+    !SOURCE_ID.test(candidate.lastEventId) ||
+    !validActivity(candidate.lastActivityAt)
+  ) {
     return undefined;
   }
 
   const context: {
-    -readonly [K in keyof RecoveryConsentCheckoutContext]?: RecoveryConsentCheckoutContext[K];
+    -readonly [
+      K in keyof RecoveryConsentCheckoutContext
+    ]?: RecoveryConsentCheckoutContext[K];
   } = { lastActivityAt: candidate.lastActivityAt };
 
-  if (candidate.basket?.kind !== "nonempty" || !candidate.basket.checkout) return context;
+  if (candidate.basket?.kind !== "nonempty" || !candidate.basket.checkout)
+    return context;
   const checkout = candidate.basket.checkout;
-  if (typeof checkout.total === "string" && WOO_MONEY.test(checkout.total) &&
-    typeof checkout.currency === "string" && CURRENCY.test(checkout.currency)) {
-    context.checkoutTotal = { amountDecimal: checkout.total, currency: checkout.currency };
+  if (
+    typeof checkout.total === "string" &&
+    WOO_MONEY.test(checkout.total) &&
+    typeof checkout.currency === "string" &&
+    CURRENCY.test(checkout.currency)
+  ) {
+    context.checkoutTotal = {
+      amountDecimal: checkout.total,
+      currency: checkout.currency,
+    };
   }
 
   // Invalid, omitted or oversized item evidence is UNKNOWN, never an empty cart.
   const items = checkout.items;
-  if (Array.isArray(items) && items.length > 0 && items.length <= MAX_ITEMS &&
-    items.every((item) => item && Number.isSafeInteger(item.quantity) &&
-      item.quantity >= 1 && item.quantity <= MAX_NOTICE_ITEM_COUNT)) {
-    const quantity = items.reduce<number>((sum, item) => sum + item.quantity, 0);
+  if (
+    Array.isArray(items) &&
+    items.length > 0 &&
+    items.length <= MAX_ITEMS &&
+    items.every(
+      (item) =>
+        item &&
+        Number.isSafeInteger(item.quantity) &&
+        item.quantity >= 1 &&
+        item.quantity <= MAX_NOTICE_ITEM_COUNT,
+    )
+  ) {
+    const quantity = items.reduce<number>(
+      (sum, item) => sum + item.quantity,
+      0,
+    );
     if (Number.isSafeInteger(quantity) && quantity <= MAX_NOTICE_ITEM_COUNT) {
       context.itemCount = quantity;
     }
@@ -94,11 +124,15 @@ function contextFromAcceptedCandidate(
   // BG003 establishes a canonical, unambiguous recipient before it can report
   // CONSENT_NOT_GRANTED. All other denial reasons leave identity unresolved:
   // do not label checkout-provided contact information as an identified customer.
-  if (denial.reason === "CONSENT_NOT_GRANTED" &&
-    typeof checkout.contact?.phone === "string" && checkout.contact.phone.trim()) {
+  if (
+    denial.reason === "CONSENT_NOT_GRANTED" &&
+    typeof checkout.contact?.phone === "string" &&
+    checkout.contact.phone.trim()
+  ) {
     const contact = checkout.contact;
     const names = [contact.firstName, contact.lastName].filter(
-      (part): part is string => typeof part === "string" && part.length <= 100 && !!part.trim(),
+      (part): part is string =>
+        typeof part === "string" && part.length <= 100 && !!part.trim(),
     );
     if (names.length) context.customerName = names.join(" ");
     if (typeof contact.email === "string" && contact.email.length <= 254) {
@@ -118,7 +152,11 @@ function logSafely(
   fields: Record<string, string>,
 ): void {
   // The shared logger's sink is diagnostic, never a correctness dependency.
-  try { logger[level](event, fields); } catch { /* sink unavailable */ }
+  try {
+    logger[level](event, fields);
+  } catch {
+    /* sink unavailable */
+  }
 }
 
 export type WooRecoveryConsentNoticeAdapterDependencies = Readonly<{
@@ -138,13 +176,22 @@ export function createWooRecoveryConsentDeniedAdmissionNotifier(
 
   return async (denial: WooDeniedAdmission): Promise<void> => {
     const fields: Record<string, string> = {
-      ...(denial && typeof denial.shopId === "string" && SHOP_ID.test(denial.shopId)
-        ? { shopId: denial.shopId } : {}),
-      reasonCode: isDenialReason(denial?.reason) ? denial.reason : "UNKNOWN_DENIAL_REASON",
+      ...(denial &&
+      typeof denial.shopId === "string" &&
+      SHOP_ID.test(denial.shopId)
+        ? { shopId: denial.shopId }
+        : {}),
+      reasonCode: isDenialReason(denial?.reason)
+        ? denial.reason
+        : "UNKNOWN_DENIAL_REASON",
     };
     let stage = "validate";
     try {
-      if (!denial || !SHOP_ID.test(denial.shopId) || !SOURCE_ID.test(denial.checkoutToken)) {
+      if (
+        !denial ||
+        !SHOP_ID.test(denial.shopId) ||
+        !SOURCE_ID.test(denial.checkoutToken)
+      ) {
         throw new TypeError("Invalid Woo denial shopId or checkoutToken");
       }
       if (!isDenialReason(denial.reason)) {
@@ -152,15 +199,22 @@ export function createWooRecoveryConsentDeniedAdmissionNotifier(
       }
       const mapped = NOTICE_REASON[denial.reason];
       if (mapped === null) {
-        logSafely(logger, "info", "woocommerce.recovery.consent_notice.skipped", {
-          ...fields, outcome: "excluded",
-        });
+        logSafely(
+          logger,
+          "info",
+          "woocommerce.recovery.consent_notice.skipped",
+          {
+            ...fields,
+            outcome: "excluded",
+          },
+        );
         return;
       }
 
       stage = "candidate_read";
       const candidate = await deps.candidates.getPending({
-        shopId: denial.shopId, checkoutToken: denial.checkoutToken,
+        shopId: denial.shopId,
+        checkoutToken: denial.checkoutToken,
       });
       const context = contextFromAcceptedCandidate(denial, candidate);
       const notice: RecoveryConsentNoticeInput = {
@@ -177,12 +231,21 @@ export function createWooRecoveryConsentDeniedAdmissionNotifier(
       if (outcome !== "created" && outcome !== "duplicate") {
         throw new Error("Invalid recovery consent notifier outcome");
       }
-      logSafely(logger, "info", "woocommerce.recovery.consent_notice.recorded", {
-        ...fields, outcome, context: context ? "accepted_snapshot" : "unavailable",
-      });
+      logSafely(
+        logger,
+        "info",
+        "woocommerce.recovery.consent_notice.recorded",
+        {
+          ...fields,
+          outcome,
+          context: context ? "accepted_snapshot" : "unavailable",
+        },
+      );
     } catch (error) {
       logSafely(logger, "error", "woocommerce.recovery.consent_notice.failed", {
-        ...fields, stage, outcome: "failed",
+        ...fields,
+        stage,
+        outcome: "failed",
       });
       // Do not turn Redis, database or notifier failures into a successful denial.
       throw error;

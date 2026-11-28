@@ -11,8 +11,16 @@ const entrypoints = [
     readinessScript: "readiness:shopify-event-worker",
     readinessCommand: "node dist/readiness.js moda-shopify-event-worker",
     serviceName: "moda-shopify-event-worker",
-    ownedWorkers: ["checkout.worker.js", "orders.worker.js", "woo-checkout-capture.worker.js", "woo-order-capture.worker.js"],
-    excludedWorkers: ["pending-recovery-candidate.worker.js", "whatsapp.worker.js"],
+    ownedWorkers: [
+      "checkout.worker.js",
+      "orders.worker.js",
+      "woo-checkout-capture.worker.js",
+      "woo-order-capture.worker.js",
+    ],
+    excludedWorkers: [
+      "pending-recovery-candidate.worker.js",
+      "whatsapp.worker.js",
+    ],
   },
   {
     file: "src/entrypoints/recovery.ts",
@@ -27,7 +35,13 @@ const entrypoints = [
       "shopify-discount-sync.worker.js",
       "recovery-delivery-retry.worker.js",
     ],
-    excludedWorkers: ["checkout.worker.js", "orders.worker.js", "woo-checkout-capture.worker.js", "woo-order-capture.worker.js", "whatsapp.worker.js"],
+    excludedWorkers: [
+      "checkout.worker.js",
+      "orders.worker.js",
+      "woo-checkout-capture.worker.js",
+      "woo-order-capture.worker.js",
+      "whatsapp.worker.js",
+    ],
   },
   {
     file: "src/entrypoints/messaging.ts",
@@ -67,12 +81,18 @@ const entrypoints = [
   {
     file: "src/entrypoints/billing.ts",
     script: "start:billing-worker",
-    command: "node --import ./observability/billing.mjs dist/entrypoints/billing.js",
+    command:
+      "node --import ./observability/billing.mjs dist/entrypoints/billing.js",
     readinessScript: "readiness:billing-worker",
     readinessCommand: "node dist/readiness.js moda-billing-worker",
     serviceName: "moda-billing-worker",
     ownedWorkers: [],
-    excludedWorkers: ["checkout.worker.js", "orders.worker.js", "pending-recovery-candidate.worker.js", "whatsapp.worker.js"],
+    excludedWorkers: [
+      "checkout.worker.js",
+      "orders.worker.js",
+      "pending-recovery-candidate.worker.js",
+      "whatsapp.worker.js",
+    ],
   },
 ] as const;
 
@@ -95,7 +115,9 @@ describe("production worker entrypoints", () => {
   it("keeps the combined local-development worker able to reconcile Shopify discounts", async () => {
     const source = await readFile("src/index.ts", "utf8");
 
-    expect(source).toContain('import("./workers/shopify-discount-sync.worker.js")');
+    expect(source).toContain(
+      'import("./workers/shopify-discount-sync.worker.js")',
+    );
     expect(source).toContain("createShopifyDiscountSyncWorker()");
   });
 
@@ -123,28 +145,47 @@ describe("production worker entrypoints", () => {
   it("uses one queue-aware reconciliation service for the worker and repair cadence", async () => {
     const source = await readFile("src/entrypoints/billing.ts", "utf8");
 
-    expect(source).toContain("createBillingReconciliationService(billingSubscriptionQueue, shopifyDiscountSyncQueue)");
-    expect(source).toContain("new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue, undefined, undefined, backgroundRuntimeConfigService, shopifyDiscountSyncQueue)");
-    expect(source).toContain("createBillingSubscriptionReconciliationWorker(subscriptionReconciliation)");
+    expect(source).toContain(
+      "createBillingReconciliationService(billingSubscriptionQueue, shopifyDiscountSyncQueue)",
+    );
+    expect(source).toContain(
+      "new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue, undefined, undefined, backgroundRuntimeConfigService, shopifyDiscountSyncQueue)",
+    );
+    expect(source).toContain(
+      "createBillingSubscriptionReconciliationWorker(subscriptionReconciliation)",
+    );
     expect(source).toContain("await subscriptionReconciliation.reconstruct()");
     expect(source).toContain("startQueuePerformanceTelemetry");
-    expect(source).toContain("queueNames: [billingSubscriptionQueue.name as QueueName]");
+    expect(source).toContain(
+      "queueNames: [billingSubscriptionQueue.name as QueueName]",
+    );
     expect(source).toContain("stopQueuePerformanceTelemetry");
     expect(source).toContain("closeResources: [");
   });
 
   it("wires bounded Shared logging for scheduled billing failures", async () => {
     const source = await readFile("src/entrypoints/billing.ts", "utf8");
-    const reporterStart = source.indexOf("function reportBillingReconciliationFailure");
-    const reporterEnd = source.indexOf("\n\nvoid startReadyWorkerProcess", reporterStart);
+    const reporterStart = source.indexOf(
+      "function reportBillingReconciliationFailure",
+    );
+    const reporterEnd = source.indexOf(
+      "\n\nvoid startReadyWorkerProcess",
+      reporterStart,
+    );
     const reporter = source.slice(reporterStart, reporterEnd);
 
-    expect(source).toContain('import { createLogger } from "@modainteract/moda-interact-shared/logging"');
+    expect(source).toContain(
+      'import { createLogger } from "@modainteract/moda-interact-shared/logging"',
+    );
     expect(source).toContain('serviceName: "moda-billing-worker"');
-    expect(source).toContain('logger.error("billing.reconciliation.scan_failed"');
+    expect(source).toContain(
+      'logger.error("billing.reconciliation.scan_failed"',
+    );
     expect(source).toContain("reportBillingReconciliationFailure,");
     expect(reporter).toContain("error.name.slice(0, 64)");
-    expect(reporter).toContain('reasonCode: "BILLING_RECONCILIATION_SCAN_FAILED"');
+    expect(reporter).toContain(
+      'reasonCode: "BILLING_RECONCILIATION_SCAN_FAILED"',
+    );
     expect(reporter).not.toContain("error.message");
     expect(reporter).not.toContain("error,");
     expect(reporter).not.toContain("error: error");

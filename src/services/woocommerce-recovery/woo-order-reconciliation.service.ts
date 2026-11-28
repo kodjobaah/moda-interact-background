@@ -33,7 +33,8 @@ export type WooStoredOrderObservation = Readonly<{
   orderId: string;
   occurredAt: string;
   /** A received conflicting callback cannot be ordered as authoritative. */
-  ambiguity?: "different-order-id" | "equal-time-conflict" | "same-event-id-conflict";
+  ambiguity?:
+    "different-order-id" | "equal-time-conflict" | "same-event-id-conflict";
 }>;
 
 /** The private write seam is injected for fault-injection and isolated tests. */
@@ -49,7 +50,10 @@ type EvidenceRedis = {
 
 function evidenceKey(ref: WooCheckoutRef): string {
   const digest = createHash("sha256")
-    .update(ref.shopId).update("\0").update(ref.checkoutToken).digest("hex");
+    .update(ref.shopId)
+    .update("\0")
+    .update(ref.checkoutToken)
+    .digest("hex");
   return `woo-recovery:observed-order:v1:${digest}`;
 }
 
@@ -63,12 +67,28 @@ function decodeEvidence(value: string): WooStoredOrderObservation {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("woo-order-evidence-invalid");
   }
-  const evidence = raw as Partial<Record<keyof WooStoredOrderObservation, unknown>>;
-  if (!["order-placed", "order-paid", "order-cancelled"].includes(String(evidence.kind)) ||
-      typeof evidence.eventId !== "string" || !evidence.eventId || evidence.eventId.length > 128 ||
-      typeof evidence.orderId !== "string" || !evidence.orderId || evidence.orderId.length > 128 ||
-      typeof evidence.occurredAt !== "string" || !Number.isFinite(Date.parse(evidence.occurredAt)) ||
-      (evidence.ambiguity !== undefined && !["different-order-id", "equal-time-conflict", "same-event-id-conflict"].includes(String(evidence.ambiguity)))) {
+  const evidence = raw as Partial<
+    Record<keyof WooStoredOrderObservation, unknown>
+  >;
+  if (
+    !["order-placed", "order-paid", "order-cancelled"].includes(
+      String(evidence.kind),
+    ) ||
+    typeof evidence.eventId !== "string" ||
+    !evidence.eventId ||
+    evidence.eventId.length > 128 ||
+    typeof evidence.orderId !== "string" ||
+    !evidence.orderId ||
+    evidence.orderId.length > 128 ||
+    typeof evidence.occurredAt !== "string" ||
+    !Number.isFinite(Date.parse(evidence.occurredAt)) ||
+    (evidence.ambiguity !== undefined &&
+      ![
+        "different-order-id",
+        "equal-time-conflict",
+        "same-event-id-conflict",
+      ].includes(String(evidence.ambiguity)))
+  ) {
     throw new Error("woo-order-evidence-invalid");
   }
   return evidence as WooStoredOrderObservation;
@@ -78,7 +98,9 @@ function decodeEvidence(value: string): WooStoredOrderObservation {
 export class WooOrderTerminalEvidenceStore implements WooOrderEvidenceStore {
   constructor(private readonly redis: EvidenceRedis) {}
 
-  async inspect(ref: WooCheckoutRef): Promise<WooStoredOrderObservation | null> {
+  async inspect(
+    ref: WooCheckoutRef,
+  ): Promise<WooStoredOrderObservation | null> {
     const value = await this.redis.get(evidenceKey(ref));
     return value === null ? null : decodeEvidence(value);
   }
@@ -92,19 +114,32 @@ export class WooOrderTerminalEvidenceStore implements WooOrderEvidenceStore {
         : { kind: observed.kind, orderId: observed.orderId };
   }
 
-  async persist(ref: WooCheckoutRef, observation: WooStoredOrderObservation): Promise<void> {
+  async persist(
+    ref: WooCheckoutRef,
+    observation: WooStoredOrderObservation,
+  ): Promise<void> {
     const result = await this.redis.set(
-      evidenceKey(ref), JSON.stringify(observation), "PX", WOO_ORDER_EVIDENCE_TTL_MS,
+      evidenceKey(ref),
+      JSON.stringify(observation),
+      "PX",
+      WOO_ORDER_EVIDENCE_TTL_MS,
     );
-    if (result !== "OK") throw new Error("woo-order-evidence-write-unconfirmed");
+    if (result !== "OK")
+      throw new Error("woo-order-evidence-write-unconfirmed");
   }
 }
 
 /** Inject WooCheckoutLeaseGuard from the existing checkout order guard module. */
 export class WooCheckoutCoordinatorService implements WooCheckoutCoordinator {
-  constructor(private readonly guard: {
-    withCheckoutLock<T>(shopId: string, checkoutToken: string, run: () => Promise<T>): Promise<T>;
-  }) {}
+  constructor(
+    private readonly guard: {
+      withCheckoutLock<T>(
+        shopId: string,
+        checkoutToken: string,
+        run: () => Promise<T>,
+      ): Promise<T>;
+    },
+  ) {}
 
   withCheckoutLock<T>(ref: WooCheckoutRef, run: () => Promise<T>): Promise<T> {
     return this.guard.withCheckoutLock(ref.shopId, ref.checkoutToken, run);
@@ -118,7 +153,11 @@ type ReconciliationDatabase = Pick<
 
 type OrderDecision =
   | { kind: "accepted"; effective: WooStoredOrderObservation }
-  | { kind: "ignored-duplicate" | "ignored-stale" | "deferred-conflict"; reason: string; effective: WooStoredOrderObservation };
+  | {
+      kind: "ignored-duplicate" | "ignored-stale" | "deferred-conflict";
+      reason: string;
+      effective: WooStoredOrderObservation;
+    };
 
 function decide(
   previously: WooStoredOrderObservation | null,
@@ -126,47 +165,91 @@ function decide(
 ): OrderDecision {
   if (!previously) return { kind: "accepted", effective: incoming };
   if (previously.orderId !== incoming.orderId) {
-    return { kind: "deferred-conflict", reason: "different-order-id",
-      effective: { ...previously, ambiguity: "different-order-id" } };
+    return {
+      kind: "deferred-conflict",
+      reason: "different-order-id",
+      effective: { ...previously, ambiguity: "different-order-id" },
+    };
   }
   if (previously.eventId === incoming.eventId) {
-    if (previously.kind !== incoming.kind || previously.occurredAt !== incoming.occurredAt) {
-      return { kind: "deferred-conflict", reason: "same-event-id-conflict",
-        effective: { ...previously, ambiguity: "same-event-id-conflict" } };
+    if (
+      previously.kind !== incoming.kind ||
+      previously.occurredAt !== incoming.occurredAt
+    ) {
+      return {
+        kind: "deferred-conflict",
+        reason: "same-event-id-conflict",
+        effective: { ...previously, ambiguity: "same-event-id-conflict" },
+      };
     }
-    return { kind: "ignored-duplicate", reason: "event-replayed", effective: previously };
+    return {
+      kind: "ignored-duplicate",
+      reason: "event-replayed",
+      effective: previously,
+    };
   }
-  const difference = Date.parse(incoming.occurredAt) - Date.parse(previously.occurredAt);
+  const difference =
+    Date.parse(incoming.occurredAt) - Date.parse(previously.occurredAt);
   if (difference < 0) {
-    return { kind: "ignored-stale", reason: "older-event", effective: previously };
+    return {
+      kind: "ignored-stale",
+      reason: "older-event",
+      effective: previously,
+    };
   }
   if (difference === 0 && previously.kind !== incoming.kind) {
-    return { kind: "deferred-conflict", reason: "equal-time-conflict",
-      effective: { ...previously, ambiguity: "equal-time-conflict" } };
+    return {
+      kind: "deferred-conflict",
+      reason: "equal-time-conflict",
+      effective: { ...previously, ambiguity: "equal-time-conflict" },
+    };
   }
   // A placed callback cannot demote an observed paid/cancelled order even if
   // Woo sends a second placed callback with a later timestamp.
   if (incoming.kind === "order-placed" && previously.kind !== "order-placed") {
-    return { kind: "ignored-stale", reason: "placed-after-terminal", effective: previously };
+    return {
+      kind: "ignored-stale",
+      reason: "placed-after-terminal",
+      effective: previously,
+    };
   }
   if (previously.kind === incoming.kind) {
     return {
-      kind: "ignored-duplicate", reason: "unchanged-order-state",
-      effective: difference > 0
-        ? { ...incoming, ...(previously.ambiguity ? { ambiguity: previously.ambiguity } : {}) }
-        : previously,
+      kind: "ignored-duplicate",
+      reason: "unchanged-order-state",
+      effective:
+        difference > 0
+          ? {
+              ...incoming,
+              ...(previously.ambiguity
+                ? { ambiguity: previously.ambiguity }
+                : {}),
+            }
+          : previously,
     };
   }
   // PAID/CANCELLED with *strictly later* timestamps may replace each other
   // in observed evidence. This never reopens a terminal PostgreSQL recovery.
-  return { kind: "accepted", effective: previously.ambiguity === "different-order-id"
-    ? { ...incoming, ambiguity: previously.ambiguity } : incoming };
+  return {
+    kind: "accepted",
+    effective:
+      previously.ambiguity === "different-order-id"
+        ? { ...incoming, ambiguity: previously.ambiguity }
+        : incoming,
+  };
 }
 
-function validatedObservation(event: WooOrderCapture): WooStoredOrderObservation {
-  if (!event.shopId || !event.checkoutKey || !event.order.orderId ||
-      event.checkoutKey !== event.order.checkoutKey ||
-      !KINDS[event.eventType] || !Number.isFinite(Date.parse(event.occurredAt))) {
+function validatedObservation(
+  event: WooOrderCapture,
+): WooStoredOrderObservation {
+  if (
+    !event.shopId ||
+    !event.checkoutKey ||
+    !event.order.orderId ||
+    event.checkoutKey !== event.order.checkoutKey ||
+    !KINDS[event.eventType] ||
+    !Number.isFinite(Date.parse(event.occurredAt))
+  ) {
     throw new Error("woo-order-event-invalid");
   }
   return {
@@ -178,7 +261,8 @@ function validatedObservation(event: WooOrderCapture): WooStoredOrderObservation
 }
 
 function recordedOrderId(metadata: unknown): string | null {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
+    return null;
   const value = (metadata as Record<string, unknown>).orderId;
   return typeof value === "string" ? value : null;
 }
@@ -202,13 +286,18 @@ export class WooOrderReconciliationService implements WooOrderReconciler {
     private readonly logger: StructuredLogger,
   ) {}
 
-  async reconcileOrder(event: WooOrderCapture): Promise<WooOrderReconciliationOutcome> {
+  async reconcileOrder(
+    event: WooOrderCapture,
+  ): Promise<WooOrderReconciliationOutcome> {
     let stage = "validation";
     let verifiedOrderId: string | undefined;
     try {
       const observation = validatedObservation(event);
       verifiedOrderId = observation.orderId;
-      const ref: WooCheckoutRef = { shopId: event.shopId, checkoutToken: event.checkoutKey };
+      const ref: WooCheckoutRef = {
+        shopId: event.shopId,
+        checkoutToken: event.checkoutKey,
+      };
       stage = "coordination";
       const outcome = await this.coordinator.withCheckoutLock(ref, async () => {
         stage = "evidence-read";
@@ -224,14 +313,24 @@ export class WooOrderReconciliationService implements WooOrderReconciler {
           select: { id: true },
         });
         if (durable) {
-          const history = await this.database.checkoutRecoveryStatusHistory.findFirst({
-            where: { checkoutRecoveryId: durable.id, source: "woocommerce.order" },
-            orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-            select: { metadata: true },
-          });
+          const history =
+            await this.database.checkoutRecoveryStatusHistory.findFirst({
+              where: {
+                checkoutRecoveryId: durable.id,
+                source: "woocommerce.order",
+              },
+              orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+              select: { metadata: true },
+            });
           const previousOrderId = recordedOrderId(history?.metadata);
-          if (previousOrderId !== null && previousOrderId !== observation.orderId) {
-            return { kind: "deferred-conflict", reason: "recorded-order-id-conflict" } as const;
+          if (
+            previousOrderId !== null &&
+            previousOrderId !== observation.orderId
+          ) {
+            return {
+              kind: "deferred-conflict",
+              reason: "recorded-order-id-conflict",
+            } as const;
           }
         }
 
@@ -248,12 +347,18 @@ export class WooOrderReconciliationService implements WooOrderReconciler {
         await this.candidates.cancelPending(ref);
 
         stage = "recovery-transition";
-        const transition = await this.transitionRecovery(ref, decision.effective);
+        const transition = await this.transitionRecovery(
+          ref,
+          decision.effective,
+        );
         if (decision.kind !== "accepted") {
           return { kind: decision.kind, reason: decision.reason } as const;
         }
         if (transition.kind === "already-terminal") {
-          return { kind: "already-terminal", reason: `recovery-${transition.status.toLowerCase()}` } as const;
+          return {
+            kind: "already-terminal",
+            reason: `recovery-${transition.status.toLowerCase()}`,
+          } as const;
         }
         const kind = {
           "order-placed": "placed-suppressed",
@@ -262,13 +367,18 @@ export class WooOrderReconciliationService implements WooOrderReconciler {
         } as const;
         return {
           kind: kind[decision.effective.kind],
-          ...(transition.kind === "changed" ? { recoveryId: transition.recoveryId } : {}),
+          ...(transition.kind === "changed"
+            ? { recoveryId: transition.recoveryId }
+            : {}),
         } as const;
       });
       const fields = {
-        shopId: event.shopId, eventId: event.eventId, orderId: verifiedOrderId,
-        operation: event.eventType, outcome: outcome.kind,
-        ...( "reason" in outcome ? { reason: outcome.reason } : {}),
+        shopId: event.shopId,
+        eventId: event.eventId,
+        orderId: verifiedOrderId,
+        operation: event.eventType,
+        outcome: outcome.kind,
+        ...("reason" in outcome ? { reason: outcome.reason } : {}),
       };
       if (outcome.kind === "deferred-conflict") {
         this.logger.warn("woocommerce.recovery.order.deferred", fields);
@@ -284,8 +394,11 @@ export class WooOrderReconciliationService implements WooOrderReconciler {
         operation: event.eventType,
         stage,
         reason: "dependency-or-validation-failure",
-        errorName: error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
-          ? error.name : "UnknownError",
+        errorName:
+          error instanceof Error &&
+          /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
+            ? error.name
+            : "UnknownError",
         errorMessage: error instanceof Error ? error.message : String(error),
         error: error,
       });
@@ -305,9 +418,14 @@ export class WooOrderReconciliationService implements WooOrderReconciler {
       });
       if (!recovery) return { kind: "absent" } as const;
       if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
-        return { kind: "already-terminal", recoveryId: recovery.id, status: recovery.status } as const;
+        return {
+          kind: "already-terminal",
+          recoveryId: recovery.id,
+          status: recovery.status,
+        } as const;
       }
-      const toStatus = observation.kind === "order-paid" ? "COMPLETED" : "CANCELLED";
+      const toStatus =
+        observation.kind === "order-paid" ? "COMPLETED" : "CANCELLED";
       const when = new Date(observation.occurredAt);
       const update = await tx.checkoutRecovery.updateMany({
         where: {
@@ -318,7 +436,9 @@ export class WooOrderReconciliationService implements WooOrderReconciler {
         },
         data: {
           status: toStatus,
-          ...(toStatus === "COMPLETED" ? { completedAt: when } : { expiredAt: when }),
+          ...(toStatus === "COMPLETED"
+            ? { completedAt: when }
+            : { expiredAt: when }),
           admissionBlockedAt: null,
           admissionBlockReason: null,
         },
@@ -337,7 +457,8 @@ export class WooOrderReconciliationService implements WooOrderReconciler {
           reason: `woo-${observation.kind}`,
           source: "woocommerce.order",
           metadata: {
-            orderId: observation.orderId, eventId: observation.eventId,
+            orderId: observation.orderId,
+            eventId: observation.eventId,
             orderKind: observation.kind,
           },
           occurredAt: when,

@@ -8,8 +8,10 @@ import { RecoveryOutreachAttemptService } from "../../src/services/recovery-outr
 import { RecoveryRecipientSuppressionAdmissionService } from "../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
-const disposableIntegrationEnabled = process.env.MODA_DISPOSABLE_INTEGRATION === "1";
-const describeWithDatabase = testDatabaseUrl && disposableIntegrationEnabled ? describe : describe.skip;
+const disposableIntegrationEnabled =
+  process.env.MODA_DISPOSABLE_INTEGRATION === "1";
+const describeWithDatabase =
+  testDatabaseUrl && disposableIntegrationEnabled ? describe : describe.skip;
 
 describeWithDatabase("recovery outreach recipient PostgreSQL contract", () => {
   it("persists immutable initial and follow-up recipients through the attempt writer", async () => {
@@ -75,10 +77,12 @@ describeWithDatabase("recovery outreach recipient PostgreSQL contract", () => {
         },
       });
 
-      const persistedAttempts = await database.recoveryOutreachAttempt.findMany({
-        where: { checkoutRecoveryId: recovery.id },
-        orderBy: { sequence: "asc" },
-      });
+      const persistedAttempts = await database.recoveryOutreachAttempt.findMany(
+        {
+          where: { checkoutRecoveryId: recovery.id },
+          orderBy: { sequence: "asc" },
+        },
+      );
       const persistedRecovery = await database.checkoutRecovery.findUnique({
         where: { id: recovery.id },
         select: { shopId: true },
@@ -130,7 +134,9 @@ describeWithDatabase("recovery outreach recipient PostgreSQL contract", () => {
           suppressUntil: until,
         },
       });
-      const service = new RecoveryRecipientSuppressionAdmissionService(database);
+      const service = new RecoveryRecipientSuppressionAdmissionService(
+        database,
+      );
 
       await expect(service.evaluate(shop.id, recipient)).resolves.toEqual({
         kind: "suppressed",
@@ -142,11 +148,15 @@ describeWithDatabase("recovery outreach recipient PostgreSQL contract", () => {
       await expect(service.evaluate(shop.id, "447700900123")).resolves.toEqual({
         kind: "allowed",
       });
-      await expect(service.evaluate(shop.id, recipient, until)).resolves.toEqual({
+      await expect(
+        service.evaluate(shop.id, recipient, until),
+      ).resolves.toEqual({
         kind: "allowed",
       });
     } finally {
-      await database.shop.deleteMany({ where: { id: { in: [shopId, otherShopId] } } });
+      await database.shop.deleteMany({
+        where: { id: { in: [shopId, otherShopId] } },
+      });
       await database.$disconnect();
     }
   }, 30_000);

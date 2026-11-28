@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CommerceHostError, CommerceMcpClient } from "../../../src/commerce/mcp-client.js";
+import {
+  CommerceHostError,
+  CommerceMcpClient,
+} from "../../../src/commerce/mcp-client.js";
 
-const logged=vi.hoisted(()=>({warn:vi.fn()}));
-vi.mock('@modainteract/moda-interact-shared/logging',()=>({createLogger:()=>({warn:logged.warn})}));
+const logged = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock("@modainteract/moda-interact-shared/logging", () => ({
+  createLogger: () => ({ warn: logged.warn }),
+}));
 
 const outreachTurn = {
   shopId: "shop-safe",
@@ -10,7 +15,10 @@ const outreachTurn = {
 };
 
 async function connectTo(response: Response): Promise<CommerceHostError> {
-  vi.stubGlobal("fetch", vi.fn(async () => response));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => response),
+  );
   const client = new CommerceMcpClient(
     { endpoint: new URL("https://commerce.example/api/mcp") },
     outreachTurn,
@@ -31,41 +39,81 @@ describe("CommerceMcpClient HTTP source diagnostics", () => {
   it.each([
     [401, "UNAUTHENTICATED: assertion rejected", "DENIED", false],
     [503, "Commerce worker unavailable", "UNAVAILABLE", true],
-  ] as const)("preserves the original HTTP %i error without changing host semantics", async (status, message, code, retryable) => {
-    const error = await connectTo(new Response(JSON.stringify({ error: { code: `E${status}`, message } }), {
-      status,
-      headers: { "content-type": "application/json", "x-request-id": `request-${status}` },
-    }));
+  ] as const)(
+    "preserves the original HTTP %i error without changing host semantics",
+    async (status, message, code, retryable) => {
+      const error = await connectTo(
+        new Response(
+          JSON.stringify({ error: { code: `E${status}`, message } }),
+          {
+            status,
+            headers: {
+              "content-type": "application/json",
+              "x-request-id": `request-${status}`,
+            },
+          },
+        ),
+      );
 
-    expect(error).toMatchObject({ code, retryable, sourceFailure: {
-      origin: "mcp_response", provider: "commerce-mcp", operation: "initialize",
-      httpStatus: status, providerRequestId: `request-${status}`,
-      providerError: { code: `E${status}`, message }, redactionApplied: false, truncated: false,
-    } });
-  });
+      expect(error).toMatchObject({
+        code,
+        retryable,
+        sourceFailure: {
+          origin: "mcp_response",
+          provider: "commerce-mcp",
+          operation: "initialize",
+          httpStatus: status,
+          providerRequestId: `request-${status}`,
+          providerError: { code: `E${status}`, message },
+          redactionApplied: false,
+          truncated: false,
+        },
+      });
+    },
+  );
 
   it("preserves a non-JSON MCP error body and marks truncation", async () => {
-    const error = await connectTo(new Response("MCP upstream rejected this request", {
-      status: 502,
-      headers: { "content-type": "text/plain" },
-    }));
+    const error = await connectTo(
+      new Response("MCP upstream rejected this request", {
+        status: 502,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
     expect(error.sourceFailure).toMatchObject({
-      origin: "mcp_response", httpStatus: 502,
-      providerErrorBody: "MCP upstream rejected this request", redactionApplied: false,
+      origin: "mcp_response",
+      httpStatus: 502,
+      providerErrorBody: "MCP upstream rejected this request",
+      redactionApplied: false,
     });
 
-    const truncated = await connectTo(new Response("x".repeat(10_000), { status: 502 }));
+    const truncated = await connectTo(
+      new Response("x".repeat(10_000), { status: 502 }),
+    );
     expect(truncated.sourceFailure).toMatchObject({ truncated: true });
-    expect(truncated.sourceFailure?.providerErrorBody).toHaveLength(1024 + "[TRUNCATED]".length);
+    expect(truncated.sourceFailure?.providerErrorBody).toHaveLength(
+      1024 + "[TRUNCATED]".length,
+    );
   });
 
   it("redacts credentials, customer email and signed URLs before preserving source text", async () => {
-    const error = await connectTo(new Response(JSON.stringify({
-      error: { code: "AUTH_FAILED", message: "Bearer token-secret customer@example.com https://shop.example/object?signature=signed-secret" },
-    }), { status: 401, headers: { "content-type": "application/json" } }));
+    const error = await connectTo(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "AUTH_FAILED",
+            message:
+              "Bearer token-secret customer@example.com https://shop.example/object?signature=signed-secret",
+          },
+        }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      ),
+    );
     const serialized = JSON.stringify(error.sourceFailure);
     expect(error.sourceFailure).toMatchObject({
-      providerError: { code: "AUTH_FAILED", message: "Bearer [REDACTED] [REDACTED] [REDACTED_URL]" },
+      providerError: {
+        code: "AUTH_FAILED",
+        message: "Bearer [REDACTED] [REDACTED] [REDACTED_URL]",
+      },
       redactionApplied: true,
     });
     expect(serialized).not.toContain("token-secret");
@@ -74,45 +122,77 @@ describe("CommerceMcpClient HTTP source diagnostics", () => {
   });
 
   it("does not manufacture a providerError when the source has none", async () => {
-    const emptyBody = await connectTo(new Response("{}", {
-      status: 503,
-      headers: { "content-type": "application/json" },
-    }));
-    expect(emptyBody.sourceFailure).toMatchObject({ httpStatus: 503, providerErrorBody: "{}" });
+    const emptyBody = await connectTo(
+      new Response("{}", {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(emptyBody.sourceFailure).toMatchObject({
+      httpStatus: 503,
+      providerErrorBody: "{}",
+    });
     expect(emptyBody.sourceFailure).not.toHaveProperty("providerError");
 
     const absentBody = await connectTo(new Response(null, { status: 503 }));
-    expect(absentBody.sourceFailure).toMatchObject({ httpStatus: 503, redactionApplied: false });
+    expect(absentBody.sourceFailure).toMatchObject({
+      httpStatus: 503,
+      redactionApplied: false,
+    });
     expect(absentBody.sourceFailure).not.toHaveProperty("providerError");
     expect(absentBody.sourceFailure).not.toHaveProperty("providerErrorBody");
   });
 
   it("preserves GraphQL error text and extension codes without retaining unrelated response fields", async () => {
-    const error = await connectTo(new Response(JSON.stringify({
-      errors: [{ message: "Shopify discount read denied", extensions: { code: "ACCESS_DENIED", trace: "discard-me" } }],
-      data: { customer: { email: "customer@example.test" } },
-    }), { status: 502, headers: { "content-type": "application/json" } }));
+    const error = await connectTo(
+      new Response(
+        JSON.stringify({
+          errors: [
+            {
+              message: "Shopify discount read denied",
+              extensions: { code: "ACCESS_DENIED", trace: "discard-me" },
+            },
+          ],
+          data: { customer: { email: "customer@example.test" } },
+        }),
+        { status: 502, headers: { "content-type": "application/json" } },
+      ),
+    );
     expect(error.sourceFailure).toMatchObject({
-      providerError: { details: [{ message: "Shopify discount read denied", extensions: { code: "ACCESS_DENIED" } }] },
+      providerError: {
+        details: [
+          {
+            message: "Shopify discount read denied",
+            extensions: { code: "ACCESS_DENIED" },
+          },
+        ],
+      },
       redactionApplied: true,
     });
     expect(JSON.stringify(error.sourceFailure)).not.toContain("discard-me");
-    expect(JSON.stringify(error.sourceFailure)).not.toContain("customer@example.test");
+    expect(JSON.stringify(error.sourceFailure)).not.toContain(
+      "customer@example.test",
+    );
   });
 
   it("does not invent an upstream message for malformed MCP success or caller cancellation", async () => {
-    const malformed = await connectTo(new Response("not-json", {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }));
+    const malformed = await connectTo(
+      new Response("not-json", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
     expect(malformed.code).toBe("UNAVAILABLE");
     expect(malformed.sourceFailure).toBeUndefined();
 
     const controller = new AbortController();
-    vi.stubGlobal("fetch", vi.fn(async () => {
-      controller.abort(new Error("caller stopped"));
-      throw new Error("fetch aborted");
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        controller.abort(new Error("caller stopped"));
+        throw new Error("fetch aborted");
+      }),
+    );
     const client = new CommerceMcpClient(
       { endpoint: new URL("https://commerce.example/api/mcp") },
       outreachTurn,
@@ -121,11 +201,32 @@ describe("CommerceMcpClient HTTP source diagnostics", () => {
     await expect(client.connect()).rejects.toMatchObject({ code: "CANCELLED" });
   });
 });
-it('logs structured tool errors without changing the returned contract',async()=>{
- const client=new CommerceMcpClient({endpoint:new URL('https://commerce.example/api/mcp')},{shopId:'shop-safe'} as never,new AbortController().signal);
- const value={contractVersion:'commerce.v1',status:'ERROR',code:'UNAVAILABLE',retryable:false};
- const sdk=(client as unknown as {client:{callTool:()=>Promise<unknown>}}).client;
- vi.spyOn(sdk,'callTool').mockResolvedValue({isError:true,structuredContent:value});
- expect(await client.call('commerce_search_products',{})).toEqual(value);
- expect(logged.warn).toHaveBeenCalledWith('commerce.mcp.tool.failed',expect.objectContaining({toolName:'commerce_search_products',errorCode:'UNAVAILABLE',stage:'mcp.tool_result'}));
+it("logs structured tool errors without changing the returned contract", async () => {
+  const client = new CommerceMcpClient(
+    { endpoint: new URL("https://commerce.example/api/mcp") },
+    { shopId: "shop-safe" } as never,
+    new AbortController().signal,
+  );
+  const value = {
+    contractVersion: "commerce.v1",
+    status: "ERROR",
+    code: "UNAVAILABLE",
+    retryable: false,
+  };
+  const sdk = (
+    client as unknown as { client: { callTool: () => Promise<unknown> } }
+  ).client;
+  vi.spyOn(sdk, "callTool").mockResolvedValue({
+    isError: true,
+    structuredContent: value,
+  });
+  expect(await client.call("commerce_search_products", {})).toEqual(value);
+  expect(logged.warn).toHaveBeenCalledWith(
+    "commerce.mcp.tool.failed",
+    expect.objectContaining({
+      toolName: "commerce_search_products",
+      errorCode: "UNAVAILABLE",
+      stage: "mcp.tool_result",
+    }),
+  );
 });

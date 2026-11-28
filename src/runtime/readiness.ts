@@ -14,7 +14,8 @@ export const WORKER_DEPENDENCIES = {
 } as const;
 
 export type WorkerServiceName = keyof typeof WORKER_DEPENDENCIES;
-export type DependencyName = (typeof WORKER_DEPENDENCIES)[WorkerServiceName][number];
+export type DependencyName =
+  (typeof WORKER_DEPENDENCIES)[WorkerServiceName][number];
 
 export interface ReadinessProbe {
   name: DependencyName;
@@ -44,13 +45,17 @@ export async function assertWorkerReady(
     const probe = probes.find((candidate) => candidate.name === dependency);
 
     if (!probe) {
-      throw new Error(`${serviceName} readiness failed: ${dependency} probe unavailable`);
+      throw new Error(
+        `${serviceName} readiness failed: ${dependency} probe unavailable`,
+      );
     }
 
     try {
       await probe.check();
     } catch {
-      throw new Error(`${serviceName} readiness failed: ${dependency} unavailable`);
+      throw new Error(
+        `${serviceName} readiness failed: ${dependency} unavailable`,
+      );
     }
   }
 }
@@ -101,7 +106,10 @@ async function probeRedis(
 
   try {
     await withTimeout(
-      redis.connect().then(() => redis.ping()).then(() => undefined),
+      redis
+        .connect()
+        .then(() => redis.ping())
+        .then(() => undefined),
       timeoutMs,
     );
   } finally {
@@ -126,7 +134,10 @@ async function probePostgreSQL(
   }
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
 
   try {

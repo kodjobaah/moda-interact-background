@@ -1,13 +1,20 @@
 import { expect, it, vi } from "vitest";
 import type { ConversationTurnFacadeContext } from "../conversation-turn-processor.service.test.js";
 
-export function registerSchedulingCases(context: ConversationTurnFacadeContext) {
+export function registerSchedulingCases(
+  context: ConversationTurnFacadeContext,
+) {
   const { harness, state, first } = context;
 
   it("uses the current runtime quiet window when enqueueing", async () => {
     const test = harness({
       now: () => first,
-      runtimeConfig: { current: () => ({ conversationQuietWindowMs: 1_000, conversationMaxSettleWindowMs: 5_000 }) },
+      runtimeConfig: {
+        current: () => ({
+          conversationQuietWindowMs: 1_000,
+          conversationMaxSettleWindowMs: 5_000,
+        }),
+      },
     });
     test.conversation.getTurnState.mockResolvedValue(
       state({ lastInboundAt: first, pendingTurnStartedAt: first }),
@@ -21,7 +28,12 @@ export function registerSchedulingCases(context: ConversationTurnFacadeContext) 
   it("uses the current runtime maximum settle window", async () => {
     const test = harness({
       now: () => first,
-      runtimeConfig: { current: () => ({ conversationQuietWindowMs: 1_000, conversationMaxSettleWindowMs: 5_000 }) },
+      runtimeConfig: {
+        current: () => ({
+          conversationQuietWindowMs: 1_000,
+          conversationMaxSettleWindowMs: 5_000,
+        }),
+      },
     });
     test.conversation.getTurnState.mockResolvedValue(
       state({ lastInboundAt: new Date(first.getTime() + 9_000) }),
@@ -34,21 +46,32 @@ export function registerSchedulingCases(context: ConversationTurnFacadeContext) 
 
   it("releases a claimed turn and delays AGENT admission until its frozen deadline", async () => {
     const test = harness({ now: () => new Date(first.getTime() + 20_000) });
-    test.conversation.getTurnState.mockResolvedValue(state({
-      pendingAiNotBeforeAt: new Date(first.getTime() + 60_000),
-      pendingAiDelayMinutes: 1,
-      pendingAiControlRevision: 3,
-      controlRevision: 3,
-    }));
+    test.conversation.getTurnState.mockResolvedValue(
+      state({
+        pendingAiNotBeforeAt: new Date(first.getTime() + 60_000),
+        pendingAiDelayMinutes: 1,
+        pendingAiControlRevision: 3,
+        controlRevision: 3,
+      }),
+    );
 
-    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+    await test.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
 
     expect(test.abuseAdmission.admitSettledTurn).toHaveBeenCalledOnce();
-    expect(test.conversation.releaseTurn).toHaveBeenCalledWith("conversation-1", 3);
+    expect(test.conversation.releaseTurn).toHaveBeenCalledWith(
+      "conversation-1",
+      3,
+    );
     expect(test.queue.add).toHaveBeenCalledWith(
       "process-conversation-turn",
       { conversationId: "conversation-1", observedVersion: 3 },
-      expect.objectContaining({ jobId: "conversation-turn__conversation-1__3", delay: 40_000 }),
+      expect.objectContaining({
+        jobId: "conversation-turn__conversation-1__3",
+        delay: 40_000,
+      }),
     );
     expect(test.admission.reserve).not.toHaveBeenCalled();
     expect(test.runAgent).not.toHaveBeenCalled();
@@ -56,20 +79,27 @@ export function registerSchedulingCases(context: ConversationTurnFacadeContext) 
 
   it("does not delay AUTOMATION clarification while an AGENT deadline is pending", async () => {
     const test = harness({ now: () => new Date(first.getTime() + 20_000) });
-    test.conversation.getTurnState.mockResolvedValue(state({
-      pendingAiNotBeforeAt: new Date(first.getTime() + 60_000),
-      pendingAiDelayMinutes: 1,
-      pendingAiControlRevision: 3,
-      controlRevision: 3,
-    }));
+    test.conversation.getTurnState.mockResolvedValue(
+      state({
+        pendingAiNotBeforeAt: new Date(first.getTime() + 60_000),
+        pendingAiDelayMinutes: 1,
+        pendingAiControlRevision: 3,
+        controlRevision: 3,
+      }),
+    );
     test.loaded.clarificationText = "Please send a shorter question.";
 
-    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+    await test.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
 
-    expect(test.admission.reserve).toHaveBeenCalledWith(expect.objectContaining({
-      senderType: "AUTOMATION",
-      content: "Please send a shorter question.",
-    }));
+    expect(test.admission.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        senderType: "AUTOMATION",
+        content: "Please send a shorter question.",
+      }),
+    );
     expect(test.admission.sendPreparedText).toHaveBeenCalledOnce();
     expect(test.queue.add).not.toHaveBeenCalled();
     expect(test.runAgent).not.toHaveBeenCalled();
@@ -77,28 +107,47 @@ export function registerSchedulingCases(context: ConversationTurnFacadeContext) 
 
   it("fails closed when the injected maximum is below the quiet window", async () => {
     const test = harness({
-      runtimeConfig: { current: () => ({ conversationQuietWindowMs: 5_000, conversationMaxSettleWindowMs: 1_000 }) },
+      runtimeConfig: {
+        current: () => ({
+          conversationQuietWindowMs: 5_000,
+          conversationMaxSettleWindowMs: 1_000,
+        }),
+      },
     });
 
-    await expect(test.processor.process({ conversationId: "conversation-1", observedVersion: 3 })).rejects.toThrow(
-      "max settle window must be at least the quiet window",
-    );
+    await expect(
+      test.processor.process({
+        conversationId: "conversation-1",
+        observedVersion: 3,
+      }),
+    ).rejects.toThrow("max settle window must be at least the quiet window");
     expect(test.conversation.claimTurn).not.toHaveBeenCalled();
     expect(test.runAgent).not.toHaveBeenCalled();
   });
 
   it("applies a changed quiet window to a subsequent turn without restart", async () => {
-    let config = { conversationQuietWindowMs: 3_000, conversationMaxSettleWindowMs: 10_000 };
-    const test = harness({ now: () => first, runtimeConfig: { current: () => config } });
+    let config = {
+      conversationQuietWindowMs: 3_000,
+      conversationMaxSettleWindowMs: 10_000,
+    };
+    const test = harness({
+      now: () => first,
+      runtimeConfig: { current: () => config },
+    });
     test.conversation.getTurnState.mockResolvedValue(
       state({ lastInboundAt: first, pendingTurnStartedAt: first }),
     );
 
     await test.processor.enqueue("conversation-1", 3);
-    config = { conversationQuietWindowMs: 1_000, conversationMaxSettleWindowMs: 10_000 };
+    config = {
+      conversationQuietWindowMs: 1_000,
+      conversationMaxSettleWindowMs: 10_000,
+    };
     await test.processor.enqueue("conversation-1", 4);
 
-    expect(test.queue.add.mock.calls.map((call) => call[2].delay)).toEqual([3_000, 1_000]);
+    expect(test.queue.add.mock.calls.map((call) => call[2].delay)).toEqual([
+      3_000, 1_000,
+    ]);
   });
 
   it("logs and rethrows a BullMQ scheduling failure with bounded turn identifiers", async () => {

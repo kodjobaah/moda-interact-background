@@ -116,18 +116,22 @@ function reinstallRow() {
 
 function projectSelected(value: any, select: any): any {
   if (!value || !select) return value;
-  return Object.fromEntries(Object.entries(select).flatMap(([key, selection]) => {
-    if (!selection) return [];
-    if (selection === true) return [[key, value[key]]];
-    return [[key, projectSelected(value[key], (selection as any).select)]];
-  }));
+  return Object.fromEntries(
+    Object.entries(select).flatMap(([key, selection]) => {
+      if (!selection) return [];
+      if (selection === true) return [[key, value[key]]];
+      return [[key, projectSelected(value[key], (selection as any).select)]];
+    }),
+  );
 }
 
 function harness({
   row = initialRow(),
   snapshot = { activeSubscription: provider, latestLifecycleEvent: null },
   plansById = { "plan-current": currentPlan },
-  plansByHandle = { "provider-plan": { ...currentPlan, id: "plan-pending", kind: "FREE" } },
+  plansByHandle = {
+    "provider-plan": { ...currentPlan, id: "plan-pending", kind: "FREE" },
+  },
   providerError,
   committedNextReconcileAt = new Date("2026-09-12T12:15:00.000Z"),
 }: {
@@ -145,30 +149,43 @@ function harness({
   });
   const planFindUnique = vi.fn(async ({ where }: any) => {
     order.push("plan-context");
-    return where.id ? plansById[where.id] ?? null : plansByHandle[where.shopifyPlanHandle] ?? null;
+    return where.id
+      ? (plansById[where.id] ?? null)
+      : (plansByHandle[where.shopifyPlanHandle] ?? null);
   });
-  const subscriptionFindUnique = vi.fn().mockResolvedValue({ nextReconcileAt: committedNextReconcileAt });
+  const subscriptionFindUnique = vi
+    .fn()
+    .mockResolvedValue({ nextReconcileAt: committedNextReconcileAt });
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
     subscription: { findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
   };
   const database = {
-    shop: { findUnique: shopFindUnique, findMany: vi.fn().mockResolvedValue([]) },
+    shop: {
+      findUnique: shopFindUnique,
+      findMany: vi.fn().mockResolvedValue([]),
+    },
     billingPlan: { findUnique: planFindUnique },
     subscription: {
       findUnique: subscriptionFindUnique,
       update: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
-    $transaction: vi.fn(async (callback: (transaction: any) => unknown) => callback(transaction)),
+    $transaction: vi.fn(async (callback: (transaction: any) => unknown) =>
+      callback(transaction),
+    ),
   };
   const partner = {
-    getActiveSubscription: vi.fn().mockResolvedValue(snapshot.activeSubscription),
-    getSubscriptionReconciliationSnapshot: vi.fn().mockImplementation(async () => {
-      order.push("provider-snapshot");
-      if (providerError) throw providerError;
-      return snapshot;
-    }),
+    getActiveSubscription: vi
+      .fn()
+      .mockResolvedValue(snapshot.activeSubscription),
+    getSubscriptionReconciliationSnapshot: vi
+      .fn()
+      .mockImplementation(async () => {
+        order.push("provider-snapshot");
+        if (providerError) throw providerError;
+        return snapshot;
+      }),
   };
   const queue = { add: vi.fn().mockResolvedValue({}) };
   const logger = {
@@ -190,7 +207,15 @@ function harness({
     () => now,
     runtimeConfigReader,
   );
-  return { order, database, partner, queue, logger, runtimeConfigReader, service };
+  return {
+    order,
+    database,
+    partner,
+    queue,
+    logger,
+    runtimeConfigReader,
+    service,
+  };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -199,22 +224,36 @@ describe("billing reconciliation coordinator", () => {
   it("parses malformed input before runtime config, database, or provider access", async () => {
     const test = harness();
 
-    await expect(test.service.reconcileJob({ shopId: "shop-1" })).rejects.toThrow();
+    await expect(
+      test.service.reconcileJob({ shopId: "shop-1" }),
+    ).rejects.toThrow();
 
     expect(test.runtimeConfigReader.current).not.toHaveBeenCalled();
     expect(test.database.shop.findUnique).not.toHaveBeenCalled();
-    expect(test.partner.getSubscriptionReconciliationSnapshot).not.toHaveBeenCalled();
+    expect(
+      test.partner.getSubscriptionReconciliationSnapshot,
+    ).not.toHaveBeenCalled();
   });
 
   it("captures runtime config once after parse and reuses one normal provider snapshot", async () => {
     const test = harness();
-    const completeFree = vi.spyOn(InitialActivationReconciliationService.prototype, "completeVerifiedFree")
+    const completeFree = vi
+      .spyOn(
+        InitialActivationReconciliationService.prototype,
+        "completeVerifiedFree",
+      )
       .mockResolvedValue(undefined);
 
-    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+    await test.service.reconcileJob(
+      createSubscriptionReconcilePayload("shop-1", "subscription-1", now),
+    );
 
-    expect(test.order.indexOf("runtime-config")).toBeLessThan(test.order.indexOf("shop-context"));
-    expect(test.order.indexOf("shop-context")).toBeLessThan(test.order.indexOf("provider-snapshot"));
+    expect(test.order.indexOf("runtime-config")).toBeLessThan(
+      test.order.indexOf("shop-context"),
+    );
+    expect(test.order.indexOf("shop-context")).toBeLessThan(
+      test.order.indexOf("provider-snapshot"),
+    );
     expect(test.order.slice(0, 7)).toEqual([
       "runtime-config",
       "log:billing.subscription_reconciliation.job_received",
@@ -225,49 +264,95 @@ describe("billing reconciliation coordinator", () => {
       "log:billing.subscription_reconciliation.provider_snapshot_received",
     ]);
     expect(test.runtimeConfigReader.current).toHaveBeenCalledOnce();
-    expect(test.partner.getSubscriptionReconciliationSnapshot).toHaveBeenCalledExactlyOnceWith("gid://shopify/Shop/1");
+    expect(
+      test.partner.getSubscriptionReconciliationSnapshot,
+    ).toHaveBeenCalledExactlyOnceWith("gid://shopify/Shop/1");
     expect(completeFree).toHaveBeenCalledOnce();
-      expect(test.logger.info.mock.calls.map(([eventName]) => eventName)).toEqual([
+    expect(test.logger.info.mock.calls.map(([eventName]) => eventName)).toEqual(
+      [
         "billing.subscription_reconciliation.job_received",
         "billing.subscription_reconciliation.job_accepted",
         "billing.subscription_reconciliation.provider_snapshot_requested",
         "billing.subscription_reconciliation.provider_snapshot_received",
-      ]);
-      expect(test.logger.info).toHaveBeenNthCalledWith(1, "billing.subscription_reconciliation.job_received", {
+      ],
+    );
+    expect(test.logger.info).toHaveBeenNthCalledWith(
+      1,
+      "billing.subscription_reconciliation.job_received",
+      {
         shopId: "shop-1",
         subscriptionId: "subscription-1",
         expectedNextReconcileAt: now.toISOString(),
-      });
-      expect(test.logger.info).toHaveBeenNthCalledWith(3, "billing.subscription_reconciliation.provider_snapshot_requested", {
+      },
+    );
+    expect(test.logger.info).toHaveBeenNthCalledWith(
+      3,
+      "billing.subscription_reconciliation.provider_snapshot_requested",
+      {
         shopId: "shop-1",
         subscriptionId: "subscription-1",
         kind: "initial-activation",
-      });
-      expect(test.logger.info).toHaveBeenNthCalledWith(4, "billing.subscription_reconciliation.provider_snapshot_received", {
+      },
+    );
+    expect(test.logger.info).toHaveBeenNthCalledWith(
+      4,
+      "billing.subscription_reconciliation.provider_snapshot_received",
+      {
         shopId: "shop-1",
         subscriptionId: "subscription-1",
         kind: "initial-activation",
         hasActiveSubscription: true,
         providerPlanHandle: provider.planHandle,
         hasLifecycleEvent: false,
-      });
+      },
+    );
   });
 
   it.each([
-    ["cycle-discovery", cycleRow(), { ...currentPlan, kind: "FREE", active: false, recoveryCreditPackEnabled: true }, "cycle-discovery-plan-ineligible"],
-    ["rollover", rolloverRow(), { ...currentPlan, kind: "FREE", active: true, recoveryCreditPackEnabled: false }, "rollover-plan-ineligible"],
-  ])("keeps the %s plan eligibility gate provider-free", async (_kind, row, plan, reason) => {
-    const test = harness({ row, plansById: { "plan-current": plan } });
+    [
+      "cycle-discovery",
+      cycleRow(),
+      {
+        ...currentPlan,
+        kind: "FREE",
+        active: false,
+        recoveryCreditPackEnabled: true,
+      },
+      "cycle-discovery-plan-ineligible",
+    ],
+    [
+      "rollover",
+      rolloverRow(),
+      {
+        ...currentPlan,
+        kind: "FREE",
+        active: true,
+        recoveryCreditPackEnabled: false,
+      },
+      "rollover-plan-ineligible",
+    ],
+  ])(
+    "keeps the %s plan eligibility gate provider-free",
+    async (_kind, row, plan, reason) => {
+      const test = harness({ row, plansById: { "plan-current": plan } });
 
-    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+      await test.service.reconcileJob(
+        createSubscriptionReconcilePayload("shop-1", "subscription-1", now),
+      );
 
-    expect(test.partner.getSubscriptionReconciliationSnapshot).not.toHaveBeenCalled();
-    expect(test.logger.info).toHaveBeenCalledWith("billing.subscription_reconciliation.job_skipped", expect.objectContaining({
-      reason,
-      currentPlanKind: plan.kind,
-      currentPlanActive: plan.active,
-    }));
-  });
+      expect(
+        test.partner.getSubscriptionReconciliationSnapshot,
+      ).not.toHaveBeenCalled();
+      expect(test.logger.info).toHaveBeenCalledWith(
+        "billing.subscription_reconciliation.job_skipped",
+        expect.objectContaining({
+          reason,
+          currentPlanKind: plan.kind,
+          currentPlanActive: plan.active,
+        }),
+      );
+    },
+  );
 
   it("does not add a plan eligibility gate to established plan changes", async () => {
     const test = harness({
@@ -275,80 +360,158 @@ describe("billing reconciliation coordinator", () => {
       plansById: { "plan-current": { ...currentPlan, active: false } },
       snapshot: { activeSubscription: null, latestLifecycleEvent: null },
     });
-    const retry = vi.spyOn(EstablishedPlanChangeReconciliationService.prototype, "recordRetry")
+    const retry = vi
+      .spyOn(
+        EstablishedPlanChangeReconciliationService.prototype,
+        "recordRetry",
+      )
       .mockResolvedValue(undefined);
 
-    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+    await test.service.reconcileJob(
+      createSubscriptionReconcilePayload("shop-1", "subscription-1", now),
+    );
 
-    expect(test.partner.getSubscriptionReconciliationSnapshot).toHaveBeenCalledOnce();
-    expect(retry).toHaveBeenCalledWith("shop-1", expect.objectContaining({ currentPlanId: "plan-current" }), "PROVIDER_STATE_UNRESOLVED");
+    expect(
+      test.partner.getSubscriptionReconciliationSnapshot,
+    ).toHaveBeenCalledOnce();
+    expect(retry).toHaveBeenCalledWith(
+      "shop-1",
+      expect.objectContaining({ currentPlanId: "plan-current" }),
+      "PROVIDER_STATE_UNRESOLVED",
+    );
   });
 
   it("preserves a failed-unfreeze accounting error when the scheduled provider query fails", async () => {
     const row = rolloverRow("SYNC_ERROR");
-    row.subscription.lastSyncErrorCode = "UNFREEZE_PRE_CLOSE_USAGE_FLUSH_FAILED";
+    row.subscription.lastSyncErrorCode =
+      "UNFREEZE_PRE_CLOSE_USAGE_FLUSH_FAILED";
     const blocked = {
       ...row,
-      subscription: { ...row.subscription, lastProviderLifecycleState: "UPDATED" },
+      subscription: {
+        ...row.subscription,
+        lastProviderLifecycleState: "UPDATED",
+      },
     };
     const failure = new Error("Shopify provider unavailable");
     const test = harness({ row: blocked, providerError: failure });
     test.database.subscription.updateMany.mockResolvedValueOnce({ count: 1 });
 
-    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+    await test.service.reconcileJob(
+      createSubscriptionReconcilePayload("shop-1", "subscription-1", now),
+    );
 
-    expect(test.partner.getSubscriptionReconciliationSnapshot).toHaveBeenCalledOnce();
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        status: { in: ["SYNC_ERROR", "FROZEN"] },
-        planId: "plan-current",
-        nextReconcileAt: now,
-        lastSyncErrorCode: { in: [
-          "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT", "UNFREEZE_LIFETIME_FREE_COUNTER_HISTORY_CONFLICT", "UNFREEZE_PRE_CLOSE_USAGE_FLUSH_FAILED",
-        ] },
+    expect(
+      test.partner.getSubscriptionReconciliationSnapshot,
+    ).toHaveBeenCalledOnce();
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: { in: ["SYNC_ERROR", "FROZEN"] },
+          planId: "plan-current",
+          nextReconcileAt: now,
+          lastSyncErrorCode: {
+            in: [
+              "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
+              "UNFREEZE_LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
+              "UNFREEZE_PRE_CLOSE_USAGE_FLUSH_FAILED",
+            ],
+          },
+        }),
+        data: expect.objectContaining({ nextReconcileAt: expect.any(Date) }),
       }),
-      data: expect.objectContaining({ nextReconcileAt: expect.any(Date) }),
-    }));
-    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("lastSyncErrorCode");
-    expect(test.logger.error).toHaveBeenCalledWith("billing.subscription_reconciliation.provider_failed", expect.objectContaining({
-      shopId: "shop-1", errorMessage: "Shopify provider unavailable", error: failure,
-    }));
+    );
+    expect(
+      test.database.subscription.updateMany.mock.calls[0][0].data,
+    ).not.toHaveProperty("lastSyncErrorCode");
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.provider_failed",
+      expect.objectContaining({
+        shopId: "shop-1",
+        errorMessage: "Shopify provider unavailable",
+        error: failure,
+      }),
+    );
     expect(test.queue.add).toHaveBeenCalledOnce();
   });
 
-  it.each(["handled", "restored"] as const)("republishes the committed schedule after lifecycle %s", async (result) => {
-    const test = harness({ row: rolloverRow("FROZEN"), snapshot: {
-      activeSubscription: provider,
-      latestLifecycleEvent: { id: "event-1", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN", occurredAt: now },
-    } });
-    const reconcile = vi.spyOn(ShopifySubscriptionLifecycleReconciliationService.prototype, "reconcile")
-      .mockResolvedValue(result);
+  it.each(["handled", "restored"] as const)(
+    "republishes the committed schedule after lifecycle %s",
+    async (result) => {
+      const test = harness({
+        row: rolloverRow("FROZEN"),
+        snapshot: {
+          activeSubscription: provider,
+          latestLifecycleEvent: {
+            id: "event-1",
+            eventType: "SUBSCRIPTION_UNFROZEN",
+            state: "UNFROZEN",
+            occurredAt: now,
+          },
+        },
+      });
+      const reconcile = vi
+        .spyOn(
+          ShopifySubscriptionLifecycleReconciliationService.prototype,
+          "reconcile",
+        )
+        .mockResolvedValue(result);
 
-    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+      await test.service.reconcileJob(
+        createSubscriptionReconcilePayload("shop-1", "subscription-1", now),
+      );
 
-    expect(reconcile).toHaveBeenCalledWith("shop-1", "subscription-1", expect.anything(), now);
-    expect(reconcile.mock.calls[0][0]).toBe("shop-1");
-    expect(test.database.subscription.findUnique).toHaveBeenCalledWith({
-      where: { id: "subscription-1" },
-      select: expect.objectContaining({ nextReconcileAt: true, status: true, lastSyncErrorCode: true }),
-    });
-    expect(test.queue.add).toHaveBeenCalledOnce();
-    expect(test.queue.add.mock.calls[0][1].expectedNextReconcileAt).toBe("2026-09-12T12:15:00.000Z");
-    expect(test.partner.getSubscriptionReconciliationSnapshot).toHaveBeenCalledOnce();
-  });
+      expect(reconcile).toHaveBeenCalledWith(
+        "shop-1",
+        "subscription-1",
+        expect.anything(),
+        now,
+      );
+      expect(reconcile.mock.calls[0][0]).toBe("shop-1");
+      expect(test.database.subscription.findUnique).toHaveBeenCalledWith({
+        where: { id: "subscription-1" },
+        select: expect.objectContaining({
+          nextReconcileAt: true,
+          status: true,
+          lastSyncErrorCode: true,
+        }),
+      });
+      expect(test.queue.add).toHaveBeenCalledOnce();
+      expect(test.queue.add.mock.calls[0][1].expectedNextReconcileAt).toBe(
+        "2026-09-12T12:15:00.000Z",
+      );
+      expect(
+        test.partner.getSubscriptionReconciliationSnapshot,
+      ).toHaveBeenCalledOnce();
+    },
+  );
 
   it("preserves provider-present FROZEN continue fallthrough to applyOtherCurrentPlan", async () => {
     const frozen = rolloverRow("FROZEN");
     const test = harness({
       row: frozen,
-      plansById: { "plan-current": { ...currentPlan, active: false, kind: "FREE", recoveryCreditPackEnabled: false } },
+      plansById: {
+        "plan-current": {
+          ...currentPlan,
+          active: false,
+          kind: "FREE",
+          recoveryCreditPackEnabled: false,
+        },
+      },
     });
-    vi.spyOn(ShopifySubscriptionLifecycleReconciliationService.prototype, "reconcile")
-      .mockResolvedValue("continue");
-    const applyOther = vi.spyOn(InitialActivationReconciliationService.prototype, "applyOtherCurrentPlan")
+    vi.spyOn(
+      ShopifySubscriptionLifecycleReconciliationService.prototype,
+      "reconcile",
+    ).mockResolvedValue("continue");
+    const applyOther = vi
+      .spyOn(
+        InitialActivationReconciliationService.prototype,
+        "applyOtherCurrentPlan",
+      )
       .mockResolvedValue(undefined);
 
-    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+    await test.service.reconcileJob(
+      createSubscriptionReconcilePayload("shop-1", "subscription-1", now),
+    );
 
     expect(applyOther).toHaveBeenCalledOnce();
     const expected = applyOther.mock.calls[0][6];
@@ -361,22 +524,39 @@ describe("billing reconciliation coordinator", () => {
       nextReconcileAt: now,
     });
     expect(expected).not.toHaveProperty("pendingPlanId");
-    expect(test.partner.getSubscriptionReconciliationSnapshot).toHaveBeenCalledOnce();
+    expect(
+      test.partner.getSubscriptionReconciliationSnapshot,
+    ).toHaveBeenCalledOnce();
   });
 
   it("preserves provider-null FROZEN continue dispatch to recordMissingSubscription without a new job", async () => {
     const frozen = rolloverRow("FROZEN");
     const test = harness({
       row: frozen,
-      plansById: { "plan-current": { ...currentPlan, active: false, kind: "FREE", recoveryCreditPackEnabled: false } },
+      plansById: {
+        "plan-current": {
+          ...currentPlan,
+          active: false,
+          kind: "FREE",
+          recoveryCreditPackEnabled: false,
+        },
+      },
       snapshot: { activeSubscription: null, latestLifecycleEvent: null },
     });
-    vi.spyOn(ShopifySubscriptionLifecycleReconciliationService.prototype, "reconcile")
-      .mockResolvedValue("continue");
-    const recordMissing = vi.spyOn(InitialActivationReconciliationService.prototype, "recordMissingSubscription")
+    vi.spyOn(
+      ShopifySubscriptionLifecycleReconciliationService.prototype,
+      "reconcile",
+    ).mockResolvedValue("continue");
+    const recordMissing = vi
+      .spyOn(
+        InitialActivationReconciliationService.prototype,
+        "recordMissingSubscription",
+      )
       .mockResolvedValue(undefined);
 
-    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+    await test.service.reconcileJob(
+      createSubscriptionReconcilePayload("shop-1", "subscription-1", now),
+    );
 
     expect(recordMissing).toHaveBeenCalledOnce();
     expect(recordMissing).toHaveBeenCalledWith("shop-1", {
@@ -388,34 +568,55 @@ describe("billing reconciliation coordinator", () => {
       nextReconcileAt: now,
     });
     expect(test.queue.add).not.toHaveBeenCalled();
-    expect(test.partner.getSubscriptionReconciliationSnapshot).toHaveBeenCalledOnce();
+    expect(
+      test.partner.getSubscriptionReconciliationSnapshot,
+    ).toHaveBeenCalledOnce();
   });
 
   it("routes normal provider snapshot failures to the accepted lifecycle handler", async () => {
     const failure = new Error("partner unavailable");
     const test = harness({ providerError: failure });
-    const recordFailure = vi.spyOn(InitialActivationReconciliationService.prototype, "recordProviderFailure")
+    const recordFailure = vi
+      .spyOn(
+        InitialActivationReconciliationService.prototype,
+        "recordProviderFailure",
+      )
       .mockResolvedValue(undefined);
 
-    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+    await test.service.reconcileJob(
+      createSubscriptionReconcilePayload("shop-1", "subscription-1", now),
+    );
 
-    expect(recordFailure).toHaveBeenCalledWith("shop-1", expect.objectContaining({
-      subscriptionId: "subscription-1",
-      pendingPlanId: "plan-pending",
-    }), failure);
+    expect(recordFailure).toHaveBeenCalledWith(
+      "shop-1",
+      expect.objectContaining({
+        subscriptionId: "subscription-1",
+        pendingPlanId: "plan-pending",
+      }),
+      failure,
+    );
     expect(test.database.billingPlan.findUnique).not.toHaveBeenCalled();
   });
 
   it("delegates reinstall jobs without using the normal reconciliation snapshot", async () => {
     const row = reinstallRow();
     const test = harness({ row });
-    const reconcileReinstall = vi.spyOn(ReinstallReconciliationService.prototype, "reconcileReinstall")
+    const reconcileReinstall = vi
+      .spyOn(ReinstallReconciliationService.prototype, "reconcileReinstall")
       .mockResolvedValue(undefined);
 
-    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+    await test.service.reconcileJob(
+      createSubscriptionReconcilePayload("shop-1", "subscription-1", now),
+    );
 
-    expect(reconcileReinstall).toHaveBeenCalledWith("shop-1", expect.objectContaining({ subscriptionId: "subscription-1" }), row.shopifyShopId);
-    expect(test.partner.getSubscriptionReconciliationSnapshot).not.toHaveBeenCalled();
+    expect(reconcileReinstall).toHaveBeenCalledWith(
+      "shop-1",
+      expect.objectContaining({ subscriptionId: "subscription-1" }),
+      row.shopifyShopId,
+    );
+    expect(
+      test.partner.getSubscriptionReconciliationSnapshot,
+    ).not.toHaveBeenCalled();
     expect(test.runtimeConfigReader.current).toHaveBeenCalledOnce();
   });
 });

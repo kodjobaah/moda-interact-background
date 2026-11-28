@@ -17,7 +17,8 @@ import type { WooPendingCandidate } from "../services/woocommerce-recovery/contr
 import type { WooRecoveryOrchestratorService } from "../services/woocommerce-recovery/woo-recovery-orchestrator.service.js";
 import { wooCandidateJobId } from "../services/woocommerce-recovery/woo-candidate-queue.service.js";
 import {
-  WOO_INITIAL_DISPATCH_JOB, parseWooInitialDispatchJob,
+  WOO_INITIAL_DISPATCH_JOB,
+  parseWooInitialDispatchJob,
   type WooInitialDispatchJob,
 } from "../services/woocommerce-recovery/woo-initial-dispatch.queue.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
@@ -43,29 +44,55 @@ const logger = createLogger({
   environment: resolveDeploymentEnvironmentName(),
 });
 
-type PendingRecoveryJob = PendingRecoveryCandidate | WooPendingCandidate | WooInitialDispatchJob;
+type PendingRecoveryJob =
+  PendingRecoveryCandidate | WooPendingCandidate | WooInitialDispatchJob;
 
 function isWooCandidate(value: unknown): value is WooPendingCandidate {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
-  if (candidate.source !== "woocommerce" ||
-    typeof candidate.shopId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(candidate.shopId) ||
-    typeof candidate.checkoutToken !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:~-]{0,127}$/.test(candidate.checkoutToken) ||
-    !Number.isSafeInteger(candidate.generation) || Number(candidate.generation) < 1 ||
-    typeof candidate.lastEventId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:~-]{0,127}$/.test(candidate.lastEventId) ||
+  if (
+    candidate.source !== "woocommerce" ||
+    typeof candidate.shopId !== "string" ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(candidate.shopId) ||
+    typeof candidate.checkoutToken !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:~-]{0,127}$/.test(candidate.checkoutToken) ||
+    !Number.isSafeInteger(candidate.generation) ||
+    Number(candidate.generation) < 1 ||
+    typeof candidate.lastEventId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:~-]{0,127}$/.test(candidate.lastEventId) ||
     typeof candidate.lastActivityAt !== "string" ||
-    !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(candidate.lastActivityAt)) return false;
+    !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(candidate.lastActivityAt)
+  )
+    return false;
   const timestamp = Date.parse(candidate.lastActivityAt);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== candidate.lastActivityAt) return false;
+  if (
+    !Number.isFinite(timestamp) ||
+    new Date(timestamp).toISOString() !== candidate.lastActivityAt
+  )
+    return false;
   const basket = candidate.basket;
-  return Boolean(basket && typeof basket === "object" &&
-    ["nonempty", "empty", "unknown"].includes(String((basket as { kind?: unknown }).kind)));
+  return Boolean(
+    basket &&
+    typeof basket === "object" &&
+    ["nonempty", "empty", "unknown"].includes(
+      String((basket as { kind?: unknown }).kind),
+    ),
+  );
 }
 
-function wooJobFields(job: { id?: string; attemptsMade: number }, stage: string) {
-  return { queue: PENDING_RECOVERY_CANDIDATE_QUEUE, source: "woocommerce", stage,
-    jobId: typeof job.id === "string" && /^woo-(?:candidate|initial)-[0-9a-f]{64}$/.test(job.id)
-      ? job.id : null,
+function wooJobFields(
+  job: { id?: string; attemptsMade: number },
+  stage: string,
+) {
+  return {
+    queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
+    source: "woocommerce",
+    stage,
+    jobId:
+      typeof job.id === "string" &&
+      /^woo-(?:candidate|initial)-[0-9a-f]{64}$/.test(job.id)
+        ? job.id
+        : null,
     attempt: job.attemptsMade + 1,
   };
 }
@@ -73,9 +100,17 @@ function wooJobFields(job: { id?: string; attemptsMade: number }, stage: string)
 /** Woo jobs never enter Shopify materialization or Shopify index cleanup. */
 async function processWooJob(
   job: { name: string; id?: string; data: unknown; attemptsMade: number },
-  orchestrator: Pick<WooRecoveryOrchestratorService, "onCandidateMatured" | "onInitialDispatch"> | undefined,
+  orchestrator:
+    | Pick<
+        WooRecoveryOrchestratorService,
+        "onCandidateMatured" | "onInitialDispatch"
+      >
+    | undefined,
 ): Promise<void> {
-  const stage = job.name === WOO_INITIAL_DISPATCH_JOB ? "initial-dispatch" : "candidate-maturity";
+  const stage =
+    job.name === WOO_INITIAL_DISPATCH_JOB
+      ? "initial-dispatch"
+      : "candidate-maturity";
   const fields = wooJobFields(job, stage);
   let shopId: string | undefined;
   let eventId: string | undefined;
@@ -84,33 +119,57 @@ async function processWooJob(
     if (job.name === WOO_INITIAL_DISPATCH_JOB) {
       const initial = parseWooInitialDispatchJob(job);
       logger.info("woocommerce.recovery.job.started", fields);
-      const outcome = await orchestrator.onInitialDispatch(initial.recoveryId, initial.attemptId);
-      logger.info("woocommerce.recovery.job.completed", { ...fields, outcome: outcome.kind });
+      const outcome = await orchestrator.onInitialDispatch(
+        initial.recoveryId,
+        initial.attemptId,
+      );
+      logger.info("woocommerce.recovery.job.completed", {
+        ...fields,
+        outcome: outcome.kind,
+      });
       return;
     }
-    if (job.name !== EVALUATE_PENDING_RECOVERY_JOB || !job.id ||
-      !job.data || typeof job.data !== "object" ||
-      (job.data as { source?: unknown }).source !== "woocommerce") {
+    if (
+      job.name !== EVALUATE_PENDING_RECOVERY_JOB ||
+      !job.id ||
+      !job.data ||
+      typeof job.data !== "object" ||
+      (job.data as { source?: unknown }).source !== "woocommerce"
+    ) {
       throw new Error("WOO_CANDIDATE_SOURCE_INVALID");
     }
-    if (!isWooCandidate(job.data)) throw new Error("WOO_CANDIDATE_IDENTITY_INVALID");
+    if (!isWooCandidate(job.data))
+      throw new Error("WOO_CANDIDATE_IDENTITY_INVALID");
     const candidate = job.data;
     shopId = candidate.shopId;
     if (wooCandidateJobId(candidate, candidate.generation) !== job.id) {
       throw new Error("WOO_CANDIDATE_JOB_IDENTITY_INVALID");
     }
-    eventId = typeof candidate.lastEventId === "string"
-      ? createHash("sha256").update(candidate.lastEventId).digest("hex") : undefined;
-    logger.info("woocommerce.recovery.job.started", { ...fields, shopId, ...(eventId ? { eventId } : {}) });
-    const outcome = await orchestrator.onCandidateMatured(candidate, { jobId: job.id });
+    eventId =
+      typeof candidate.lastEventId === "string"
+        ? createHash("sha256").update(candidate.lastEventId).digest("hex")
+        : undefined;
+    logger.info("woocommerce.recovery.job.started", {
+      ...fields,
+      shopId,
+      ...(eventId ? { eventId } : {}),
+    });
+    const outcome = await orchestrator.onCandidateMatured(candidate, {
+      jobId: job.id,
+    });
     logger.info("woocommerce.recovery.job.completed", {
-      ...fields, shopId, ...(eventId ? { eventId } : {}), outcome: outcome.kind,
+      ...fields,
+      shopId,
+      ...(eventId ? { eventId } : {}),
+      outcome: outcome.kind,
     });
   } catch (error) {
     const sourceError = initialOutreachDiagnostic(error);
     logger.error("woocommerce.recovery.job.failed", {
       ...fields,
-      ...(typeof shopId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(shopId) ? { shopId } : {}),
+      ...(typeof shopId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(shopId)
+        ? { shopId }
+        : {}),
       ...(eventId ? { eventId } : {}),
       reason: "processing_failure",
       errorName: sourceError.name,
@@ -122,176 +181,249 @@ async function processWooJob(
 }
 
 export function createPendingRecoveryCandidateWorker(
-  woo?: Pick<WooRecoveryOrchestratorService, "onCandidateMatured" | "onInitialDispatch">,
+  woo?: Pick<
+    WooRecoveryOrchestratorService,
+    "onCandidateMatured" | "onInitialDispatch"
+  >,
 ) {
   const worker = new Worker<PendingRecoveryJob>(
-  PENDING_RECOVERY_CANDIDATE_QUEUE,
-  async (job, token) =>
-    observeWorkerJob(workerMetricDefinition, job, async () => {
-      // An explicit Woo source marker is the *only* maturity discriminator.
-      // The missing marker is legacy Shopify; an unknown marker is an error.
-      if (job.name === WOO_INITIAL_DISPATCH_JOB) {
-        await processWooJob(job, woo);
-        return;
-      }
-      if (job.name === EVALUATE_PENDING_RECOVERY_JOB) {
-        const source = job.data && typeof job.data === "object"
-          ? (job.data as { source?: unknown }).source : undefined;
-        if (source === "woocommerce") {
+    PENDING_RECOVERY_CANDIDATE_QUEUE,
+    async (job, token) =>
+      observeWorkerJob(workerMetricDefinition, job, async () => {
+        // An explicit Woo source marker is the *only* maturity discriminator.
+        // The missing marker is legacy Shopify; an unknown marker is an error.
+        if (job.name === WOO_INITIAL_DISPATCH_JOB) {
           await processWooJob(job, woo);
           return;
         }
-        if (source !== undefined) {
-          logger.error("woocommerce.recovery.job.failed", {
-            ...wooJobFields(job, "candidate-routing"), reason: "unknown-source",
-          });
-          throw new Error("UNKNOWN_RECOVERY_CANDIDATE_SOURCE");
-        }
-      }
-      switch (job.name) {
-        case EVALUATE_PENDING_RECOVERY_JOB: {
-          const shopifyCandidate = job.data as PendingRecoveryCandidate;
-          let materializationOutcome: string | undefined;
-          let materializationRecoveryId: string | undefined;
-          let materializationFailed = false;
-          let materializationError: unknown;
-          try {
-            // Materialize the matured candidate into durable recovery state using
-            // current Shopify data (ARCH-001-BACKGROUND-004), never the webhook
-            // payload embedded in the job.
-            const result = await checkoutRecoveryService.materializeMaturedCandidate(shopifyCandidate, {
-              ...(typeof job.id === "string" ? { jobId: job.id } : {}),
-              retrySuppressionAdmission:
-                job.attemptsMade > 0 &&
-                isSuppressionResumeEnqueueFailure(job.failedReason),
-            });
-            materializationOutcome = result.outcome;
-            materializationRecoveryId = "recoveryId" in result ? result.recoveryId : undefined;
-            if (result.outcome === "deferred-lookup-unavailable") {
-              logger.warn("recovery.pending_candidate.lookup_unavailable", {
-                jobId: typeof job.id === "string" ? job.id.slice(0, 192) : job.id ?? null,
-                outcome: result.outcome,
-              });
-            }
-          } catch (error) {
-            materializationFailed = true;
-            materializationError = error;
+        if (job.name === EVALUATE_PENDING_RECOVERY_JOB) {
+          const source =
+            job.data && typeof job.data === "object"
+              ? (job.data as { source?: unknown }).source
+              : undefined;
+          if (source === "woocommerce") {
+            await processWooJob(job, woo);
+            return;
           }
+          if (source !== undefined) {
+            logger.error("woocommerce.recovery.job.failed", {
+              ...wooJobFields(job, "candidate-routing"),
+              reason: "unknown-source",
+            });
+            throw new Error("UNKNOWN_RECOVERY_CANDIDATE_SOURCE");
+          }
+        }
+        switch (job.name) {
+          case EVALUATE_PENDING_RECOVERY_JOB: {
+            const shopifyCandidate = job.data as PendingRecoveryCandidate;
+            let materializationOutcome: string | undefined;
+            let materializationRecoveryId: string | undefined;
+            let materializationFailed = false;
+            let materializationError: unknown;
+            try {
+              // Materialize the matured candidate into durable recovery state using
+              // current Shopify data (ARCH-001-BACKGROUND-004), never the webhook
+              // payload embedded in the job.
+              const result =
+                await checkoutRecoveryService.materializeMaturedCandidate(
+                  shopifyCandidate,
+                  {
+                    ...(typeof job.id === "string" ? { jobId: job.id } : {}),
+                    retrySuppressionAdmission:
+                      job.attemptsMade > 0 &&
+                      isSuppressionResumeEnqueueFailure(job.failedReason),
+                  },
+                );
+              materializationOutcome = result.outcome;
+              materializationRecoveryId =
+                "recoveryId" in result ? result.recoveryId : undefined;
+              if (result.outcome === "deferred-lookup-unavailable") {
+                logger.warn("recovery.pending_candidate.lookup_unavailable", {
+                  jobId:
+                    typeof job.id === "string"
+                      ? job.id.slice(0, 192)
+                      : (job.id ?? null),
+                  outcome: result.outcome,
+                });
+              }
+            } catch (error) {
+              materializationFailed = true;
+              materializationError = error;
+            }
 
-          // Shopify may publish the authoritative abandoned-checkout record
-          // after the merchant's configured inactivity delay. This is NOT an
-          // application error: do not use or alter normal BullMQ exception retries.
-          if (!materializationFailed && materializationOutcome === "discarded-not-found" && job.id) {
-            const deferred = await pendingRecoveryCandidateService.deferShopifyNotFound(
-              shopifyCandidate, job.id,
-              async (updated, dueAtMs) => {
-                await job.updateData(updated);
-                await job.moveToDelayed(dueAtMs, token);
-              },
-            );
-            if (deferred.kind === "deferred") {
-              logger.info("recovery.pending_candidate.shopify_verification_deferred", {
+            // Shopify may publish the authoritative abandoned-checkout record
+            // after the merchant's configured inactivity delay. This is NOT an
+            // application error: do not use or alter normal BullMQ exception retries.
+            if (
+              !materializationFailed &&
+              materializationOutcome === "discarded-not-found" &&
+              job.id
+            ) {
+              const deferred =
+                await pendingRecoveryCandidateService.deferShopifyNotFound(
+                  shopifyCandidate,
+                  job.id,
+                  async (updated, dueAtMs) => {
+                    await job.updateData(updated);
+                    await job.moveToDelayed(dueAtMs, token);
+                  },
+                );
+              if (deferred.kind === "deferred") {
+                logger.info(
+                  "recovery.pending_candidate.shopify_verification_deferred",
+                  {
+                    shopId: shopifyCandidate.shopId,
+                    checkoutDigest: checkoutDigest(
+                      shopifyCandidate.checkoutToken,
+                    ),
+                    jobId: job.id,
+                    attempt: deferred.attempt,
+                    nextDueAt: new Date(deferred.dueAtMs).toISOString(),
+                    reason: "shopify-abandoned-checkout-not-found",
+                  },
+                );
+                // BullMQ's special control signal avoids marking a deliberate
+                // delay as failed or consuming its three normal error attempts.
+                throw new DelayedError();
+              }
+              if (deferred.kind === "superseded") {
+                // The next generation owns the index. NEVER remove its aliases.
+                logger.info(
+                  "recovery.pending_candidate.shopify_verification_superseded",
+                  {
+                    shopId: shopifyCandidate.shopId,
+                    jobId: job.id,
+                    checkoutDigest: checkoutDigest(
+                      shopifyCandidate.checkoutToken,
+                    ),
+                  },
+                );
+                return;
+              }
+              logger.info(
+                "recovery.pending_candidate.shopify_verification_terminal",
+                {
+                  shopId: shopifyCandidate.shopId,
+                  jobId: job.id,
+                  checkoutDigest: checkoutDigest(
+                    shopifyCandidate.checkoutToken,
+                  ),
+                  reason: deferred.kind,
+                },
+              );
+            }
+
+            let cleanupFailed = false;
+            let cleanupError: unknown;
+            try {
+              // The candidate is no longer pending once it has matured: drop the
+              // O(1) candidate lookup indexes regardless of the materialization
+              // outcome (created, discarded, or provider error).
+              await pendingRecoveryCandidateService.handleCandidateMatured(
+                shopifyCandidate,
+                job.id,
+              );
+            } catch (error) {
+              cleanupFailed = true;
+              cleanupError = error;
+            }
+
+            if (materializationFailed && cleanupFailed) {
+              const primaryMessage =
+                materializationError instanceof Error
+                  ? materializationError.message
+                  : String(materializationError);
+              const cleanupMessage =
+                cleanupError instanceof Error
+                  ? cleanupError.message
+                  : String(cleanupError);
+              try {
+                logger.error(
+                  "recovery.pending_candidate.processing_cleanup_failed",
+                  {
+                    queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
+                    jobId:
+                      typeof job.id === "string"
+                        ? createHash("sha256").update(job.id).digest("hex")
+                        : null,
+                    attempt: job.attemptsMade + 1,
+                    shopId:
+                      typeof shopifyCandidate.shopId === "string"
+                        ? shopifyCandidate.shopId
+                        : null,
+                    materializationError:
+                      initialOutreachDiagnostic(materializationError),
+                    cleanupError: initialOutreachDiagnostic(cleanupError),
+                  },
+                );
+              } catch {
+                // Preserve both failures and the established retry behavior if the sink throws.
+              }
+              throw new Error(
+                `${primaryMessage}: candidate index cleanup failed: ${cleanupMessage}`,
+                {
+                  cause: new AggregateError(
+                    [materializationError, cleanupError],
+                    "Materialization and candidate cleanup failed",
+                  ),
+                },
+              );
+            }
+            if (cleanupFailed) throw cleanupError;
+            if (materializationFailed) throw materializationError;
+            logger.info(
+              "recovery.pending_candidate.materialization_completed",
+              {
                 shopId: shopifyCandidate.shopId,
                 checkoutDigest: checkoutDigest(shopifyCandidate.checkoutToken),
-                jobId: job.id,
-                attempt: deferred.attempt,
-                nextDueAt: new Date(deferred.dueAtMs).toISOString(),
-                reason: "shopify-abandoned-checkout-not-found",
-              });
-              // BullMQ's special control signal avoids marking a deliberate
-              // delay as failed or consuming its three normal error attempts.
-              throw new DelayedError();
-            }
-            if (deferred.kind === "superseded") {
-              // The next generation owns the index. NEVER remove its aliases.
-              logger.info("recovery.pending_candidate.shopify_verification_superseded", {
-                shopId: shopifyCandidate.shopId, jobId: job.id,
-                checkoutDigest: checkoutDigest(shopifyCandidate.checkoutToken),
-              });
-              return;
-            }
-            logger.info("recovery.pending_candidate.shopify_verification_terminal", {
-              shopId: shopifyCandidate.shopId, jobId: job.id,
-              checkoutDigest: checkoutDigest(shopifyCandidate.checkoutToken),
-              reason: deferred.kind,
-            });
-          }
-
-          let cleanupFailed = false;
-          let cleanupError: unknown;
-          try {
-            // The candidate is no longer pending once it has matured: drop the
-            // O(1) candidate lookup indexes regardless of the materialization
-            // outcome (created, discarded, or provider error).
-            await pendingRecoveryCandidateService.handleCandidateMatured(
-              shopifyCandidate,
-              job.id,
+                jobId:
+                  typeof job.id === "string" &&
+                  /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(job.id)
+                    ? job.id
+                    : null,
+                ...(materializationRecoveryId
+                  ? { recoveryId: materializationRecoveryId }
+                  : {}),
+                outcome: materializationOutcome ?? "unclassified",
+                candidateIndexCleanup: "completed",
+              },
             );
-          } catch (error) {
-            cleanupFailed = true;
-            cleanupError = error;
+            return;
           }
-
-          if (materializationFailed && cleanupFailed) {
-            const primaryMessage = materializationError instanceof Error
-              ? materializationError.message
-              : String(materializationError);
-            const cleanupMessage = cleanupError instanceof Error
-              ? cleanupError.message
-              : String(cleanupError);
-            try {
-              logger.error("recovery.pending_candidate.processing_cleanup_failed", {
-                queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
-                jobId: typeof job.id === "string" ? createHash("sha256").update(job.id).digest("hex") : null,
-                attempt: job.attemptsMade + 1,
-                shopId: typeof shopifyCandidate.shopId === "string" ? shopifyCandidate.shopId : null,
-                materializationError: initialOutreachDiagnostic(materializationError),
-                cleanupError: initialOutreachDiagnostic(cleanupError),
-              });
-            } catch {
-              // Preserve both failures and the established retry behavior if the sink throws.
-            }
-            throw new Error(
-              `${primaryMessage}: candidate index cleanup failed: ${cleanupMessage}`,
-              { cause: new AggregateError([materializationError, cleanupError], "Materialization and candidate cleanup failed") },
-            );
-          }
-          if (cleanupFailed) throw cleanupError;
-          if (materializationFailed) throw materializationError;
-          logger.info("recovery.pending_candidate.materialization_completed", {
-            shopId: shopifyCandidate.shopId,
-            checkoutDigest: checkoutDigest(shopifyCandidate.checkoutToken),
-            jobId: typeof job.id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(job.id)
-              ? job.id : null,
-            ...(materializationRecoveryId ? { recoveryId: materializationRecoveryId } : {}),
-            outcome: materializationOutcome ?? "unclassified",
-            candidateIndexCleanup: "completed",
-          });
-          return;
+          default:
+            throw new Error(`Unknown pending candidate job: ${job.name}`);
         }
-        default:
-          throw new Error(`Unknown pending candidate job: ${job.name}`);
-      }
-    }),
-  {
-    connection: connectionRedis,
-    telemetry: bullMQTelemetry,
-  },
-);
-  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "pendingRecoveryQueueGlobalConcurrency");
+      }),
+    {
+      connection: connectionRedis,
+      telemetry: bullMQTelemetry,
+    },
+  );
+  bindWorkerConcurrency(
+    worker,
+    backgroundRuntimeConfigService,
+    "pendingRecoveryQueueGlobalConcurrency",
+  );
 
   worker.on("failed", (job, error) => {
     // Job-level failures were already logged inside the Woo processor; this
     // event covers the pre-existing Shopify path without printing job payloads.
-    if (job?.name !== EVALUATE_PENDING_RECOVERY_JOB ||
-      (job.data as { source?: unknown } | undefined)?.source !== "woocommerce") {
+    if (
+      job?.name !== EVALUATE_PENDING_RECOVERY_JOB ||
+      (job.data as { source?: unknown } | undefined)?.source !== "woocommerce"
+    ) {
       const sourceError = initialOutreachDiagnostic(error);
       logger.error("recovery.pending_candidate.job_failed", {
         queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
-        jobId: job?.id ? createHash("sha256").update(job.id).digest("hex") : null,
+        jobId: job?.id
+          ? createHash("sha256").update(job.id).digest("hex")
+          : null,
         attempt: job ? job.attemptsMade + 1 : null,
-        shopId: typeof (job?.data as { shopId?: unknown } | undefined)?.shopId === "string"
-          ? (job!.data as { shopId: string }).shopId : null,
+        shopId:
+          typeof (job?.data as { shopId?: unknown } | undefined)?.shopId ===
+          "string"
+            ? (job!.data as { shopId: string }).shopId
+            : null,
         errorName: sourceError.name,
         errorMessage: sourceError.message,
         sourceError,
@@ -310,12 +442,21 @@ export function createPendingRecoveryCandidateWorker(
   return worker;
 }
 
-function isSuppressionResumeEnqueueFailure(failedReason: string | undefined): boolean {
-  return isRetryMarker(failedReason, RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED) ||
-    isRetryMarker(failedReason, RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED);
+function isSuppressionResumeEnqueueFailure(
+  failedReason: string | undefined,
+): boolean {
+  return (
+    isRetryMarker(failedReason, RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED) ||
+    isRetryMarker(failedReason, RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED)
+  );
 }
 
-function isRetryMarker(failedReason: string | undefined, marker: string): boolean {
-  return typeof failedReason === "string" &&
-    (failedReason === marker || failedReason.startsWith(`${marker}:`));
+function isRetryMarker(
+  failedReason: string | undefined,
+  marker: string,
+): boolean {
+  return (
+    typeof failedReason === "string" &&
+    (failedReason === marker || failedReason.startsWith(`${marker}:`))
+  );
 }

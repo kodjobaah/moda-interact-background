@@ -23,44 +23,50 @@ const workerMetricDefinition = {
 
 export function createOrderWorker() {
   const worker = new Worker<unknown>(
-  SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.queueName,
-  async (job) =>
-    observeWorkerJob(workerMetricDefinition, job, async () => {
-      console.log("Received job", {
-        id: job.id,
-        name: job.name,
-      });
+    SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.queueName,
+    async (job) =>
+      observeWorkerJob(workerMetricDefinition, job, async () => {
+        console.log("Received job", {
+          id: job.id,
+          name: job.name,
+        });
 
-      switch (job.name) {
-        case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.jobName:
-          await checkoutRecoveryService.handleOrderCompletedContract(
-            mapOrderCompletedContractInput(parseRuntimeShopifyEvent(job.data)),
-          );
-          break;
+        switch (job.name) {
+          case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.jobName:
+            await checkoutRecoveryService.handleOrderCompletedContract(
+              mapOrderCompletedContractInput(
+                parseRuntimeShopifyEvent(job.data),
+              ),
+            );
+            break;
 
-        default:
-          throw new Error(`Unknown job type: ${job.name}`);
-      }
-    }),
+          default:
+            throw new Error(`Unknown job type: ${job.name}`);
+        }
+      }),
 
-  {
-    connection: connectionRedis,
-    telemetry: bullMQTelemetry,
-  },
-);
-  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "orderQueueGlobalConcurrency");
+    {
+      connection: connectionRedis,
+      telemetry: bullMQTelemetry,
+    },
+  );
+  bindWorkerConcurrency(
+    worker,
+    backgroundRuntimeConfigService,
+    "orderQueueGlobalConcurrency",
+  );
 
   worker.on("completed", (job) => {
-  console.log(`Job ${job.id} completed successfully`);
-});
+    console.log(`Job ${job.id} completed successfully`);
+  });
 
   worker.on("failed", (job, error) => {
-  console.error(`Job ${job?.id} failed`, error);
-});
+    console.error(`Job ${job?.id} failed`, error);
+  });
 
   worker.on("error", (error) => {
-  console.error("Worker error", error);
-});
+    console.error("Worker error", error);
+  });
 
   return worker;
 }

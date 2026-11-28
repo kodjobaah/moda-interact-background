@@ -1,8 +1,23 @@
-vi.mock("../../../src/services/recovery-sender-pool/dispatch-sender.js", () => ({
- readDispatchSenderSnapshot: async () => ({rowId:"fixture-config",version:1,environment:"test",providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
- checkDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
- readRecoveryDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
-}));
+vi.mock(
+  "../../../src/services/recovery-sender-pool/dispatch-sender.js",
+  () => ({
+    readDispatchSenderSnapshot: async () => ({
+      rowId: "fixture-config",
+      version: 1,
+      environment: "test",
+      providerAccountId: "waba-1",
+      providerPhoneNumberId: "phone-1",
+    }),
+    checkDispatchSender: async () => ({
+      providerAccountId: "waba-1",
+      providerPhoneNumberId: "phone-1",
+    }),
+    readRecoveryDispatchSender: async () => ({
+      providerAccountId: "waba-1",
+      providerPhoneNumberId: "phone-1",
+    }),
+  }),
+);
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -31,7 +46,9 @@ describe("OutboundWhatsAppAdmissionService", () => {
     ]) {
       const source = readFileSync(resolve(process.cwd(), relativePath), "utf8");
       expect(source).not.toMatch(/from ["'][./]+whatsapp\.service\.js["']/);
-      expect(source).not.toMatch(/whatsAppService\.sendWhatsApp(?:Text|Template)/);
+      expect(source).not.toMatch(
+        /whatsAppService\.sendWhatsApp(?:Text|Template)/,
+      );
     }
   });
 
@@ -49,7 +66,10 @@ describe("OutboundWhatsAppAdmissionService", () => {
       test.providerMock.sendWhatsAppText,
     );
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
-      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
+      expectedSender: {
+        providerAccountId: "waba-1",
+        providerPhoneNumberId: "phone-1",
+      },
       to: textInput.to,
       text: textInput.text,
     });
@@ -62,8 +82,11 @@ describe("OutboundWhatsAppAdmissionService", () => {
   it("rejects legacy automated recovery templates without a Moda registration, while retaining reserved credit attribution", async () => {
     const test = admissionHarness({
       recoveryLinked: true,
-      durableReservation: { shopId: "shop-1", status: "RESERVED",
-        counter: { counter: "PURCHASED_RECOVERY_CREDITS" } },
+      durableReservation: {
+        shopId: "shop-1",
+        status: "RESERVED",
+        counter: { counter: "PURCHASED_RECOVERY_CREDITS" },
+      },
     });
     test.resolver.resolve.mockRejectedValueOnce(
       new EffectiveBillingPolicyError("NO_CONTRACT", "contract ended"),
@@ -72,20 +95,27 @@ describe("OutboundWhatsAppAdmissionService", () => {
       ...baseAdmissionInput,
       idempotencyKey: "recovery-outreach:attempt-1",
       recoveryCreditSourceKey: "recovery:shop-1:attempt-1",
-      senderType: "AUTOMATION", to: "+14155552671",
-      templateName: "recovery", languageCode: "en",
+      senderType: "AUTOMATION",
+      to: "+14155552671",
+      templateName: "recovery",
+      languageCode: "en",
     });
-    expect(result).toEqual({ kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" });
+    expect(result).toEqual({
+      kind: "suppressed",
+      reason: "TEMPLATE_REGISTRATION_UNAVAILABLE",
+    });
     expect(test.postContractResolver.resolve).toHaveBeenCalledWith("shop-1");
-    expect(test.executionEligibility.evaluate).toHaveBeenCalledWith("shop-1", undefined, "recovery");
+    expect(test.executionEligibility.evaluate).toHaveBeenCalledWith(
+      "shop-1",
+      undefined,
+      "recovery",
+    );
     expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("composes terminal admission with deterministic text instead of template transport", async () => {
     const test = admissionHarness({
-      usageRows: [
-        { sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 2 },
-      ],
+      usageRows: [{ sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 2 }],
     });
 
     await test.facade.sendTemplate({
@@ -98,7 +128,10 @@ describe("OutboundWhatsAppAdmissionService", () => {
 
     expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
-      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
+      expectedSender: {
+        providerAccountId: "waba-1",
+        providerPhoneNumberId: "phone-1",
+      },
       to: "+15551234567",
       text: TERMINAL_MESSAGE,
     });
@@ -166,8 +199,61 @@ describe("OutboundWhatsAppAdmissionService", () => {
   });
 });
 
-describe("generation-only recovery before reservation cleanup",()=>{
- const admission={kind:"admitted" as const,shopId:"shop",messageId:"same",conversationId:"conversation",terminal:false};
- it("returns typed recovery on the same reservation without invoking a sender or cleanup",async()=>{const failure=Error("generation"),failPrepared=vi.fn(),sendPreparedText=vi.fn(),outcome={kind:"fallback",body:"trusted"};const recoverGenerationFailure=vi.fn(async()=>outcome);expect(await runCommerceAgentAfterAdmission({admission,to:"447400123456",context:{},runAgent:async()=>{throw failure;},recoverGenerationFailure,failPrepared,sendPreparedText})).toBe(outcome);expect(recoverGenerationFailure).toHaveBeenCalledWith(failure);expect(failPrepared).not.toHaveBeenCalled();expect(sendPreparedText).not.toHaveBeenCalled();});
- it.each(["refused","failed"])("preserves original cleanup/error when recovery %s",async mode=>{const failure=Error("original"),failPrepared=vi.fn(),sendPreparedText=vi.fn();await expect(runCommerceAgentAfterAdmission({admission,to:"447400123456",context:{},runAgent:async()=>{throw failure;},recoverGenerationFailure:async()=>{if(mode==="failed")throw Error("snapshot unavailable");return undefined;},failPrepared,sendPreparedText})).rejects.toBe(failure);expect(failPrepared).toHaveBeenCalledExactlyOnceWith("same");expect(sendPreparedText).not.toHaveBeenCalled();});
+describe("generation-only recovery before reservation cleanup", () => {
+  const admission = {
+    kind: "admitted" as const,
+    shopId: "shop",
+    messageId: "same",
+    conversationId: "conversation",
+    terminal: false,
+  };
+  it("returns typed recovery on the same reservation without invoking a sender or cleanup", async () => {
+    const failure = Error("generation"),
+      failPrepared = vi.fn(),
+      sendPreparedText = vi.fn(),
+      outcome = { kind: "fallback", body: "trusted" };
+    const recoverGenerationFailure = vi.fn(async () => outcome);
+    expect(
+      await runCommerceAgentAfterAdmission({
+        admission,
+        to: "447400123456",
+        context: {},
+        runAgent: async () => {
+          throw failure;
+        },
+        recoverGenerationFailure,
+        failPrepared,
+        sendPreparedText,
+      }),
+    ).toBe(outcome);
+    expect(recoverGenerationFailure).toHaveBeenCalledWith(failure);
+    expect(failPrepared).not.toHaveBeenCalled();
+    expect(sendPreparedText).not.toHaveBeenCalled();
+  });
+  it.each(["refused", "failed"])(
+    "preserves original cleanup/error when recovery %s",
+    async (mode) => {
+      const failure = Error("original"),
+        failPrepared = vi.fn(),
+        sendPreparedText = vi.fn();
+      await expect(
+        runCommerceAgentAfterAdmission({
+          admission,
+          to: "447400123456",
+          context: {},
+          runAgent: async () => {
+            throw failure;
+          },
+          recoverGenerationFailure: async () => {
+            if (mode === "failed") throw Error("snapshot unavailable");
+            return undefined;
+          },
+          failPrepared,
+          sendPreparedText,
+        }),
+      ).rejects.toBe(failure);
+      expect(failPrepared).toHaveBeenCalledExactlyOnceWith("same");
+      expect(sendPreparedText).not.toHaveBeenCalled();
+    },
+  );
 });

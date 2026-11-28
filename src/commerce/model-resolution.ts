@@ -35,10 +35,11 @@ export async function resolveProductionCommerceModel(input: {
       });
       if (!shop) throw new Error(UNAVAILABLE);
 
-      const shopConfiguration = await transaction.commerceAgentConfiguration.findFirst({
-        where: { environment, scope: "SHOP", shopId: input.shopId },
-        select: { modelId: true },
-      });
+      const shopConfiguration =
+        await transaction.commerceAgentConfiguration.findFirst({
+          where: { environment, scope: "SHOP", shopId: input.shopId },
+          select: { modelId: true },
+        });
       if (shopConfiguration?.modelId) {
         const model = await readResolvedModel(
           transaction,
@@ -60,7 +61,8 @@ export async function resolveProductionCommerceModel(input: {
       });
       if (
         subscription &&
-        (subscription.status === "ACTIVE" || subscription.status === "TRIALING") &&
+        (subscription.status === "ACTIVE" ||
+          subscription.status === "TRIALING") &&
         subscription.planId &&
         subscription.plan
       ) {
@@ -93,10 +95,11 @@ export async function resolveProductionCommerceModel(input: {
         }
       }
 
-      const platformConfiguration = await transaction.commerceAgentConfiguration.findFirst({
-        where: { environment, scope: "PLATFORM", shopId: null },
-        select: { modelId: true },
-      });
+      const platformConfiguration =
+        await transaction.commerceAgentConfiguration.findFirst({
+          where: { environment, scope: "PLATFORM", shopId: null },
+          select: { modelId: true },
+        });
       if (!platformConfiguration?.modelId) throw new Error(UNAVAILABLE);
       const model = await readResolvedModel(
         transaction,
@@ -152,10 +155,7 @@ async function readResolvedModel(
     availability.scope === "PLATFORM" && availability.shopId === null;
   const ownShopAvailable =
     availability.scope === "SHOP" && availability.shopId === shopId;
-  if (
-    !platformAvailable &&
-    !(selectionScope === "SHOP" && ownShopAvailable)
-  )
+  if (!platformAvailable && !(selectionScope === "SHOP" && ownShopAvailable))
     throw new Error(UNAVAILABLE);
 
   return ResolvedCommerceModelSchema.parse({

@@ -69,9 +69,7 @@ export class RecoveryDurableCreditAdmissionService {
               shopId: input.shopId,
               sourceKey: input.sourceKey,
             });
-        if (
-          !isAdmittedReplay(reactivated, "LIFETIME_FREE_RECOVERY_CREDITS")
-        ) {
+        if (!isAdmittedReplay(reactivated, "LIFETIME_FREE_RECOVERY_CREDITS")) {
           return { kind: "blocked", reason: "reservation-in-flight" };
         }
       }
@@ -168,8 +166,7 @@ function isOwnedBy(
 
 function isAmbiguous(reservation: { kind: string }): boolean {
   return (
-    reservation.kind === "ambiguous" ||
-    reservation.kind === "already-ambiguous"
+    reservation.kind === "ambiguous" || reservation.kind === "already-ambiguous"
   );
 }
 

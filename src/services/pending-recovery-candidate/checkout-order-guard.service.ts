@@ -56,15 +56,22 @@ export class CheckoutOrderGuardService {
         }
 
         if (callbackFailed && cleanupFailed) {
-          const primaryMessage = callbackError instanceof Error
-            ? callbackError.message
-            : String(callbackError);
-          const cleanupMessage = cleanupError instanceof Error
-            ? cleanupError.message
-            : String(cleanupError);
+          const primaryMessage =
+            callbackError instanceof Error
+              ? callbackError.message
+              : String(callbackError);
+          const cleanupMessage =
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : String(cleanupError);
           throw new Error(
             `${primaryMessage}: checkout lock cleanup failed: ${cleanupMessage}`,
-            { cause: new AggregateError([callbackError, cleanupError], "Callback and checkout lock cleanup failed") },
+            {
+              cause: new AggregateError(
+                [callbackError, cleanupError],
+                "Callback and checkout lock cleanup failed",
+              ),
+            },
           );
         }
         if (callbackFailed) throw callbackError;
@@ -114,15 +121,28 @@ return redis.call('DEL', KEYS[1])
 `;
 
 export class WooCheckoutLeaseGuard {
-  constructor(private readonly redis: Pick<
-    typeof connectionRedis, "set" | "eval"
-  > = connectionRedis) {}
+  constructor(
+    private readonly redis: Pick<
+      typeof connectionRedis,
+      "set" | "eval"
+    > = connectionRedis,
+  ) {}
 
-  async withCheckoutLock<T>(shopId: string, checkoutToken: string, run: () => Promise<T>): Promise<T> {
+  async withCheckoutLock<T>(
+    shopId: string,
+    checkoutToken: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
     const lockKey = checkoutOrderLockKey({ shopId, checkoutToken });
     const owner = randomUUID();
     for (let attempt = 0; attempt < CHECKOUT_LOCK_RETRIES; attempt += 1) {
-      const acquired = await this.redis.set(lockKey, owner, "PX", CHECKOUT_LOCK_TTL_MS, "NX");
+      const acquired = await this.redis.set(
+        lockKey,
+        owner,
+        "PX",
+        CHECKOUT_LOCK_TTL_MS,
+        "NX",
+      );
       if (acquired !== "OK") {
         await sleep(CHECKOUT_LOCK_RETRY_DELAY_MS);
         continue;
@@ -132,15 +152,25 @@ export class WooCheckoutLeaseGuard {
       let renewal: Promise<void> | undefined;
       const renew = () => {
         if (renewal || leaseError) return;
-        renewal = Promise.resolve().then(() => this.redis.eval(
-          RENEW_OWNED_LOCK, 1, lockKey, owner, String(CHECKOUT_LOCK_TTL_MS),
-        )).then((changed) => {
-          if (changed !== 1) throw new Error("woo-checkout-lock-lease-lost");
-        }).catch((error: unknown) => {
-          leaseError = error;
-        }).finally(() => {
-          renewal = undefined;
-        });
+        renewal = Promise.resolve()
+          .then(() =>
+            this.redis.eval(
+              RENEW_OWNED_LOCK,
+              1,
+              lockKey,
+              owner,
+              String(CHECKOUT_LOCK_TTL_MS),
+            ),
+          )
+          .then((changed) => {
+            if (changed !== 1) throw new Error("woo-checkout-lock-lease-lost");
+          })
+          .catch((error: unknown) => {
+            leaseError = error;
+          })
+          .finally(() => {
+            renewal = undefined;
+          });
       };
       const interval = setInterval(renew, WOO_LOCK_RENEW_INTERVAL_MS);
       interval.unref();
@@ -163,7 +193,12 @@ export class WooCheckoutLeaseGuard {
       try {
         // Even on callback failure, release only our own lease. A renewal
         // failure is never treated as a successful, guarded operation.
-        const released = await this.redis.eval(RELEASE_OWNED_LOCK, 1, lockKey, owner);
+        const released = await this.redis.eval(
+          RELEASE_OWNED_LOCK,
+          1,
+          lockKey,
+          owner,
+        );
         if (released !== 1) throw new Error("woo-checkout-lock-lease-lost");
         if (leaseError) throw leaseError;
       } catch (error) {
@@ -171,8 +206,11 @@ export class WooCheckoutLeaseGuard {
         cleanupError = error;
       }
       if (failed && cleanupFailed) {
-        throw new AggregateError([primaryError, cleanupError],
-          "Woo checkout callback and lease cleanup failed", { cause: primaryError });
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          "Woo checkout callback and lease cleanup failed",
+          { cause: primaryError },
+        );
       }
       if (failed) throw primaryError;
       if (cleanupFailed) throw cleanupError;

@@ -11,7 +11,8 @@ export type LinePriceObservation = Readonly<{
   catalogueCurrency: string | null;
   catalogueObservedAt: string | null;
   catalogueComparison: "EQUAL" | "DIFFERENT" | "INCOMPARABLE";
-  checkoutPriceChange: "CONFIRMED_UNCHANGED" | "CONFIRMED_CHANGED" | "UNVERIFIABLE";
+  checkoutPriceChange:
+    "CONFIRMED_UNCHANGED" | "CONFIRMED_CHANGED" | "UNVERIFIABLE";
   reasonCodes: readonly string[];
 }>;
 
@@ -24,7 +25,10 @@ export type CheckoutPriceReconciliation = Readonly<{
   evaluatedAt: string;
   lines: readonly LinePriceObservation[];
   reasonCodes: readonly string[];
-  currentMerchandiseSubtotal: Readonly<{ amountDecimal: string; currency: string }> | null;
+  currentMerchandiseSubtotal: Readonly<{
+    amountDecimal: string;
+    currency: string;
+  }> | null;
   completeness: "COMPLETE" | "PARTIAL";
 }>;
 
@@ -58,19 +62,23 @@ export type RecoveryPricingState = Readonly<{
 }>;
 
 export interface TrustedRecoveryAttemptReader {
-  read(input: Readonly<{
-    shopId: string;
-    checkoutRecoveryId: string;
-    outreachAttemptId: string;
-  }>): Promise<RecoveryPricingState | null>;
+  read(
+    input: Readonly<{
+      shopId: string;
+      checkoutRecoveryId: string;
+      outreachAttemptId: string;
+    }>,
+  ): Promise<RecoveryPricingState | null>;
 }
 
 export interface ExactProductReader {
-  read(input: Readonly<{
-    shopId: string;
-    productId: string;
-    variantId: string | null;
-    toolContext: CommerceOutreachToolContext;
-    signal: AbortSignal;
-  }>): Promise<unknown>;
+  read(
+    input: Readonly<{
+      shopId: string;
+      productId: string;
+      variantId: string | null;
+      toolContext: CommerceOutreachToolContext;
+      signal: AbortSignal;
+    }>,
+  ): Promise<unknown>;
 }

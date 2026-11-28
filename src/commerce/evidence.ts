@@ -9,9 +9,7 @@ import {
 import { createHash } from "node:crypto";
 import { metrics, type Counter } from "@opentelemetry/api";
 
-export type EvidenceExtractor = (
-  result: CommerceToolResult,
-) => unknown[];
+export type EvidenceExtractor = (result: CommerceToolResult) => unknown[];
 
 export type EvidenceRefreshOutcome =
   | { kind: "accepted" }
@@ -247,7 +245,9 @@ export class TurnEvidenceRegistry {
   ): Promise<EvidenceRefreshOutcome> {
     const records = evidenceIds.map((id) => this.byId.get(id));
     if (
-      records.some((record, index) => !record || this.invalidIds.has(evidenceIds[index]!))
+      records.some(
+        (record, index) => !record || this.invalidIds.has(evidenceIds[index]!),
+      )
     )
       return { kind: "refer" };
 
@@ -292,7 +292,9 @@ export class TurnEvidenceRegistry {
           return { kind: "refer" };
         }
         const extracted = input.extractEvidence(result);
-        const parsed = extracted.map((raw) => CommerceEvidenceSchema.safeParse(raw));
+        const parsed = extracted.map((raw) =>
+          CommerceEvidenceSchema.safeParse(raw),
+        );
         const refreshed: CommerceEvidence[] = [];
         for (const item of parsed) {
           if (!item.success) return { kind: "refer" };
@@ -329,7 +331,8 @@ export class TurnEvidenceRegistry {
       const matches = refreshed.filter(
         (candidate) =>
           candidate.offerId === record.evidence.offerId &&
-          canonicalJson(candidate.proposal) === canonicalJson(record.evidence.proposal),
+          canonicalJson(candidate.proposal) ===
+            canonicalJson(record.evidence.proposal),
       );
       if (
         matches.length !== 1 ||

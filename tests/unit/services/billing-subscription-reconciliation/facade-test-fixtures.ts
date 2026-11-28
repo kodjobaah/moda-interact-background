@@ -1,5 +1,8 @@
 import { expect, vi } from "vitest";
-import { BillingSubscriptionReconciliationService, createSubscriptionReconcilePayload } from "../../../../src/services/billing-subscription-reconciliation.service.js";
+import {
+  BillingSubscriptionReconciliationService,
+  createSubscriptionReconcilePayload,
+} from "../../../../src/services/billing-subscription-reconciliation.service.js";
 
 export const now = new Date("2026-09-12T12:00:00.000Z");
 export const pendingEffectiveAt = new Date("2026-09-12T11:00:00.000Z");
@@ -24,11 +27,13 @@ export function harness({
 } = {}) {
   const selectFields = (value: any, select: any): any => {
     if (!value || !select) return value;
-    return Object.fromEntries(Object.entries(select).flatMap(([key, selection]) => {
-      if (!selection) return [];
-      if (selection === true) return [[key, value[key]]];
-      return [[key, selectFields(value[key], (selection as any).select)]];
-    }));
+    return Object.fromEntries(
+      Object.entries(select).flatMap(([key, selection]) => {
+        if (!selection) return [];
+        if (selection === true) return [[key, value[key]]];
+        return [[key, selectFields(value[key], (selection as any).select)]];
+      }),
+    );
   };
   const subscriptionUpdate = vi.fn();
   const queue = { add: vi.fn().mockResolvedValue({}) };
@@ -38,11 +43,19 @@ export function harness({
       findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn().mockResolvedValue({ id: "period-1" }),
       create: vi.fn().mockResolvedValue({ id: "period-1" }),
-      update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
     },
     billingPeriodEntitlementCounter: {
       findUnique: vi.fn().mockResolvedValue(null),
-      create: vi.fn(), upsert: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
+      create: vi.fn(),
+      upsert: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
     },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(plan) },
     merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
@@ -71,12 +84,43 @@ export function harness({
       findUnique: vi.fn().mockResolvedValue(lifetimeCounter),
       create: vi.fn(),
       upsert: vi.fn(),
-      update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
     },
-    recoveryCreditPurchase: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
-    recoveryCreditRefund: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
-    promotionalCreditGrant: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
-    merchantPromotionSelection: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
+    recoveryCreditPurchase: {
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    recoveryCreditRefund: {
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    promotionalCreditGrant: {
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    merchantPromotionSelection: {
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
   };
   const database = {
     shop: {
@@ -97,9 +141,16 @@ export function harness({
       if (providerError) throw providerError;
       return providerResult;
     }),
-    getSubscriptionReconciliationSnapshot: vi.fn().mockImplementation(async () => {
-      return { activeSubscription: await partner.getActiveSubscription("gid://shopify/Shop/1"), latestLifecycleEvent: null };
-    }),
+    getSubscriptionReconciliationSnapshot: vi
+      .fn()
+      .mockImplementation(async () => {
+        return {
+          activeSubscription: await partner.getActiveSubscription(
+            "gid://shopify/Shop/1",
+          ),
+          latestLifecycleEvent: null,
+        };
+      }),
   };
   const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
   const service = new BillingSubscriptionReconciliationService(
@@ -110,7 +161,16 @@ export function harness({
     () => nowValue,
     runtimeConfigReader,
   );
-  return { database, partner, queue, logger, transaction, service, runtimeConfig, runtimeConfigReader };
+  return {
+    database,
+    partner,
+    queue,
+    logger,
+    transaction,
+    service,
+    runtimeConfig,
+    runtimeConfigReader,
+  };
 }
 
 export function pendingRow(overrides = {}) {
@@ -246,7 +306,8 @@ export function establishedRow(overrides = {}) {
 }
 
 export function reinstallPaidRow(overrides = {}) {
-  const { subscription: subscriptionOverrides, ...shopOverrides } = overrides as any;
+  const { subscription: subscriptionOverrides, ...shopOverrides } =
+    overrides as any;
   return pendingRow({
     status: "UNINSTALLED",
     reinstallPendingAt: new Date("2026-09-12T11:30:00.000Z"),
@@ -267,7 +328,11 @@ export function reinstallPaidRow(overrides = {}) {
   });
 }
 
-export function configureReinstallPaidPeriod(test: ReturnType<typeof harness>, period: any, counter: any) {
+export function configureReinstallPaidPeriod(
+  test: ReturnType<typeof harness>,
+  period: any,
+  counter: any,
+) {
   const current = {
     id: "subscription-1",
     planId: "plan-paid",
@@ -279,8 +344,20 @@ export function configureReinstallPaidPeriod(test: ReturnType<typeof harness>, p
   };
   test.database.subscription.findUnique.mockResolvedValue(current);
   test.transaction.subscription.findUnique.mockResolvedValue(current);
-  test.transaction.billingPeriod = { findUnique: vi.fn().mockResolvedValue(period), create: vi.fn(), upsert: vi.fn() };
-  test.transaction.billingPeriodEntitlementCounter = { findUnique: vi.fn().mockResolvedValue(counter), create: vi.fn(), upsert: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() };
+  test.transaction.billingPeriod = {
+    findUnique: vi.fn().mockResolvedValue(period),
+    create: vi.fn(),
+    upsert: vi.fn(),
+  };
+  test.transaction.billingPeriodEntitlementCounter = {
+    findUnique: vi.fn().mockResolvedValue(counter),
+    create: vi.fn(),
+    upsert: vi.fn(),
+    update: vi.fn(),
+    updateMany: vi.fn(),
+    delete: vi.fn(),
+    deleteMany: vi.fn(),
+  };
 }
 
 export function expectNoModelMutations(model: any) {

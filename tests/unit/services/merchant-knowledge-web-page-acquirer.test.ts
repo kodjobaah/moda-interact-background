@@ -1,8 +1,4 @@
-import {
-  brotliCompressSync,
-  deflateSync,
-  gzipSync,
-} from "node:zlib";
+import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -36,17 +32,21 @@ function response(
 function acquirer(
   replies: MerchantKnowledgeHttpResponse[],
   options: {
-    resolveAll?: ConstructorParameters<typeof MerchantKnowledgeWebPageAcquirer>[0]["resolveAll"];
+    resolveAll?: ConstructorParameters<
+      typeof MerchantKnowledgeWebPageAcquirer
+    >[0]["resolveAll"];
     request?: MerchantKnowledgeHttpsRequest;
   } = {},
 ) {
   const requests: MerchantKnowledgePinnedRequest[] = [];
-  const request = options.request ?? (async (target) => {
-    requests.push(target);
-    const next = replies.shift();
-    if (!next) throw new Error("Missing fake response");
-    return next;
-  });
+  const request =
+    options.request ??
+    (async (target) => {
+      requests.push(target);
+      const next = replies.shift();
+      if (!next) throw new Error("Missing fake response");
+      return next;
+    });
   return {
     client: new MerchantKnowledgeWebPageAcquirer({
       resolveAll: options.resolveAll ?? (async () => [PUBLIC_ADDRESS]),
@@ -72,7 +72,9 @@ describe("MerchantKnowledgeWebPageAcquirer", () => {
     ["https://[fc00::1]/", "DENIED_DESTINATION"],
   ])("rejects unsafe URL %s before sending a request", async (url, code) => {
     const harness = acquirer([]);
-    await expect(harness.client.acquire({ requestedUrl: url })).rejects.toMatchObject({
+    await expect(
+      harness.client.acquire({ requestedUrl: url }),
+    ).rejects.toMatchObject({
       code,
     });
     expect(harness.requests).toHaveLength(0);
@@ -80,7 +82,9 @@ describe("MerchantKnowledgeWebPageAcquirer", () => {
 
   it("uses only the selected validated address and bounded generic headers", async () => {
     const harness = acquirer([response("ok")]);
-    await harness.client.acquire({ requestedUrl: "https://example.com/path?q=1" });
+    await harness.client.acquire({
+      requestedUrl: "https://example.com/path?q=1",
+    });
     expect(harness.requests[0]).toMatchObject({
       hostname: "example.com",
       path: "/path?q=1",
@@ -98,9 +102,7 @@ describe("MerchantKnowledgeWebPageAcquirer", () => {
   });
 
   it("rejects a connected peer that differs from the selected address", async () => {
-    const harness = acquirer([
-      response("ok", { peerAddress: "8.8.4.4" }),
-    ]);
+    const harness = acquirer([response("ok", { peerAddress: "8.8.4.4" })]);
     await expect(
       harness.client.acquire({ requestedUrl: "https://example.com" }),
     ).rejects.toMatchObject({ code: "CONNECTION_PEER_MISMATCH" });
@@ -251,8 +253,12 @@ describe("MerchantKnowledgeWebPageAcquirer", () => {
         headers: { "content-type": "text/plain" },
       }),
     ]);
-    const result = await harness.client.acquire({ requestedUrl: "https://example.com" });
-    expect(result.extractedText).toHaveLength(MERCHANT_KNOWLEDGE_MAX_DECOMPRESSED_BYTES);
+    const result = await harness.client.acquire({
+      requestedUrl: "https://example.com",
+    });
+    expect(result.extractedText).toHaveLength(
+      MERCHANT_KNOWLEDGE_MAX_DECOMPRESSED_BYTES,
+    );
   });
 
   it.each([
@@ -268,7 +274,9 @@ describe("MerchantKnowledgeWebPageAcquirer", () => {
         },
       }),
     ]);
-    const result = await harness.client.acquire({ requestedUrl: "https://example.com" });
+    const result = await harness.client.acquire({
+      requestedUrl: "https://example.com",
+    });
     expect(result.extractedText).toBe("compressed text");
   });
 
@@ -320,12 +328,18 @@ describe("MerchantKnowledgeWebPageAcquirer", () => {
         headers: { "content-type": "text/plain" },
       }),
     ]);
-    const result = await harness.client.acquire({ requestedUrl: "https://example.com" });
+    const result = await harness.client.acquire({
+      requestedUrl: "https://example.com",
+    });
     expect(result.extractedText).toBe("A�\r\n");
   });
 
   it("exports a bounded acquisition error-code set", () => {
-    expect(MERCHANT_KNOWLEDGE_ACQUISITION_ERROR_CODES).toContain("HTTP_STATUS_TRANSIENT");
-    expect(MERCHANT_KNOWLEDGE_ACQUISITION_ERROR_CODES).not.toContain("EAI_AGAIN");
+    expect(MERCHANT_KNOWLEDGE_ACQUISITION_ERROR_CODES).toContain(
+      "HTTP_STATUS_TRANSIENT",
+    );
+    expect(MERCHANT_KNOWLEDGE_ACQUISITION_ERROR_CODES).not.toContain(
+      "EAI_AGAIN",
+    );
   });
 });

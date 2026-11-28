@@ -5,7 +5,10 @@ export type ShopifyUsageEventMapping = {
   unmappedProviderHandles: string[];
 };
 
-type UsageEventCatalogueReader = Pick<Prisma.TransactionClient, "merchantPricingPlan">;
+type UsageEventCatalogueReader = Pick<
+  Prisma.TransactionClient,
+  "merchantPricingPlan"
+>;
 
 /**
  * Compares only the usage-event handles Shopify actually attached to the observed
@@ -18,7 +21,9 @@ export async function resolveShopifyUsageEventMapping(
   planHandle: string,
   providerUsageEventHandles: readonly string[],
 ): Promise<ShopifyUsageEventMapping> {
-  const providerHandles = [...new Set(providerUsageEventHandles)].sort(compareExactHandles);
+  const providerHandles = [...new Set(providerUsageEventHandles)].sort(
+    compareExactHandles,
+  );
   if (providerHandles.length === 0) {
     return { mappedProviderHandles: [], unmappedProviderHandles: [] };
   }
@@ -27,12 +32,17 @@ export async function resolveShopifyUsageEventMapping(
     where: { shopifyPlanHandle: planHandle },
     select: { usageEvents: { select: { eventHandle: true } } },
   });
-  const catalogueHandles = new Set(catalogue?.usageEvents.map((event) => event.eventHandle) ?? []);
+  const catalogueHandles = new Set(
+    catalogue?.usageEvents.map((event) => event.eventHandle) ?? [],
+  );
   const mappedProviderHandles: string[] = [];
   const unmappedProviderHandles: string[] = [];
 
   for (const handle of providerHandles) {
-    (catalogueHandles.has(handle) ? mappedProviderHandles : unmappedProviderHandles).push(handle);
+    (catalogueHandles.has(handle)
+      ? mappedProviderHandles
+      : unmappedProviderHandles
+    ).push(handle);
   }
 
   return { mappedProviderHandles, unmappedProviderHandles };

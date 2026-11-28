@@ -31,18 +31,25 @@ export function registerAgentRaceCases(context: ConversationTurnFacadeContext) {
 
   it("passes the original inbound version through a late ownership check", async () => {
     const test = harness();
-    test.conversation.getTurnState.mockResolvedValue(state({
-      pendingAiControlRevision: 7,
-      controlRevision: 7,
-    }));
+    test.conversation.getTurnState.mockResolvedValue(
+      state({
+        pendingAiControlRevision: 7,
+        controlRevision: 7,
+      }),
+    );
     const ownership = {
       readTurnOwnership: async () => ({
-        conversationId: "conversation-1", recoveryId: "recovery-1",
-        shopId: "shop-1", mode: "AI" as const, revision: 7,
+        conversationId: "conversation-1",
+        recoveryId: "recovery-1",
+        shopId: "shop-1",
+        mode: "AI" as const,
+        revision: 7,
       }),
       checkAutomatedTurn: vi.fn(async ({ phase }: { phase: string }) => {
         if (phase === "before-provider") {
-          test.conversation.getTurnState.mockResolvedValue(state({ inboundVersion: 4 }));
+          test.conversation.getTurnState.mockResolvedValue(
+            state({ inboundVersion: 4 }),
+          );
         }
         return { kind: "allowed" as const, phase };
       }),
@@ -62,37 +69,48 @@ export function registerAgentRaceCases(context: ConversationTurnFacadeContext) {
       logger: test.logger,
     });
 
-    await processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+    await processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
 
-    expect(test.admission.sendPreparedText).toHaveBeenCalledWith(expect.objectContaining({
-      expectedControlRevision: 7,
-      expectedInboundVersion: 3,
-    }));
+    expect(test.admission.sendPreparedText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedControlRevision: 7,
+        expectedInboundVersion: 3,
+      }),
+    );
   });
 
   it.each([
-    ["AbortError", Object.assign(new Error("cancelled"), { name: "AbortError" })],
+    [
+      "AbortError",
+      Object.assign(new Error("cancelled"), { name: "AbortError" }),
+    ],
     ["ordinary cancellation", new Error("operator cancellation")],
     ["new inbound", new Error("STALE_TURN")],
     ["lease loss", new Error("STALE_TURN")],
-  ])("suppresses %s after refresh without send or language mutation", async (_name, failure) => {
-    const test = harness();
-    test.runAgent.mockRejectedValue(failure);
+  ])(
+    "suppresses %s after refresh without send or language mutation",
+    async (_name, failure) => {
+      const test = harness();
+      test.runAgent.mockRejectedValue(failure);
 
-    await expect(
-      test.processor.process({
-        conversationId: "conversation-1",
-        observedVersion: 3,
-      }),
-    ).rejects.toThrow(failure.message);
+      await expect(
+        test.processor.process({
+          conversationId: "conversation-1",
+          observedVersion: 3,
+        }),
+      ).rejects.toThrow(failure.message);
 
-    expect(test.admission.reserve).toHaveBeenCalledTimes(1);
-    expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
-    expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
-    expect(test.conversation.applyDetectedLanguage).not.toHaveBeenCalled();
-    expect(test.conversation.releaseTurn).toHaveBeenCalledWith(
-      "conversation-1",
-      3,
-    );
-  });
+      expect(test.admission.reserve).toHaveBeenCalledTimes(1);
+      expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
+      expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
+      expect(test.conversation.applyDetectedLanguage).not.toHaveBeenCalled();
+      expect(test.conversation.releaseTurn).toHaveBeenCalledWith(
+        "conversation-1",
+        3,
+      );
+    },
+  );
 }

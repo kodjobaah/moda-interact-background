@@ -18,9 +18,13 @@ export class WooSubscriptionReceiptReconciliationService {
     private readonly resumeService: ResumeScheduler = recoveryCapacityResumeService,
   ) {}
 
-  async reconcileBatch(limit: number): Promise<WooSubscriptionReceiptBatchResult> {
+  async reconcileBatch(
+    limit: number,
+  ): Promise<WooSubscriptionReceiptBatchResult> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
-      throw new Error("Woo subscription receipt batch size must be between 1 and 200");
+      throw new Error(
+        "Woo subscription receipt batch size must be between 1 and 200",
+      );
     }
     const result: WooSubscriptionReceiptBatchResult = {
       claimed: 0,
@@ -29,7 +33,11 @@ export class WooSubscriptionReceiptReconciliationService {
       needsAttention: 0,
     };
     for (let index = 0; index < limit; index += 1) {
-      const outcome = await processNextWooSubscriptionReceipt(this.database, this.now(), this.resumeService);
+      const outcome = await processNextWooSubscriptionReceipt(
+        this.database,
+        this.now(),
+        this.resumeService,
+      );
       if (outcome === "empty") break;
       result.claimed += 1;
       if (outcome === "historical") result.historical += 1;
@@ -40,4 +48,5 @@ export class WooSubscriptionReceiptReconciliationService {
   }
 }
 
-export const wooSubscriptionReceiptReconciliationService = new WooSubscriptionReceiptReconciliationService();
+export const wooSubscriptionReceiptReconciliationService =
+  new WooSubscriptionReceiptReconciliationService();

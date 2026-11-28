@@ -6,11 +6,17 @@ export async function recordChargeReceiptError(
   code: string,
   operationId?: string,
 ): Promise<void> {
-  const updated = await transaction.wooCommerceBillingWebhookReceipt.updateMany({
-    where: { id: receiptId, processedAt: null },
-    data: { processingError: code, ...(operationId ? { billingOperationId: operationId } : {}) },
-  });
-  if (updated.count !== 1) throw new Error("Woo charge receipt claim was lost before error recording");
+  const updated = await transaction.wooCommerceBillingWebhookReceipt.updateMany(
+    {
+      where: { id: receiptId, processedAt: null },
+      data: {
+        processingError: code,
+        ...(operationId ? { billingOperationId: operationId } : {}),
+      },
+    },
+  );
+  if (updated.count !== 1)
+    throw new Error("Woo charge receipt claim was lost before error recording");
 }
 
 export async function completeChargeReceipt(
@@ -19,9 +25,16 @@ export async function completeChargeReceipt(
   processedAt: Date,
   operationId: string,
 ): Promise<void> {
-  const updated = await transaction.wooCommerceBillingWebhookReceipt.updateMany({
-    where: { id: receiptId, processedAt: null },
-    data: { processedAt, processingError: null, billingOperationId: operationId },
-  });
-  if (updated.count !== 1) throw new Error("Woo charge receipt claim was lost before completion");
+  const updated = await transaction.wooCommerceBillingWebhookReceipt.updateMany(
+    {
+      where: { id: receiptId, processedAt: null },
+      data: {
+        processedAt,
+        processingError: null,
+        billingOperationId: operationId,
+      },
+    },
+  );
+  if (updated.count !== 1)
+    throw new Error("Woo charge receipt claim was lost before completion");
 }

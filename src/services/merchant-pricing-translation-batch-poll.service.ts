@@ -1,6 +1,9 @@
 import { Queue } from "bullmq";
 import { Prisma } from "@prisma/client";
-import { CommerceEnvironmentSchema, type CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
+import {
+  CommerceEnvironmentSchema,
+  type CommerceEnvironment,
+} from "@modainteract/moda-interact-shared/commerce/model";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import {
@@ -56,11 +59,17 @@ type PollTransaction = {
 };
 
 type PollDatabase = {
-  $transaction<T>(callback: (transaction: PollTransaction) => Promise<T>): Promise<T>;
+  $transaction<T>(
+    callback: (transaction: PollTransaction) => Promise<T>,
+  ): Promise<T>;
 };
 
 type PollQueue = Pick<Queue, "add">;
-type ProviderFactory = (options: { provider: string; model: string; apiKey: string }) => TranslationProvider;
+type ProviderFactory = (options: {
+  provider: string;
+  model: string;
+  apiKey: string;
+}) => TranslationProvider;
 
 const logger = createLogger({
   serviceName: "moda-merchant-communications-worker",
@@ -105,26 +114,39 @@ export class MerchantPricingTranslationBatchPollService {
   private readonly providerFactory: ProviderFactory;
   private readonly queue: PollQueue;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
-  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
+  private readonly credentialResolverFactory: () =>
+    | TranslationProviderCredentialResolver
+    | Promise<TranslationProviderCredentialResolver>;
 
-  constructor(options: {
-    database?: PollDatabase;
-    providerFactory?: ProviderFactory;
-    queue?: PollQueue;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-    credentialResolverFactory?: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
-  } = {}) {
+  constructor(
+    options: {
+      database?: PollDatabase;
+      providerFactory?: ProviderFactory;
+      queue?: PollQueue;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+      credentialResolverFactory?: () =>
+        | TranslationProviderCredentialResolver
+        | Promise<TranslationProviderCredentialResolver>;
+    } = {},
+  ) {
     this.database = options.database ?? prisma;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) =>
-      createOpenAITranslationProvider(providerOptions));
-    this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
-      connection: connectionRedis,
-    });
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
-    this.credentialResolverFactory = options.credentialResolverFactory ?? defaultCredentialResolver;
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.queue =
+      options.queue ??
+      new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
+        connection: connectionRedis,
+      });
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.credentialResolverFactory =
+      options.credentialResolverFactory ?? defaultCredentialResolver;
   }
 
-  async poll(input: MerchantPricingTranslationBatchPollJob): Promise<MerchantPricingTranslationBatchPollResult> {
+  async poll(
+    input: MerchantPricingTranslationBatchPollJob,
+  ): Promise<MerchantPricingTranslationBatchPollResult> {
     const batch = await this.loadBatch(input.translationBatchId);
     if (
       !batch ||
@@ -139,8 +161,12 @@ export class MerchantPricingTranslationBatchPollService {
 
     return pollTranslationProviderBatch({
       retrieve: async () => {
-        const environment = CommerceEnvironmentSchema.parse(batch.environment) as CommerceEnvironment;
-        const apiKey = await (await this.credentialResolverFactory()).resolve({
+        const environment = CommerceEnvironmentSchema.parse(
+          batch.environment,
+        ) as CommerceEnvironment;
+        const apiKey = await (
+          await this.credentialResolverFactory()
+        ).resolve({
           environment,
           provider: batch.provider,
         });
@@ -152,22 +178,34 @@ export class MerchantPricingTranslationBatchPollService {
         return provider.retrieveBatch(providerBatchId);
       },
       onReadFailure: async (error) => {
-        const schedule = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
+        const schedule = await this.rescheduleAfterReadFailure(
+          batch,
+          runtimeConfig,
+        );
         await this.enqueuePoll(
           batch.id,
           schedule.pollSequence,
           runtimeConfig.translationPollIntervalSeconds,
         );
-        logger.warn("background.merchant_pricing_translation.batch_poll_failed", {
-          runId: batch.runId,
+        logger.warn(
+          "background.merchant_pricing_translation.batch_poll_failed",
+          {
+            runId: batch.runId,
+            batchId: batch.id,
+            pollSequence: schedule.pollSequence,
+            nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
+            errorName:
+              error instanceof Error ? error.name.slice(0, 128) : "unknown",
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+            error: error,
+          },
+        );
+        return {
+          status: "rescheduled",
           batchId: batch.id,
           pollSequence: schedule.pollSequence,
-          nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
-          errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
-          errorMessage: error instanceof Error ? error.message : String(error),
-          error: error,
-        });
-        return { status: "rescheduled", batchId: batch.id, pollSequence: schedule.pollSequence };
+        };
       },
       onNonterminal: async (providerBatch) => {
         const schedule = await this.advanceNonterminal(batch, runtimeConfig);
@@ -211,8 +249,10 @@ export class MerchantPricingTranslationBatchPollService {
             WHERE "id" = ${batch.id}
               AND "status" = 'SUBMITTED'
               AND "pollSequence" = ${batch.pollSequence}
-          `));
-        if (updated !== 1) return { status: "stale", batchId: batch.id } as const;
+          `),
+        );
+        if (updated !== 1)
+          return { status: "stale", batchId: batch.id } as const;
         logger.info("background.merchant_pricing_translation.batch_polled", {
           runId: batch.runId,
           batchId: batch.id,
@@ -236,7 +276,8 @@ export class MerchantPricingTranslationBatchPollService {
           providerBatch.failureCode,
           runtimeConfig,
         );
-        if (!terminalApplied) return { status: "stale", batchId: batch.id } as const;
+        if (!terminalApplied)
+          return { status: "stale", batchId: batch.id } as const;
         logger.warn("background.merchant_pricing_translation.batch_polled", {
           runId: batch.runId,
           batchId: batch.id,
@@ -275,7 +316,9 @@ export class MerchantPricingTranslationBatchPollService {
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<{ pollSequence: number; nextPollAt: Date | null }> {
     return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<Array<{ pollSequence: number; nextPollAt: Date | null }>>(Prisma.sql`
+      const rows = await transaction.$queryRaw<
+        Array<{ pollSequence: number; nextPollAt: Date | null }>
+      >(Prisma.sql`
         UPDATE "billing"."MerchantPricingTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
@@ -297,7 +340,9 @@ export class MerchantPricingTranslationBatchPollService {
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<{ pollSequence: number; nextPollAt: Date | null }> {
     return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<Array<{ pollSequence: number; nextPollAt: Date | null }>>(Prisma.sql`
+      const rows = await transaction.$queryRaw<
+        Array<{ pollSequence: number; nextPollAt: Date | null }>
+      >(Prisma.sql`
         UPDATE "billing"."MerchantPricingTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
@@ -336,7 +381,9 @@ export class MerchantPricingTranslationBatchPollService {
       `);
       if (claimed !== 1) return false;
 
-      const items = await transaction.$queryRaw<Array<{ translationItemId: string; retryCount: number }>>(Prisma.sql`
+      const items = await transaction.$queryRaw<
+        Array<{ translationItemId: string; retryCount: number }>
+      >(Prisma.sql`
         SELECT i."translationItemId", t."retryCount"
         FROM "billing"."MerchantPricingTranslationBatchItem" i
         INNER JOIN "billing"."MerchantPricingTranslationItem" t ON t."id" = i."translationItemId"
@@ -367,24 +414,39 @@ export class MerchantPricingTranslationBatchPollService {
     });
   }
 
-  private async enqueuePoll(batchId: string, pollSequence: number, delaySeconds: number): Promise<void> {
+  private async enqueuePoll(
+    batchId: string,
+    pollSequence: number,
+    delaySeconds: number,
+  ): Promise<void> {
     const job: MerchantPricingTranslationBatchPollJob = {
       schemaVersion: MERCHANT_PRICING_TRANSLATION_SCHEMA_VERSION,
       translationBatchId: batchId,
       pollSequence,
     };
     try {
-      await this.queue.add(MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_POLL, job, {
-        jobId: createMerchantPricingTranslationBatchPollJobId(batchId, pollSequence),
-        delay: delaySeconds * 1000,
-      });
+      await this.queue.add(
+        MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_POLL,
+        job,
+        {
+          jobId: createMerchantPricingTranslationBatchPollJobId(
+            batchId,
+            pollSequence,
+          ),
+          delay: delaySeconds * 1000,
+        },
+      );
     } catch (error) {
-      logger.warn("background.merchant_pricing_translation.poll_enqueue_failed", {
-        batchId,
-        pollSequence,
-        errorMessage: error instanceof Error ? error.message : "unknown failure",
-        error: error,
-      });
+      logger.warn(
+        "background.merchant_pricing_translation.poll_enqueue_failed",
+        {
+          batchId,
+          pollSequence,
+          errorMessage:
+            error instanceof Error ? error.message : "unknown failure",
+          error: error,
+        },
+      );
     }
   }
 
@@ -394,15 +456,23 @@ export class MerchantPricingTranslationBatchPollService {
       translationBatchId: batchId,
     };
     try {
-      await this.queue.add(MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_RESULTS, job, {
-        jobId: createMerchantPricingTranslationBatchResultsJobId(batchId),
-      });
+      await this.queue.add(
+        MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_RESULTS,
+        job,
+        {
+          jobId: createMerchantPricingTranslationBatchResultsJobId(batchId),
+        },
+      );
     } catch (error) {
-      logger.warn("background.merchant_pricing_translation.results_enqueue_failed", {
-        batchId,
-        errorMessage: error instanceof Error ? error.message : "unknown failure",
-        error: error,
-      });
+      logger.warn(
+        "background.merchant_pricing_translation.results_enqueue_failed",
+        {
+          batchId,
+          errorMessage:
+            error instanceof Error ? error.message : "unknown failure",
+          error: error,
+        },
+      );
     }
   }
 }

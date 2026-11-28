@@ -8,7 +8,8 @@ export class RecoveryOfferTimeout extends Error {
 }
 
 export async function withinOfferDeadline<T>(
-  run: (signal: AbortSignal) => Promise<T>, durationMs: number,
+  run: (signal: AbortSignal) => Promise<T>,
+  durationMs: number,
 ): Promise<T> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;

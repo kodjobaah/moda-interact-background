@@ -8,9 +8,14 @@ import { canonicalWhatsAppSender } from "../whatsapp-contact-opt-out/phone.js";
 import type { WooObservedOrderStateReader } from "./contracts.js";
 import type { WooGuardedInitialSender } from "./woo-recovery-outreach.service.js";
 
-type ExistingAdmission = Pick<typeof outboundWhatsAppAdmissionService,
-  "reserve" | "findExistingAdmission" | "inspectInitialOutreachAdmission">;
-type InitialDelivery = Pick<OutboundMessageDeliveryService, "sendPreparedWooInitialTemplate">;
+type ExistingAdmission = Pick<
+  typeof outboundWhatsAppAdmissionService,
+  "reserve" | "findExistingAdmission" | "inspectInitialOutreachAdmission"
+>;
+type InitialDelivery = Pick<
+  OutboundMessageDeliveryService,
+  "sendPreparedWooInitialTemplate"
+>;
 
 /**
  * ARCH-046-BACKGROUND-004. The only Woo initial-template sender for BG005 to
@@ -37,86 +42,153 @@ export class WooGuardedInitialSenderService implements WooGuardedInitialSender {
     return this.outbound.findExistingAdmission(idempotencyKey);
   }
 
-  inspectInitialOutreachAdmission(scope: Parameters<ExistingAdmission["inspectInitialOutreachAdmission"]>[0]) {
+  inspectInitialOutreachAdmission(
+    scope: Parameters<ExistingAdmission["inspectInitialOutreachAdmission"]>[0],
+  ) {
     return this.outbound.inspectInitialOutreachAdmission(scope);
   }
 
-  async sendInitial(input: Parameters<WooGuardedInitialSender["sendInitial"]>[0]):
-    ReturnType<WooGuardedInitialSender["sendInitial"]> {
+  async sendInitial(
+    input: Parameters<WooGuardedInitialSender["sendInitial"]>[0],
+  ): ReturnType<WooGuardedInitialSender["sendInitial"]> {
     const { recovery, consent, template } = input;
     try {
-      if (recovery.shop.platform !== "WOOCOMMERCE" || recovery.shopId !== consent.shopId ||
-        recovery.customerId !== consent.customerId || recovery.shop.status !== "ACTIVE" ||
-        !initialOutreachRecoveryStateAllowed(input.attemptId, recovery.status) || recovery.completedAt ||
+      if (
+        recovery.shop.platform !== "WOOCOMMERCE" ||
+        recovery.shopId !== consent.shopId ||
+        recovery.customerId !== consent.customerId ||
+        recovery.shop.status !== "ACTIVE" ||
+        !initialOutreachRecoveryStateAllowed(
+          input.attemptId,
+          recovery.status,
+        ) ||
+        recovery.completedAt ||
         input.idempotencyKey !== `recovery-outreach:${input.attemptId}` ||
-        input.recoveryCreditSourceKey !== createRecoveryIdempotencyKey(recovery.shopId, input.idempotencyKey) ||
-        template.verifiedCategory !== "MARKETING" || !template.name || !template.languageCode ||
+        input.recoveryCreditSourceKey !==
+          createRecoveryIdempotencyKey(recovery.shopId, input.idempotencyKey) ||
+        template.verifiedCategory !== "MARKETING" ||
+        !template.name ||
+        !template.languageCode ||
         !template.sendFields?.templateRegistration ||
         template.sendFields.templateRegistration.shopId !== recovery.shopId ||
-        template.sendFields.templateRegistration.providerTemplateName !== template.name ||
-        template.sendFields.templateRegistration.providerLanguageCode !== template.languageCode ||
-        canonicalWhatsAppSender(input.recipient) !== consent.canonicalRecipient) {
-        return this.suppress(recovery.shopId, recovery.id, input.attemptId, "invalid-woo-initial-scope");
+        template.sendFields.templateRegistration.providerTemplateName !==
+          template.name ||
+        template.sendFields.templateRegistration.providerLanguageCode !==
+          template.languageCode ||
+        canonicalWhatsAppSender(input.recipient) !== consent.canonicalRecipient
+      ) {
+        return this.suppress(
+          recovery.shopId,
+          recovery.id,
+          input.attemptId,
+          "invalid-woo-initial-scope",
+        );
       }
 
       // BG004 holds BG002's checkout lease. An observed order in Redis is
       // excluded before the SQL transaction; a missing Woo event cannot be
       // detected here. Durable terminal rows are checked in the SQL permit.
-      const observed = await this.orders.read({ shopId: recovery.shopId, checkoutToken: recovery.checkoutToken });
-      if (observed.kind === "ambiguous") throw new Error("WOO_ORDER_EVIDENCE_AMBIGUOUS");
+      const observed = await this.orders.read({
+        shopId: recovery.shopId,
+        checkoutToken: recovery.checkoutToken,
+      });
+      if (observed.kind === "ambiguous")
+        throw new Error("WOO_ORDER_EVIDENCE_AMBIGUOUS");
       if (observed.kind !== "none-observed")
-        return this.suppress(recovery.shopId, recovery.id, input.attemptId, "woo-observed-order-terminal");
+        return this.suppress(
+          recovery.shopId,
+          recovery.id,
+          input.attemptId,
+          "woo-observed-order-terminal",
+        );
 
-      const scope = { shopId: recovery.shopId, recoveryId: recovery.id, outreachAttemptId: input.attemptId };
+      const scope = {
+        shopId: recovery.shopId,
+        recoveryId: recovery.id,
+        outreachAttemptId: input.attemptId,
+      };
       const previous = await this.inspectInitialOutreachAdmission(scope);
       if (previous.kind === "held")
-        throw new Error(previous.reason === "lineage-conflict"
-          ? "WOO_INITIAL_PROVIDER_ADMISSION_OWNERSHIP_MISMATCH"
-          : "WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
-      if (previous.kind !== "absent" && previous.message.conversationId !== input.conversationId)
+        throw new Error(
+          previous.reason === "lineage-conflict"
+            ? "WOO_INITIAL_PROVIDER_ADMISSION_OWNERSHIP_MISMATCH"
+            : "WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN",
+        );
+      if (
+        previous.kind !== "absent" &&
+        previous.message.conversationId !== input.conversationId
+      )
         throw new Error("WOO_INITIAL_PROVIDER_ADMISSION_OWNERSHIP_MISMATCH");
       if (previous.kind === "confirmed" || previous.kind === "failed")
         return { kind: "suppressed", reason: "duplicate" };
-      const admission = previous.kind === "prepared" ? {
-        kind: "admitted" as const, shopId: recovery.shopId,
-        conversationId: input.conversationId, messageId: previous.message.id, terminal: false,
-        executionScope: "recovery" as const,
-      } : await this.outbound.reserve({
-        shopId: recovery.shopId,
-        conversationId: input.conversationId,
-        senderType: "AUTOMATION",
-        idempotencyKey: input.idempotencyKey,
-        recoveryCreditSourceKey: input.recoveryCreditSourceKey,
-        initialOutreach: scope,
-      });
-      if (admission.kind !== "admitted") return { kind: "suppressed", reason: admission.reason };
+      const admission =
+        previous.kind === "prepared"
+          ? {
+              kind: "admitted" as const,
+              shopId: recovery.shopId,
+              conversationId: input.conversationId,
+              messageId: previous.message.id,
+              terminal: false,
+              executionScope: "recovery" as const,
+            }
+          : await this.outbound.reserve({
+              shopId: recovery.shopId,
+              conversationId: input.conversationId,
+              senderType: "AUTOMATION",
+              idempotencyKey: input.idempotencyKey,
+              recoveryCreditSourceKey: input.recoveryCreditSourceKey,
+              initialOutreach: scope,
+            });
+      if (admission.kind !== "admitted")
+        return { kind: "suppressed", reason: admission.reason };
 
-      const result = await this.delivery.sendPreparedWooInitialTemplate(admission, {
-        ...template.sendFields!, to: input.recipient,
-      }, {
-        recoveryId: recovery.id,
-        checkoutToken: recovery.checkoutToken,
-        customerId: consent.customerId,
-        attemptId: input.attemptId,
-        consent,
-        idempotencyKey: input.idempotencyKey,
-        recoveryCreditSourceKey: input.recoveryCreditSourceKey,
-      });
+      const result = await this.delivery.sendPreparedWooInitialTemplate(
+        admission,
+        {
+          ...template.sendFields!,
+          to: input.recipient,
+        },
+        {
+          recoveryId: recovery.id,
+          checkoutToken: recovery.checkoutToken,
+          customerId: consent.customerId,
+          attemptId: input.attemptId,
+          consent,
+          idempotencyKey: input.idempotencyKey,
+          recoveryCreditSourceKey: input.recoveryCreditSourceKey,
+        },
+      );
       if (result.kind === "suppressed")
-        return this.suppress(recovery.shopId, recovery.id, input.attemptId, result.reason);
+        return this.suppress(
+          recovery.shopId,
+          recovery.id,
+          input.attemptId,
+          result.reason,
+        );
       return { kind: "admitted" };
     } catch (error) {
       this.log.error("woocommerce.recovery.initial.permit.failed", {
-        shopId: recovery.shopId, recoveryId: recovery.id, attemptId: input.attemptId,
-        stage: "guarded_sender", sourceError: initialOutreachDiagnostic(error),
+        shopId: recovery.shopId,
+        recoveryId: recovery.id,
+        attemptId: input.attemptId,
+        stage: "guarded_sender",
+        sourceError: initialOutreachDiagnostic(error),
       });
       throw error;
     }
   }
 
-  private suppress(shopId: string, recoveryId: string, attemptId: string, reason: string) {
+  private suppress(
+    shopId: string,
+    recoveryId: string,
+    attemptId: string,
+    reason: string,
+  ) {
     this.log.warn("woocommerce.recovery.initial.permit.suppressed", {
-      shopId, recoveryId, attemptId, reason,
+      shopId,
+      recoveryId,
+      attemptId,
+      reason,
     });
     return { kind: "suppressed" as const, reason };
   }

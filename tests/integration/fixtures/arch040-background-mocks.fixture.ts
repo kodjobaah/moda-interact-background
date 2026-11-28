@@ -1,9 +1,13 @@
 import { vi } from "vitest";
 import { WhatsAppService } from "../../../src/services/whatsapp.service.js";
-import type { SendTemplateInput, SendTextInput } from "../../../src/integration/whatsapp/types.js";
+import type {
+  SendTemplateInput,
+  SendTextInput,
+} from "../../../src/integration/whatsapp/types.js";
 import { platformConsumerConfiguration } from "../../../src/services/platform-configuration/consumers.js";
 import type {
-  BackgroundReadableKey, ConfigurationSnapshot,
+  BackgroundReadableKey,
+  ConfigurationSnapshot,
 } from "../../../src/services/platform-configuration/contracts.js";
 import { Arch040Aimock } from "./arch040-aimock.fixture.js";
 import { Arch040WhatsAppEmulator } from "./arch040-whatsapp-emulator.fixture.js";
@@ -16,37 +20,58 @@ import { Arch040WhatsAppEmulator } from "./arch040-whatsapp-emulator.fixture.js"
  * All provider traffic must terminate at this disposable loopback emulator.
  */
 export async function startArch040BackgroundMocks(senderConfiguration?: {
-  rowId: string; version: number; providerAccountId: string; standalonePhoneNumberId: string;
+  rowId: string;
+  version: number;
+  providerAccountId: string;
+  standalonePhoneNumberId: string;
   pooledPhoneNumberId?: string;
 }) {
-  const whatsapp = new Arch040WhatsAppEmulator(senderConfiguration?.pooledPhoneNumberId);
+  const whatsapp = new Arch040WhatsAppEmulator(
+    senderConfiguration?.pooledPhoneNumberId,
+  );
   await whatsapp.start();
-  const values = { ...whatsapp.environment,
-    WHATSAPP_BUSINESS_ACCOUNT_ID: senderConfiguration?.providerAccountId ?? "arch040-test-business-account" };
-  const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
+  const values = {
+    ...whatsapp.environment,
+    WHATSAPP_BUSINESS_ACCOUNT_ID:
+      senderConfiguration?.providerAccountId ?? "arch040-test-business-account",
+  };
+  const previous = new Map(
+    Object.keys(values).map((key) => [key, process.env[key]]),
+  );
   for (const [key, value] of Object.entries(values)) process.env[key] = value;
 
   // ARCH-043 makes messaging.sender a sealed database configuration. The
   // disposable HTTP emulator must supply its own sender identity rather than
   // reading developer/production credentials or relying on legacy env vars.
   // Mock only this configuration key; other reads retain the real reader.
-  const readConfiguration = platformConsumerConfiguration.read.bind(platformConsumerConfiguration);
-  const senderRead = vi.spyOn(platformConsumerConfiguration, "read").mockImplementation(
-    async <K extends BackgroundReadableKey>(key: K): Promise<ConfigurationSnapshot<K>> => {
-      if (key === "messaging.sender") {
-        return {
-          key, version: senderConfiguration?.version ?? 1,
-          ...(senderConfiguration ? { rowId: senderConfiguration.rowId } : {}),
-          value: {
-            accessToken: values.WHATSAPP_ACCESS_TOKEN,
-            phoneNumberId: senderConfiguration?.standalonePhoneNumberId ?? whatsapp.phoneNumberId,
-            businessAccountId: values.WHATSAPP_BUSINESS_ACCOUNT_ID,
-          },
-        } as ConfigurationSnapshot<K>;
-      }
-      return readConfiguration(key);
-    },
+  const readConfiguration = platformConsumerConfiguration.read.bind(
+    platformConsumerConfiguration,
   );
+  const senderRead = vi
+    .spyOn(platformConsumerConfiguration, "read")
+    .mockImplementation(
+      async <K extends BackgroundReadableKey>(
+        key: K,
+      ): Promise<ConfigurationSnapshot<K>> => {
+        if (key === "messaging.sender") {
+          return {
+            key,
+            version: senderConfiguration?.version ?? 1,
+            ...(senderConfiguration
+              ? { rowId: senderConfiguration.rowId }
+              : {}),
+            value: {
+              accessToken: values.WHATSAPP_ACCESS_TOKEN,
+              phoneNumberId:
+                senderConfiguration?.standalonePhoneNumberId ??
+                whatsapp.phoneNumberId,
+              businessAccountId: values.WHATSAPP_BUSINESS_ACCOUNT_ID,
+            },
+          } as ConfigurationSnapshot<K>;
+        }
+        return readConfiguration(key);
+      },
+    );
 
   type Fault = "timeout" | "provider-rejected" | "recipient-undeliverable";
   let nextFault: Fault | null = null;
@@ -54,11 +79,21 @@ export async function startArch040BackgroundMocks(senderConfiguration?: {
   const requests: Array<{ type: string }> = [];
   const expectedEndpoint = `${whatsapp.apiBaseUrl}/${whatsapp.phoneNumberId}/messages`;
   const protectedFetch: typeof fetch = async (input, init) => {
-    const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+    const url =
+      input instanceof URL
+        ? input.href
+        : typeof input === "string"
+          ? input
+          : input.url;
     if (url !== expectedEndpoint || init?.method !== "POST") {
-      throw new Error("ARCH-040 mock boundary refused an external WhatsApp request");
+      throw new Error(
+        "ARCH-040 mock boundary refused an external WhatsApp request",
+      );
     }
-    const body = typeof init.body === "string" ? JSON.parse(init.body) as { type?: string } : {};
+    const body =
+      typeof init.body === "string"
+        ? (JSON.parse(init.body) as { type?: string })
+        : {};
     requests.push({ type: body.type ?? "unknown" });
     const pendingHold = hold;
     if (pendingHold) {
@@ -68,32 +103,55 @@ export async function startArch040BackgroundMocks(senderConfiguration?: {
     }
     const fault = nextFault;
     nextFault = null;
-    if (fault === "timeout") throw new Error("mock WhatsApp transport timeout (provider outcome unknown)");
+    if (fault === "timeout")
+      throw new Error(
+        "mock WhatsApp transport timeout (provider outcome unknown)",
+      );
     if (fault === "provider-rejected" || fault === "recipient-undeliverable") {
-      return new Response(JSON.stringify({ error: { message: "verified provider rejection",
-        ...(fault === "recipient-undeliverable" ? { code: 131026 } : {}) } }), {
-        status: 400, headers: { "content-type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: "verified provider rejection",
+            ...(fault === "recipient-undeliverable" ? { code: 131026 } : {}),
+          },
+        }),
+        {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        },
+      );
     }
     return fetch(input, init);
   };
   const realProvider = new WhatsAppService(protectedFetch);
   const provider = {
-    sendWhatsAppText: vi.fn((input: SendTextInput) => realProvider.sendWhatsAppText(input)),
-    sendWhatsAppTemplate: vi.fn((input: SendTemplateInput) => realProvider.sendWhatsAppTemplate(input)),
+    sendWhatsAppText: vi.fn((input: SendTextInput) =>
+      realProvider.sendWhatsAppText(input),
+    ),
+    sendWhatsAppTemplate: vi.fn((input: SendTemplateInput) =>
+      realProvider.sendWhatsAppTemplate(input),
+    ),
     getProviderAccountId: () => values.WHATSAPP_BUSINESS_ACCOUNT_ID,
   };
 
   let aimock: Arch040Aimock | null = null;
   return {
-    provider, whatsapp, requests,
-    failNextHttp(fault: Fault) { nextFault = fault; },
+    provider,
+    whatsapp,
+    requests,
+    failNextHttp(fault: Fault) {
+      nextFault = fault;
+    },
     holdNextHttp() {
       if (hold) throw new Error("WhatsApp HTTP request is already held");
       let onEntered!: () => void;
       let onRelease!: () => void;
-      const entered = new Promise<void>((resolve) => { onEntered = resolve; });
-      const released = new Promise<void>((resolve) => { onRelease = resolve; });
+      const entered = new Promise<void>((resolve) => {
+        onEntered = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        onRelease = resolve;
+      });
       hold = { entered: onEntered, released };
       return { entered, release: onRelease };
     },

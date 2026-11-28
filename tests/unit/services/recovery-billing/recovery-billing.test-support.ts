@@ -91,17 +91,19 @@ export function paidIncludedReservationService(
             policy: paidPolicy(),
           },
     ),
-    commit: vi.fn(async ({ shopId, sourceKey }: { shopId: string; sourceKey: string }) => ({
-      kind: "committed" as const,
-      reservation: {
-        id: "reservation-1",
-        shopId,
-        sourceKey,
-        status: "COMMITTED",
-        quantity: 1,
-        committedUsageEventId: "usage-event-1",
-      },
-    })),
+    commit: vi.fn(
+      async ({ shopId, sourceKey }: { shopId: string; sourceKey: string }) => ({
+        kind: "committed" as const,
+        reservation: {
+          id: "reservation-1",
+          shopId,
+          sourceKey,
+          status: "COMMITTED",
+          quantity: 1,
+          committedUsageEventId: "usage-event-1",
+        },
+      }),
+    ),
     release: vi.fn(),
     markAmbiguous: vi.fn(),
   };

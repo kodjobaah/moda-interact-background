@@ -55,12 +55,12 @@ export function createMerchantKnowledgeEmbeddingResolver(input: {
         );
       }
       if (
-        !model
-        || !indexVersion
-        || !Number.isSafeInteger(row.embeddingDimensions)
-        || row.embeddingDimensions <= 0
-        || countMerchantKnowledgeCodePoints(indexVersion) > 64
-        || !hasValidPersistedCredentialMetadata(row)
+        !model ||
+        !indexVersion ||
+        !Number.isSafeInteger(row.embeddingDimensions) ||
+        row.embeddingDimensions <= 0 ||
+        countMerchantKnowledgeCodePoints(indexVersion) > 64 ||
+        !hasValidPersistedCredentialMetadata(row)
       ) {
         throw new MerchantKnowledgeEmbeddingConfigurationError(
           "INVALID_EMBEDDING_CONFIGURATION",
@@ -88,7 +88,8 @@ export function createMerchantKnowledgeEmbeddingResolver(input: {
             keyId: row.keyId,
           }),
         });
-        if (!isValidProviderCredentialText(apiKey)) throw new Error("Invalid provider credential");
+        if (!isValidProviderCredentialText(apiKey))
+          throw new Error("Invalid provider credential");
       } catch {
         throw new MerchantKnowledgeEmbeddingConfigurationError(
           "EMBEDDING_CONFIGURATION_UNAVAILABLE",

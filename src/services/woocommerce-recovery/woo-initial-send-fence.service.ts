@@ -1,25 +1,37 @@
 import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
 import { checkInitialRetryPermit } from "../recovery-delivery-retry/initial-permit.js";
-import { checkDispatchSender, readDispatchSenderSnapshot } from "../recovery-sender-pool/dispatch-sender.js";
+import {
+  checkDispatchSender,
+  readDispatchSenderSnapshot,
+} from "../recovery-sender-pool/dispatch-sender.js";
 import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 import { hasExactInitialCredit } from "../recovery-conversation/outbound-send-fence.service.js";
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import type { WooRecoveryConsentSnapshot } from "../woocommerce-recovery-consent.service.js";
 import { canonicalWhatsAppSender } from "../whatsapp-contact-opt-out/phone.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
-import { confirmCurrentWooConsent, confirmUniqueWooRecipient } from "./woo-recovery-admission-evidence.js";
+import {
+  confirmCurrentWooConsent,
+  confirmUniqueWooRecipient,
+} from "./woo-recovery-admission-evidence.js";
 import {
   isCheckoutRecoveryWithinLifetime,
   parseCheckoutRecoveryLifetimeDays,
 } from "../recovery-lifetime/checkout-recovery-lifetime.js";
 import prisma from "../../lib/db.js";
-import { checkFinalTemplateRegistration, type FinalTemplateEligibility,
-  type FinalTemplateIdentity } from "../recovery-template-integration/final-template-registration.service.js";
+import {
+  checkFinalTemplateRegistration,
+  type FinalTemplateEligibility,
+  type FinalTemplateIdentity,
+} from "../recovery-template-integration/final-template-registration.service.js";
 
 export type WooInitialFinalPermitInput = Readonly<{
   shopId: string;
@@ -37,7 +49,7 @@ export type WooInitialFinalPermitInput = Readonly<{
   languageCode: string;
   verifiedCategory: "MARKETING";
   templateRegistration: FinalTemplateIdentity;
-  templateParameters?:{header:readonly string[];body:readonly string[]};
+  templateParameters?: { header: readonly string[]; body: readonly string[] };
   expectedContent: string;
 }>;
 
@@ -53,23 +65,42 @@ const defaultLogger = createLogger({
 });
 type LockedShop = { status: string; platform: string };
 type LockedRecovery = {
-  shopId: string; checkoutToken: string; customerId: string | null;
-  status: string; completedAt: Date | null; expiredAt: Date | null; lastExternalActivityAt: Date;
+  shopId: string;
+  checkoutToken: string;
+  customerId: string | null;
+  status: string;
+  completedAt: Date | null;
+  expiredAt: Date | null;
+  lastExternalActivityAt: Date;
 };
 type LockedConversation = {
-  shopId: string | null; checkoutRecoveryId: string | null;
-  type: string; controlMode: string; controlRevision: number;
+  shopId: string | null;
+  checkoutRecoveryId: string | null;
+  type: string;
+  controlMode: string;
+  controlRevision: number;
 };
 type LockedAttempt = {
-  checkoutRecoveryId: string; sequence: number; trigger: string; status: string; recipient: string;
-  sentAt: Date | null; outboundMessageId: string | null; followUpDueAt: Date | null;
+  checkoutRecoveryId: string;
+  sequence: number;
+  trigger: string;
+  status: string;
+  recipient: string;
+  sentAt: Date | null;
+  outboundMessageId: string | null;
+  followUpDueAt: Date | null;
 };
 type LockedMessage = {
-  status: string; content: string; providerDispatchKey: string | null;
+  status: string;
+  content: string;
+  providerDispatchKey: string | null;
   providerDispatchAdmittedAt: Date | null;
   providerDispatchControlRevision: number | null;
   providerMessageId: string | null;
-  sentAt: Date | null; deliveredAt: Date | null; readAt: Date | null; failedAt: Date | null;
+  sentAt: Date | null;
+  deliveredAt: Date | null;
+  readAt: Date | null;
+  failedAt: Date | null;
 };
 
 /**
@@ -92,97 +123,192 @@ export class WooInitialSendFenceService {
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
-  async admitFinalSend(input: WooInitialFinalPermitInput): Promise<WooInitialFinalPermit> {
+  async admitFinalSend(
+    input: WooInitialFinalPermitInput,
+  ): Promise<WooInitialFinalPermit> {
     try {
-    // Reject forged/reused attempt keys and mismatched source attribution before
-    // opening a transaction. This is a synchronous identity check, not a grant.
-    if (!input.shopId || !input.recoveryId || !input.customerId || !input.checkoutToken ||
-      !input.conversationId || !input.attemptId || !input.messageId ||
-      !input.templateName || !input.languageCode || !input.expectedContent ||
-      input.verifiedCategory !== "MARKETING" || !input.templateRegistration ||
-      input.idempotencyKey !== `recovery-outreach:${input.attemptId}` ||
-      input.recoveryCreditSourceKey !== createRecoveryIdempotencyKey(
-        input.shopId, input.idempotencyKey,
-      ) ||
-      canonicalWhatsAppSender(input.recipient) !== input.consent.canonicalRecipient ||
-      input.consent.shopId !== input.shopId || input.consent.customerId !== input.customerId) {
-      return { kind: "suppressed", reason: "invalid-woo-initial-scope" };
-    }
+      // Reject forged/reused attempt keys and mismatched source attribution before
+      // opening a transaction. This is a synchronous identity check, not a grant.
+      if (
+        !input.shopId ||
+        !input.recoveryId ||
+        !input.customerId ||
+        !input.checkoutToken ||
+        !input.conversationId ||
+        !input.attemptId ||
+        !input.messageId ||
+        !input.templateName ||
+        !input.languageCode ||
+        !input.expectedContent ||
+        input.verifiedCategory !== "MARKETING" ||
+        !input.templateRegistration ||
+        input.idempotencyKey !== `recovery-outreach:${input.attemptId}` ||
+        input.recoveryCreditSourceKey !==
+          createRecoveryIdempotencyKey(input.shopId, input.idempotencyKey) ||
+        canonicalWhatsAppSender(input.recipient) !==
+          input.consent.canonicalRecipient ||
+        input.consent.shopId !== input.shopId ||
+        input.consent.customerId !== input.customerId
+      ) {
+        return { kind: "suppressed", reason: "invalid-woo-initial-scope" };
+      }
 
-    const retry = isInitialRetryId(input.attemptId);
-    const senderSnapshot = await readDispatchSenderSnapshot();
-    return await this.database.$transaction(async (tx): Promise<WooInitialFinalPermit> => {
-      // Same lock order as the accepted STOP writer and recovery sender:
-      // Shop -> Conversation -> recovery -> attempt -> message. No I/O beyond
-      // PostgreSQL is allowed in this callback.
-      const shops = await tx.$queryRawUnsafe<LockedShop[]>(`
+      const retry = isInitialRetryId(input.attemptId);
+      const senderSnapshot = await readDispatchSenderSnapshot();
+      return await this.database.$transaction(
+        async (tx): Promise<WooInitialFinalPermit> => {
+          // Same lock order as the accepted STOP writer and recovery sender:
+          // Shop -> Conversation -> recovery -> attempt -> message. No I/O beyond
+          // PostgreSQL is allowed in this callback.
+          const shops = await tx.$queryRawUnsafe<LockedShop[]>(
+            `
         SELECT "status"::text,"platform"::text FROM "commerce"."Shop"
-        WHERE "id"=$1 FOR UPDATE`, input.shopId);
-      if (shops[0]?.status !== "ACTIVE" || shops[0]?.platform !== "WOOCOMMERCE")
-        return { kind: "suppressed", reason: "woo-shop-inactive" };
+        WHERE "id"=$1 FOR UPDATE`,
+            input.shopId,
+          );
+          if (
+            shops[0]?.status !== "ACTIVE" ||
+            shops[0]?.platform !== "WOOCOMMERCE"
+          )
+            return { kind: "suppressed", reason: "woo-shop-inactive" };
 
-      const conversations = await tx.$queryRawUnsafe<LockedConversation[]>(`
+          const conversations = await tx.$queryRawUnsafe<LockedConversation[]>(
+            `
         SELECT "shopId","checkoutRecoveryId","type"::text,
           "controlMode"::text,"controlRevision"
-        FROM "whatsapp"."Conversation" WHERE "id"=$1 FOR UPDATE`, input.conversationId);
-      const conversation = conversations[0];
-      if (!conversation || conversation.checkoutRecoveryId !== input.recoveryId ||
-        (conversation.shopId !== null && conversation.shopId !== input.shopId) ||
-        conversation.type !== "RECOVERY" || conversation.controlMode !== "AI")
-        return { kind: "suppressed", reason: "woo-conversation-mismatch" };
+        FROM "whatsapp"."Conversation" WHERE "id"=$1 FOR UPDATE`,
+            input.conversationId,
+          );
+          const conversation = conversations[0];
+          if (
+            !conversation ||
+            conversation.checkoutRecoveryId !== input.recoveryId ||
+            (conversation.shopId !== null &&
+              conversation.shopId !== input.shopId) ||
+            conversation.type !== "RECOVERY" ||
+            conversation.controlMode !== "AI"
+          )
+            return { kind: "suppressed", reason: "woo-conversation-mismatch" };
 
-      const recoveries = await tx.$queryRawUnsafe<LockedRecovery[]>(`
+          const recoveries = await tx.$queryRawUnsafe<LockedRecovery[]>(
+            `
         SELECT "shopId","checkoutToken","customerId","status"::text,"completedAt","expiredAt",
           "lastExternalActivityAt"
-        FROM "commerce"."CheckoutRecovery" WHERE "id"=$1 FOR UPDATE`, input.recoveryId);
-      const recovery = recoveries[0];
-      if (!recovery || recovery.shopId !== input.shopId ||
-        recovery.checkoutToken !== input.checkoutToken || recovery.customerId !== input.customerId ||
-        (recovery.status !== "DETECTED" && !(retry && recovery.status === "MESSAGE_SENT")) || recovery.completedAt || recovery.expiredAt)
-        return { kind: "suppressed", reason: "woo-recovery-terminal-or-mismatched" };
+        FROM "commerce"."CheckoutRecovery" WHERE "id"=$1 FOR UPDATE`,
+            input.recoveryId,
+          );
+          const recovery = recoveries[0];
+          if (
+            !recovery ||
+            recovery.shopId !== input.shopId ||
+            recovery.checkoutToken !== input.checkoutToken ||
+            recovery.customerId !== input.customerId ||
+            (recovery.status !== "DETECTED" &&
+              !(retry && recovery.status === "MESSAGE_SENT")) ||
+            recovery.completedAt ||
+            recovery.expiredAt
+          )
+            return {
+              kind: "suppressed",
+              reason: "woo-recovery-terminal-or-mismatched",
+            };
 
-      // A persisted Woo order transition suppresses sending even when the
-      // original BullMQ checkout candidate is already gone. Redis observation
-      // is read at the caller's checkout-locked boundary, never here.
-      const terminalHistory = await tx.$queryRawUnsafe<Array<{ id: string }>>(`
+          // A persisted Woo order transition suppresses sending even when the
+          // original BullMQ checkout candidate is already gone. Redis observation
+          // is read at the caller's checkout-locked boundary, never here.
+          const terminalHistory = await tx.$queryRawUnsafe<
+            Array<{ id: string }>
+          >(
+            `
         SELECT "id" FROM "commerce"."CheckoutRecoveryStatusHistory"
         WHERE "checkoutRecoveryId"=$1 AND "source"='woocommerce.order'
-        LIMIT 1`, input.recoveryId);
-      if (terminalHistory.length)
-        return { kind: "suppressed", reason: "woo-observed-order-terminal" };
+        LIMIT 1`,
+            input.recoveryId,
+          );
+          if (terminalHistory.length)
+            return {
+              kind: "suppressed",
+              reason: "woo-observed-order-terminal",
+            };
 
-      const attempts = await tx.$queryRawUnsafe<LockedAttempt[]>(`
+          const attempts = await tx.$queryRawUnsafe<LockedAttempt[]>(
+            `
         SELECT "checkoutRecoveryId","sequence","trigger"::text,"status"::text,"recipient",
           "sentAt","outboundMessageId","followUpDueAt"
-        FROM "commerce"."RecoveryOutreachAttempt" WHERE "id"=$1 FOR UPDATE`, input.attemptId);
-      const attempt = attempts[0];
-      if (!attempt || attempt.checkoutRecoveryId !== input.recoveryId || (retry ? attempt.sequence < 3 : attempt.sequence !== 1) || attempt.trigger !== "INITIAL" ||
-        !["PENDING", "CAPACITY_BLOCKED"].includes(attempt.status) ||
-        attempt.recipient !== input.recipient || attempt.sentAt ||
-        attempt.outboundMessageId || attempt.followUpDueAt)
-        return { kind: "suppressed", reason: "woo-initial-attempt-ineligible" };
+        FROM "commerce"."RecoveryOutreachAttempt" WHERE "id"=$1 FOR UPDATE`,
+            input.attemptId,
+          );
+          const attempt = attempts[0];
+          if (
+            !attempt ||
+            attempt.checkoutRecoveryId !== input.recoveryId ||
+            (retry ? attempt.sequence < 3 : attempt.sequence !== 1) ||
+            attempt.trigger !== "INITIAL" ||
+            !["PENDING", "CAPACITY_BLOCKED"].includes(attempt.status) ||
+            attempt.recipient !== input.recipient ||
+            attempt.sentAt ||
+            attempt.outboundMessageId ||
+            attempt.followUpDueAt
+          )
+            return {
+              kind: "suppressed",
+              reason: "woo-initial-attempt-ineligible",
+            };
 
-      // Reuses ARCH-048's accepted consent projection/revision checker. This
-      // locks installation, Customer and CustomerPhone through the permit;
-      // a later Woo grant cannot override STOP or a changed recipient.
-      if (!await this.confirmConsent(tx, input.shopId, input.consent, undefined))
-        return { kind: "suppressed", reason: "woo-consent-changed" };
-      if (await this.noContact(tx, { shopId: input.shopId, recipient: input.recipient }))
-        return { kind: "suppressed", reason: "woo-local-no-contact" };
+          // Reuses ARCH-048's accepted consent projection/revision checker. This
+          // locks installation, Customer and CustomerPhone through the permit;
+          // a later Woo grant cannot override STOP or a changed recipient.
+          if (
+            !(await this.confirmConsent(
+              tx,
+              input.shopId,
+              input.consent,
+              undefined,
+            ))
+          )
+            return { kind: "suppressed", reason: "woo-consent-changed" };
+          if (
+            await this.noContact(tx, {
+              shopId: input.shopId,
+              recipient: input.recipient,
+            })
+          )
+            return { kind: "suppressed", reason: "woo-local-no-contact" };
 
-      if (!await confirmUniqueWooRecipient(tx, input.shopId, input.consent))
-        return { kind: "suppressed", reason: "woo-recipient-ambiguous" };
+          if (
+            !(await confirmUniqueWooRecipient(tx, input.shopId, input.consent))
+          )
+            return { kind: "suppressed", reason: "woo-recipient-ambiguous" };
 
-      const usage = await tx.$queryRawUnsafe<Array<{ sourceId: string | null; shopId: string; metric: string; sourceType: string; quantity: unknown }>>(`
+          const usage = await tx.$queryRawUnsafe<
+            Array<{
+              sourceId: string | null;
+              shopId: string;
+              metric: string;
+              sourceType: string;
+              quantity: unknown;
+            }>
+          >(
+            `
         SELECT "sourceId","shopId","metric"::text,"sourceType","quantity" FROM "billing"."UsageEvent"
-        WHERE "idempotencyKey"=$1`, input.idempotencyKey);
-      if (usage.length !== 1 || usage[0]?.shopId !== input.shopId ||
-        usage[0]?.sourceId !== input.messageId ||
-        usage[0]?.metric !== "OUTBOUND_AUTOMATED_MESSAGE" ||
-        usage[0]?.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" || Number(usage[0]?.quantity) !== 1)
-        return { kind: "suppressed", reason: "woo-outbound-reservation-mismatch" };
+        WHERE "idempotencyKey"=$1`,
+            input.idempotencyKey,
+          );
+          if (
+            usage.length !== 1 ||
+            usage[0]?.shopId !== input.shopId ||
+            usage[0]?.sourceId !== input.messageId ||
+            usage[0]?.metric !== "OUTBOUND_AUTOMATED_MESSAGE" ||
+            usage[0]?.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" ||
+            Number(usage[0]?.quantity) !== 1
+          )
+            return {
+              kind: "suppressed",
+              reason: "woo-outbound-reservation-mismatch",
+            };
 
-      const messages = await tx.$queryRawUnsafe<LockedMessage[]>(`
+          const messages = await tx.$queryRawUnsafe<LockedMessage[]>(
+            `
         SELECT "status"::text,"content","providerDispatchKey","providerDispatchAdmittedAt",
           "providerDispatchControlRevision","providerMessageId","sentAt","deliveredAt","readAt","failedAt"
         FROM "whatsapp"."ConversationMessage"
@@ -190,75 +316,175 @@ export class WooInitialSendFenceService {
           AND "senderType"='AUTOMATION'
           AND NOT EXISTS (SELECT 1 FROM "whatsapp"."MerchantConversationSendCommand" cmd WHERE cmd."outboundMessageId"=$1)
           AND NOT EXISTS (SELECT 1 FROM "commerce"."RecoveryOutreachAttempt" other WHERE other."outboundMessageId"=$1)
-        FOR UPDATE`, input.messageId, input.conversationId);
-      const message = messages[0];
-      if (!message) return { kind: "suppressed", reason: "woo-message-mismatch" };
-      if (message.status !== "PENDING" || message.providerDispatchKey || message.providerDispatchAdmittedAt ||
-          message.providerDispatchControlRevision !== null || message.providerMessageId ||
-          message.sentAt || message.deliveredAt || message.readAt || message.failedAt)
-        return { kind: "suppressed", reason: "already-admitted-or-sent" };
-      if (message.content !== input.expectedContent)
-        return { kind: "suppressed", reason: "woo-prepared-content-changed" };
+        FOR UPDATE`,
+            input.messageId,
+            input.conversationId,
+          );
+          const message = messages[0];
+          if (!message)
+            return { kind: "suppressed", reason: "woo-message-mismatch" };
+          if (
+            message.status !== "PENDING" ||
+            message.providerDispatchKey ||
+            message.providerDispatchAdmittedAt ||
+            message.providerDispatchControlRevision !== null ||
+            message.providerMessageId ||
+            message.sentAt ||
+            message.deliveredAt ||
+            message.readAt ||
+            message.failedAt
+          )
+            return { kind: "suppressed", reason: "already-admitted-or-sent" };
+          if (message.content !== input.expectedContent)
+            return {
+              kind: "suppressed",
+              reason: "woo-prepared-content-changed",
+            };
 
-      const policyRows = await tx.$queryRawUnsafe<Array<{ checkoutRecoveryLifetimeDays: unknown }>>(`
+          const policyRows = await tx.$queryRawUnsafe<
+            Array<{ checkoutRecoveryLifetimeDays: unknown }>
+          >(`
         SELECT "checkoutRecoveryLifetimeDays"
         FROM public."BackgroundRuntimeConfig"
         WHERE "id"='default' FOR SHARE`);
-      if (policyRows.length !== 1) {
-        this.logger.warn("woocommerce.recovery.initial.lifetime_policy.unavailable", {
-          shopId: input.shopId, recoveryId: input.recoveryId, reason: "missing",
-        });
-        return { kind: "suppressed", reason: "checkout-lifetime-policy-unavailable" };
-      }
-      let checkoutRecoveryLifetimeDays: number;
-      try {
-        checkoutRecoveryLifetimeDays = parseCheckoutRecoveryLifetimeDays(policyRows[0]!.checkoutRecoveryLifetimeDays);
-      } catch (error) {
-        this.logger.warn("woocommerce.recovery.initial.lifetime_policy.unavailable", {
-          shopId: input.shopId, recoveryId: input.recoveryId, reason: "invalid",
-          stage: "lifetime_policy", sourceError: initialOutreachDiagnostic(error),
-        });
-        return { kind: "suppressed", reason: "checkout-lifetime-policy-unavailable" };
-      }
-      if (!isCheckoutRecoveryWithinLifetime({
-        lastExternalActivityAt: recovery.lastExternalActivityAt,
-        now: this.clock(),
-        checkoutRecoveryLifetimeDays,
-      })) return { kind: "suppressed", reason: "woo-recovery-lifetime-elapsed" };
+          if (policyRows.length !== 1) {
+            this.logger.warn(
+              "woocommerce.recovery.initial.lifetime_policy.unavailable",
+              {
+                shopId: input.shopId,
+                recoveryId: input.recoveryId,
+                reason: "missing",
+              },
+            );
+            return {
+              kind: "suppressed",
+              reason: "checkout-lifetime-policy-unavailable",
+            };
+          }
+          let checkoutRecoveryLifetimeDays: number;
+          try {
+            checkoutRecoveryLifetimeDays = parseCheckoutRecoveryLifetimeDays(
+              policyRows[0]!.checkoutRecoveryLifetimeDays,
+            );
+          } catch (error) {
+            this.logger.warn(
+              "woocommerce.recovery.initial.lifetime_policy.unavailable",
+              {
+                shopId: input.shopId,
+                recoveryId: input.recoveryId,
+                reason: "invalid",
+                stage: "lifetime_policy",
+                sourceError: initialOutreachDiagnostic(error),
+              },
+            );
+            return {
+              kind: "suppressed",
+              reason: "checkout-lifetime-policy-unavailable",
+            };
+          }
+          if (
+            !isCheckoutRecoveryWithinLifetime({
+              lastExternalActivityAt: recovery.lastExternalActivityAt,
+              now: this.clock(),
+              checkoutRecoveryLifetimeDays,
+            })
+          )
+            return {
+              kind: "suppressed",
+              reason: "woo-recovery-lifetime-elapsed",
+            };
 
-      const registration = input.templateRegistration;
-      if (!registration || registration.shopId !== input.shopId ||
-          registration.providerTemplateName !== input.templateName ||
-          registration.providerLanguageCode !== input.languageCode) {
-        return { kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" };
-      }
-      const denied = await this.checkTemplate(tx, registration, new Date(),...(registration.commonLayout?[{conversationId:input.conversationId,recoveryId:input.recoveryId,...(input.templateParameters?{parameters:input.templateParameters}:{})}]:[]));
-      if (denied) return { kind: "suppressed", reason: denied };
+          const registration = input.templateRegistration;
+          if (
+            !registration ||
+            registration.shopId !== input.shopId ||
+            registration.providerTemplateName !== input.templateName ||
+            registration.providerLanguageCode !== input.languageCode
+          ) {
+            return {
+              kind: "suppressed",
+              reason: "TEMPLATE_REGISTRATION_UNAVAILABLE",
+            };
+          }
+          const denied = await this.checkTemplate(
+            tx,
+            registration,
+            new Date(),
+            ...(registration.commonLayout
+              ? [
+                  {
+                    conversationId: input.conversationId,
+                    recoveryId: input.recoveryId,
+                    ...(input.templateParameters
+                      ? { parameters: input.templateParameters }
+                      : {}),
+                  },
+                ]
+              : []),
+          );
+          if (denied) return { kind: "suppressed", reason: denied };
 
-      const key = `arch046-woo-initial-${createHash("sha256")
-        .update(input.shopId).update("\0").update(input.attemptId).digest("hex")}`;
-      // The unique provider-dispatch key outlives an accidentally deleted
-      // UsageEvent: still refuse a second provider call for this attempt.
-      const priorPermit = await tx.$queryRawUnsafe<Array<{ id: string }>>(`
+          const key = `arch046-woo-initial-${createHash("sha256")
+            .update(input.shopId)
+            .update("\0")
+            .update(input.attemptId)
+            .digest("hex")}`;
+          // The unique provider-dispatch key outlives an accidentally deleted
+          // UsageEvent: still refuse a second provider call for this attempt.
+          const priorPermit = await tx.$queryRawUnsafe<Array<{ id: string }>>(
+            `
         SELECT "id" FROM "whatsapp"."ConversationMessage"
-        WHERE "providerDispatchKey"=$1 LIMIT 1`, key);
-      if (priorPermit.length)
-        return { kind: "suppressed", reason: "already-admitted-or-sent" };
-      if (!(await hasExactInitialCredit(tx, {
-        shopId: input.shopId, idempotencyKey: input.idempotencyKey,
-        sourceKey: input.recoveryCreditSourceKey, allowPaid: false, clock: this.clock,
-      }))) return { kind: "suppressed", reason: "woo-recovery-credit-not-reserved" };
+        WHERE "providerDispatchKey"=$1 LIMIT 1`,
+            key,
+          );
+          if (priorPermit.length)
+            return { kind: "suppressed", reason: "already-admitted-or-sent" };
+          if (
+            !(await hasExactInitialCredit(tx, {
+              shopId: input.shopId,
+              idempotencyKey: input.idempotencyKey,
+              sourceKey: input.recoveryCreditSourceKey,
+              allowPaid: false,
+              clock: this.clock,
+            }))
+          )
+            return {
+              kind: "suppressed",
+              reason: "woo-recovery-credit-not-reserved",
+            };
 
-      let retrySender: WhatsAppSenderIdentity | undefined;
-      if (retry) {
-        const gate = await checkInitialRetryPermit(tx, {shopId: input.shopId, recoveryId: input.recoveryId,
-          conversationId: input.conversationId, attemptId: input.attemptId, recipient: input.recipient, now: this.clock()}, this.logger);
-        if (gate.kind === "held") return {kind: "suppressed", reason: gate.reason};
-        retrySender = gate.sender;
-      }
-      const sender = await checkDispatchSender(tx, {snapshot: senderSnapshot, conversationId: input.conversationId, recipient: input.recipient, recovery: true, ...(retrySender ? {expectedSender: retrySender} : {})});
-      if (!sender || sender.providerAccountId !== registration.senderWabaId) return {kind: "suppressed", reason: "sender-assignment-unavailable"};
-      const permitted = await tx.$queryRawUnsafe<Array<{ id: string }>>(`
+          let retrySender: WhatsAppSenderIdentity | undefined;
+          if (retry) {
+            const gate = await checkInitialRetryPermit(
+              tx,
+              {
+                shopId: input.shopId,
+                recoveryId: input.recoveryId,
+                conversationId: input.conversationId,
+                attemptId: input.attemptId,
+                recipient: input.recipient,
+                now: this.clock(),
+              },
+              this.logger,
+            );
+            if (gate.kind === "held")
+              return { kind: "suppressed", reason: gate.reason };
+            retrySender = gate.sender;
+          }
+          const sender = await checkDispatchSender(tx, {
+            snapshot: senderSnapshot,
+            conversationId: input.conversationId,
+            recipient: input.recipient,
+            recovery: true,
+            ...(retrySender ? { expectedSender: retrySender } : {}),
+          });
+          if (!sender || sender.providerAccountId !== registration.senderWabaId)
+            return {
+              kind: "suppressed",
+              reason: "sender-assignment-unavailable",
+            };
+          const permitted = await tx.$queryRawUnsafe<Array<{ id: string }>>(
+            `
         UPDATE "whatsapp"."ConversationMessage"
         SET "providerDispatchKey"=$2,
           "providerDispatchAdmittedAt"=statement_timestamp(),
@@ -269,17 +495,30 @@ export class WooInitialSendFenceService {
           AND "providerDispatchAdmittedAt" IS NULL AND "providerDispatchControlRevision" IS NULL
           AND "providerMessageId" IS NULL AND "sentAt" IS NULL AND "deliveredAt" IS NULL
           AND "readAt" IS NULL AND "failedAt" IS NULL AND "content"=$5
-        RETURNING "id"`, input.messageId, key, conversation.controlRevision,
-        input.conversationId, input.expectedContent, sender.providerAccountId, sender.providerPhoneNumberId);
-      return permitted.length === 1
-        ? { kind: "admitted", sender }
-        : { kind: "suppressed", reason: "already-admitted-or-sent" };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+        RETURNING "id"`,
+            input.messageId,
+            key,
+            conversation.controlRevision,
+            input.conversationId,
+            input.expectedContent,
+            sender.providerAccountId,
+            sender.providerPhoneNumberId,
+          );
+          return permitted.length === 1
+            ? { kind: "admitted", sender }
+            : { kind: "suppressed", reason: "already-admitted-or-sent" };
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+      );
     } catch (error) {
       this.logger.error("woocommerce.recovery.initial.sql_permit.failed", {
-        shopId: input.shopId, recoveryId: input.recoveryId, attemptId: input.attemptId,
-        conversationId: input.conversationId, messageId: input.messageId,
-        stage: "final_permit", sourceError: initialOutreachDiagnostic(error),
+        shopId: input.shopId,
+        recoveryId: input.recoveryId,
+        attemptId: input.attemptId,
+        conversationId: input.conversationId,
+        messageId: input.messageId,
+        stage: "final_permit",
+        sourceError: initialOutreachDiagnostic(error),
       });
       throw error;
     }

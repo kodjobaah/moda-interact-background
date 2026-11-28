@@ -4,186 +4,431 @@ import { MetaImageHeaderSampleUploader } from "../../../../src/services/meta-tem
 import { ShopBrandMediaError } from "../../../../src/services/shop-brand-media/contracts.js";
 import { safeMetaError } from "../../../../src/services/meta-template-management/contracts.js";
 
-const jpeg = readFileSync(new URL("../../../../assets/meta-template-samples/v1/14af14ebb7b71df4b0a32d31ba7d8df82a7d18f47e56143a4bc0b5ea46587717.jpeg",import.meta.url));
+const jpeg = readFileSync(
+  new URL(
+    "../../../../assets/meta-template-samples/v1/14af14ebb7b71df4b0a32d31ba7d8df82a7d18f47e56143a4bc0b5ea46587717.jpeg",
+    import.meta.url,
+  ),
+);
 const fetched = { bytes: jpeg, declaredContentType: "image/jpeg" };
-const input = { appId: "123456789", accessToken: "test-token", graphBase: "https://graph.facebook.com/v25.0" };
+const input = {
+  appId: "123456789",
+  accessToken: "test-token",
+  graphBase: "https://graph.facebook.com/v25.0",
+};
 // Sanitized structural reproduction of the observed 211-character Meta Upload-ID.
 const signedSessionId = `upload:${"S".repeat(180)}?sig=${"T".repeat(19)}`;
 
 function fetcher(result: typeof fetched = fetched) {
-  return { read: vi.fn(async () => {
-    return result;
-  }) };
+  return {
+    read: vi.fn(async () => {
+      return result;
+    }),
+  };
 }
 
 describe("trusted Meta template image sample upload", () => {
   it("preserves an evidenced signed opaque Upload-ID through the byte request", async () => {
-    const request = vi.fn()
+    const request = vi
+      .fn()
       .mockResolvedValueOnce(Response.json({ id: signedSessionId }))
-      .mockResolvedValueOnce(Response.json({ h: "4::Meta-issued-sample-handle" }));
+      .mockResolvedValueOnce(
+        Response.json({ h: "4::Meta-issued-sample-handle" }),
+      );
     const beforeHttp = vi.fn(async () => {});
-    await expect(new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher())
-      .upload({ ...input, beforeHttp })).resolves.toEqual({ value: "4::Meta-issued-sample-handle" });
+    await expect(
+      new MetaImageHeaderSampleUploader(
+        request as typeof fetch,
+        fetcher(),
+      ).upload({ ...input, beforeHttp }),
+    ).resolves.toEqual({ value: "4::Meta-issued-sample-handle" });
     expect(beforeHttp).toHaveBeenCalledTimes(2);
     const [url, init] = request.mock.calls[1] as unknown as [URL, RequestInit];
     expect(url.href).toBe(`${input.graphBase}/${signedSessionId}`);
     expect(url.origin).toBe("https://graph.facebook.com");
     expect(url.pathname).toBe(`/v25.0/upload:${"S".repeat(180)}`);
     expect(url.search).toBe(`?sig=${"T".repeat(19)}`);
-    expect(init.headers).toEqual({ Authorization: "OAuth test-token", file_offset: "0", "Content-Type": "application/octet-stream" });
+    expect(init.headers).toEqual({
+      Authorization: "OAuth test-token",
+      file_offset: "0",
+      "Content-Type": "application/octet-stream",
+    });
     expect(Buffer.from(init.body as Uint8Array)).toEqual(jpeg);
   });
 
   it.each([
-    null, 123, {}, [], "", "upload:short", `upload:${"S".repeat(257)}`,
-    "https://foreign.example/upload:abcdefgh", "//foreign.example/upload:abcdefgh",
-    "upload:../abcdefgh", "upload:abcdefgh/../other", "upload:abcdefgh\\other",
-    "upload:abcdefgh%2f..%2fother", "upload:abcdefgh%2F..", "upload:%2e%2e%2fabcdefgh",
-    "upload:%41bcdefgh", "upload:abcdefgh#fragment", "upload:abcdefgh\n",
-    "upload:abcdefgh?sig=", "upload:abcdefgh?other=signature",
-    "upload:abcdefgh?sig=one&sig=two", "upload:abcdefgh?sig=one&access_token=secret",
-    "upload:abcdefgh?sig=one#fragment", "upload:abcdefgh?sig=one%26extra",
-    "upload:abcdefgh?sig=one+two", `upload:abcdefgh?sig=${"T".repeat(257)}`,
-  ])("rejects unsafe or unsupported Upload-ID %# before byte HTTP without exposing it", async (id) => {
-    const request = vi.fn().mockResolvedValueOnce(Response.json({ id }));
-    let failure: unknown;
-    try { await new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher()).upload(input); }
-    catch (error) { failure = error; }
-    expect(failure).toMatchObject({ code: "META_UPLOAD_SESSION_INVALID" });
-    expect(request).toHaveBeenCalledOnce();
-    const serialized = JSON.stringify(failure);
-    expect(serialized).not.toContain(input.accessToken);
-    if (typeof id === "string" && id.length > 7) expect(serialized).not.toContain(id);
-  });
+    null,
+    123,
+    {},
+    [],
+    "",
+    "upload:short",
+    `upload:${"S".repeat(257)}`,
+    "https://foreign.example/upload:abcdefgh",
+    "//foreign.example/upload:abcdefgh",
+    "upload:../abcdefgh",
+    "upload:abcdefgh/../other",
+    "upload:abcdefgh\\other",
+    "upload:abcdefgh%2f..%2fother",
+    "upload:abcdefgh%2F..",
+    "upload:%2e%2e%2fabcdefgh",
+    "upload:%41bcdefgh",
+    "upload:abcdefgh#fragment",
+    "upload:abcdefgh\n",
+    "upload:abcdefgh?sig=",
+    "upload:abcdefgh?other=signature",
+    "upload:abcdefgh?sig=one&sig=two",
+    "upload:abcdefgh?sig=one&access_token=secret",
+    "upload:abcdefgh?sig=one#fragment",
+    "upload:abcdefgh?sig=one%26extra",
+    "upload:abcdefgh?sig=one+two",
+    `upload:abcdefgh?sig=${"T".repeat(257)}`,
+  ])(
+    "rejects unsafe or unsupported Upload-ID %# before byte HTTP without exposing it",
+    async (id) => {
+      const request = vi.fn().mockResolvedValueOnce(Response.json({ id }));
+      let failure: unknown;
+      try {
+        await new MetaImageHeaderSampleUploader(
+          request as typeof fetch,
+          fetcher(),
+        ).upload(input);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({ code: "META_UPLOAD_SESSION_INVALID" });
+      expect(request).toHaveBeenCalledOnce();
+      const serialized = JSON.stringify(failure);
+      expect(serialized).not.toContain(input.accessToken);
+      if (typeof id === "string" && id.length > 7)
+        expect(serialized).not.toContain(id);
+    },
+  );
 
-  it.each(["https://graph.facebook.com/v26.0", "http://127.0.0.1:51999/v25.0"])("retains configured origin/version %s", async (graphBase) => {
-    const request = vi.fn().mockResolvedValueOnce(Response.json({ id: signedSessionId }))
-      .mockResolvedValueOnce(Response.json({ h: "4::Meta-issued-sample-handle" }));
-    await new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher()).upload({ ...input, graphBase });
-    expect(String(request.mock.calls[1]![0])).toBe(`${graphBase}/${signedSessionId}`);
-  });
+  it.each(["https://graph.facebook.com/v26.0", "http://127.0.0.1:51999/v25.0"])(
+    "retains configured origin/version %s",
+    async (graphBase) => {
+      const request = vi
+        .fn()
+        .mockResolvedValueOnce(Response.json({ id: signedSessionId }))
+        .mockResolvedValueOnce(
+          Response.json({ h: "4::Meta-issued-sample-handle" }),
+        );
+      await new MetaImageHeaderSampleUploader(
+        request as typeof fetch,
+        fetcher(),
+      ).upload({ ...input, graphBase });
+      expect(String(request.mock.calls[1]![0])).toBe(
+        `${graphBase}/${signedSessionId}`,
+      );
+    },
+  );
 
   it.each([
-    "https://operator:secret@graph.facebook.com/v25.0", "https://graph.facebook.com/v25.0?redirect=other",
-    "https://graph.facebook.com/v25.0#fragment", "https://graph.facebook.com/v25.0/../v26.0",
-    "https://graph.facebook.com/v25.0/%2e%2e/v26.0", "https://graph.facebook.com/v25.0/other",
-  ])("refuses changed/ambiguous version namespace %# before byte HTTP", async (graphBase) => {
-    const request = vi.fn().mockResolvedValueOnce(Response.json({ id: signedSessionId }));
-    await expect(new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher()).upload({ ...input, graphBase }))
-      .rejects.toMatchObject({ code: "META_UPLOAD_SESSION_INVALID" });
+    "https://operator:secret@graph.facebook.com/v25.0",
+    "https://graph.facebook.com/v25.0?redirect=other",
+    "https://graph.facebook.com/v25.0#fragment",
+    "https://graph.facebook.com/v25.0/../v26.0",
+    "https://graph.facebook.com/v25.0/%2e%2e/v26.0",
+    "https://graph.facebook.com/v25.0/other",
+  ])(
+    "refuses changed/ambiguous version namespace %# before byte HTTP",
+    async (graphBase) => {
+      const request = vi
+        .fn()
+        .mockResolvedValueOnce(Response.json({ id: signedSessionId }));
+      await expect(
+        new MetaImageHeaderSampleUploader(
+          request as typeof fetch,
+          fetcher(),
+        ).upload({ ...input, graphBase }),
+      ).rejects.toMatchObject({ code: "META_UPLOAD_SESSION_INVALID" });
+      expect(request).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("checks the existing fence before uploading signed-session bytes", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ id: signedSessionId }));
+    const beforeHttp = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("stale fence"));
+    await expect(
+      new MetaImageHeaderSampleUploader(
+        request as typeof fetch,
+        fetcher(),
+      ).upload({ ...input, beforeHttp }),
+    ).rejects.toThrow("stale fence");
+    expect(beforeHttp).toHaveBeenCalledTimes(2);
     expect(request).toHaveBeenCalledOnce();
   });
 
-  it("checks the existing fence before uploading signed-session bytes", async () => {
-    const request = vi.fn().mockResolvedValueOnce(Response.json({ id: signedSessionId }));
-    const beforeHttp = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("stale fence"));
-    await expect(new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher()).upload({ ...input, beforeHttp }))
-      .rejects.toThrow("stale fence");
-    expect(beforeHttp).toHaveBeenCalledTimes(2); expect(request).toHaveBeenCalledOnce();
-  });
-
-  it.each(["provider", "transport"])("redacts signed-session identity from %s errors and log projections", async (kind) => {
-    const opaque = "S".repeat(180); const signature = "T".repeat(19);
-    const echoed = `${signedSessionId} ${opaque} ${signature} ${input.accessToken}`;
-    const request = vi.fn().mockResolvedValueOnce(Response.json({ id: signedSessionId }));
-    if (kind === "provider") request.mockResolvedValueOnce(Response.json({ error: { message: echoed, code: 100, error_data: { detail: echoed } } }, { status: 400 }));
-    else request.mockRejectedValueOnce(new Error(echoed, { cause: new Error(echoed) }));
-    const error = await new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher()).upload(input).catch((failure: unknown) => failure);
-    const projection = JSON.stringify(safeMetaError(error));
-    for (const secret of [signedSessionId, opaque, signature, input.accessToken]) {
-      expect(projection).not.toContain(secret);
-      expect(JSON.stringify(error)).not.toContain(secret);
-      if (error instanceof Error && error.cause instanceof Error) {
-        expect(error.cause.message).not.toContain(secret); expect(error.cause.stack).not.toContain(secret);
+  it.each(["provider", "transport"])(
+    "redacts signed-session identity from %s errors and log projections",
+    async (kind) => {
+      const opaque = "S".repeat(180);
+      const signature = "T".repeat(19);
+      const echoed = `${signedSessionId} ${opaque} ${signature} ${input.accessToken}`;
+      const request = vi
+        .fn()
+        .mockResolvedValueOnce(Response.json({ id: signedSessionId }));
+      if (kind === "provider")
+        request.mockResolvedValueOnce(
+          Response.json(
+            {
+              error: {
+                message: echoed,
+                code: 100,
+                error_data: { detail: echoed },
+              },
+            },
+            { status: 400 },
+          ),
+        );
+      else
+        request.mockRejectedValueOnce(
+          new Error(echoed, { cause: new Error(echoed) }),
+        );
+      const error = await new MetaImageHeaderSampleUploader(
+        request as typeof fetch,
+        fetcher(),
+      )
+        .upload(input)
+        .catch((failure: unknown) => failure);
+      const projection = JSON.stringify(safeMetaError(error));
+      for (const secret of [
+        signedSessionId,
+        opaque,
+        signature,
+        input.accessToken,
+      ]) {
+        expect(projection).not.toContain(secret);
+        expect(JSON.stringify(error)).not.toContain(secret);
+        if (error instanceof Error && error.cause instanceof Error) {
+          expect(error.cause.message).not.toContain(secret);
+          expect(error.cause.stack).not.toContain(secret);
+        }
       }
-    }
-    expect(request).toHaveBeenCalledTimes(2);
-  });
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("opens an app-scoped session and uploads exact JPEG bytes at offset zero", async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "upload:abcdefgh" })))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ h: "4::Meta-issued-sample-handle" })));
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "upload:abcdefgh" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ h: "4::Meta-issued-sample-handle" })),
+      );
     const sample = fetcher();
-    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, sample);
-    await expect(uploader.upload(input)).resolves.toEqual({ value: "4::Meta-issued-sample-handle" });
+    const uploader = new MetaImageHeaderSampleUploader(
+      request as typeof fetch,
+      sample,
+    );
+    await expect(uploader.upload(input)).resolves.toEqual({
+      value: "4::Meta-issued-sample-handle",
+    });
     expect(sample.read).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledTimes(2);
-    const [sessionUrl, sessionInit] = request.mock.calls[0] as unknown as [URL, RequestInit];
+    const [sessionUrl, sessionInit] = request.mock.calls[0] as unknown as [
+      URL,
+      RequestInit,
+    ];
     expect(sessionUrl.pathname).toBe("/v25.0/123456789/uploads");
     expect(Object.fromEntries(sessionUrl.searchParams)).toEqual({
-      file_length: String(jpeg.length), file_type: "image/jpeg", file_name: "moda-whatsapp-template-sample.jpeg",
+      file_length: String(jpeg.length),
+      file_type: "image/jpeg",
+      file_name: "moda-whatsapp-template-sample.jpeg",
     });
     expect(sessionInit.method).toBe("POST");
     expect(sessionInit.headers).toEqual({ Authorization: "OAuth test-token" });
-    const [uploadUrl, uploadInit] = request.mock.calls[1] as unknown as [URL, RequestInit];
+    const [uploadUrl, uploadInit] = request.mock.calls[1] as unknown as [
+      URL,
+      RequestInit,
+    ];
     expect(uploadUrl.pathname).toBe("/v25.0/upload:abcdefgh");
-    expect(uploadInit.headers).toEqual(expect.objectContaining({ Authorization: "OAuth test-token", file_offset: "0" }));
+    expect(uploadInit.headers).toEqual(
+      expect.objectContaining({
+        Authorization: "OAuth test-token",
+        file_offset: "0",
+      }),
+    );
     expect(Buffer.from(uploadInit.body as Uint8Array)).toEqual(jpeg);
   });
 
   it.each([
-    [{ bytes: Buffer.from("not-jpeg"), declaredContentType: "image/jpeg" }, "META_SAMPLE_INVALID"],
+    [
+      { bytes: Buffer.from("not-jpeg"), declaredContentType: "image/jpeg" },
+      "META_SAMPLE_INVALID",
+    ],
     [{ bytes: jpeg, declaredContentType: "text/html" }, "META_SAMPLE_INVALID"],
-    [{ bytes: Buffer.alloc(5_000_001), declaredContentType: "image/jpeg" }, "META_SAMPLE_INVALID"],
-  ] as const)("rejects a sample with invalid MIME, JPEG signature or size", async (image, code) => {
-    const request = vi.fn();
-    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher(image));
-    await expect(uploader.upload(input)).rejects.toMatchObject({ code });
-    expect(request).not.toHaveBeenCalled();
-  });
+    [
+      { bytes: Buffer.alloc(5_000_001), declaredContentType: "image/jpeg" },
+      "META_SAMPLE_INVALID",
+    ],
+  ] as const)(
+    "rejects a sample with invalid MIME, JPEG signature or size",
+    async (image, code) => {
+      const request = vi.fn();
+      const uploader = new MetaImageHeaderSampleUploader(
+        request as typeof fetch,
+        fetcher(image),
+      );
+      await expect(uploader.upload(input)).rejects.toMatchObject({ code });
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
 
   it("fails closed on missing app identity and malformed session or handle", async () => {
     const noRequest = vi.fn();
-    const uploader = new MetaImageHeaderSampleUploader(noRequest as typeof fetch, fetcher());
-    await expect(uploader.upload({ ...input, appId: "" })).rejects.toMatchObject({ code: "META_APP_CONFIGURATION_INVALID" });
+    const uploader = new MetaImageHeaderSampleUploader(
+      noRequest as typeof fetch,
+      fetcher(),
+    );
+    await expect(
+      uploader.upload({ ...input, appId: "" }),
+    ).rejects.toMatchObject({ code: "META_APP_CONFIGURATION_INVALID" });
     expect(noRequest).not.toHaveBeenCalled();
 
-    const badSession = new MetaImageHeaderSampleUploader(vi.fn(async () => new Response(JSON.stringify({ id: "12345" }))) as typeof fetch, fetcher());
-    await expect(badSession.upload(input)).rejects.toMatchObject({ code: "META_UPLOAD_SESSION_INVALID" });
-    const badHandle = new MetaImageHeaderSampleUploader(vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "upload:abcdefgh" })))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ h: "https://not-a-handle.example" }))) as typeof fetch, fetcher());
-    await expect(badHandle.upload(input)).rejects.toMatchObject({ code: "META_UPLOAD_HANDLE_INVALID" });
+    const badSession = new MetaImageHeaderSampleUploader(
+      vi.fn(
+        async () => new Response(JSON.stringify({ id: "12345" })),
+      ) as typeof fetch,
+      fetcher(),
+    );
+    await expect(badSession.upload(input)).rejects.toMatchObject({
+      code: "META_UPLOAD_SESSION_INVALID",
+    });
+    const badHandle = new MetaImageHeaderSampleUploader(
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ id: "upload:abcdefgh" })),
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ h: "https://not-a-handle.example" })),
+        ) as typeof fetch,
+      fetcher(),
+    );
+    await expect(badHandle.upload(input)).rejects.toMatchObject({
+      code: "META_UPLOAD_HANDLE_INVALID",
+    });
   });
 
-  it.each(["sample_session", "sample_upload"])("classifies only numeric code4 on HTTP403 at %s as app throttle", async (operation) => {
-    const request = vi.fn();
-    if (operation === "sample_upload") request.mockResolvedValueOnce(new Response(JSON.stringify({ id: "upload:abcdefgh" })));
-    request.mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 4, message: "synthetic throttle" } }), { status: 403 }));
-    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher());
-    await expect(uploader.upload(input)).rejects.toMatchObject({ code: "META_SAMPLE_APP_THROTTLED", disposition: "uncertain",
-      diagnostics: { httpStatus: 403, providerErrorCode: 4, operation } });
-  });
-  it.each([190, 10, "4"])("keeps other/string403 code %s blocked without message inference", async (code) => {
-    const request = vi.fn(async () => new Response(JSON.stringify({ error: { code, message: "Application request limit reached" } }), { status: 403 }));
-    await expect(new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher()).upload(input)).rejects.toMatchObject({ code: "META_SAMPLE_SESSION_REJECTED", disposition: "blocked" });
-  });
+  it.each(["sample_session", "sample_upload"])(
+    "classifies only numeric code4 on HTTP403 at %s as app throttle",
+    async (operation) => {
+      const request = vi.fn();
+      if (operation === "sample_upload")
+        request.mockResolvedValueOnce(
+          new Response(JSON.stringify({ id: "upload:abcdefgh" })),
+        );
+      request.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: { code: 4, message: "synthetic throttle" } }),
+          { status: 403 },
+        ),
+      );
+      const uploader = new MetaImageHeaderSampleUploader(
+        request as typeof fetch,
+        fetcher(),
+      );
+      await expect(uploader.upload(input)).rejects.toMatchObject({
+        code: "META_SAMPLE_APP_THROTTLED",
+        disposition: "uncertain",
+        diagnostics: { httpStatus: 403, providerErrorCode: 4, operation },
+      });
+    },
+  );
+  it.each([190, 10, "4"])(
+    "keeps other/string403 code %s blocked without message inference",
+    async (code) => {
+      const request = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: { code, message: "Application request limit reached" },
+            }),
+            { status: 403 },
+          ),
+      );
+      await expect(
+        new MetaImageHeaderSampleUploader(
+          request as typeof fetch,
+          fetcher(),
+        ).upload(input),
+      ).rejects.toMatchObject({
+        code: "META_SAMPLE_SESSION_REJECTED",
+        disposition: "blocked",
+      });
+    },
+  );
   it("checks the fence before each sample HTTP and stops after fence loss", async () => {
-    const request = vi.fn(async () => new Response(JSON.stringify({ id: "upload:abcdefgh" })));
-    const check = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("synthetic stale fence"));
-    await expect(new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher()).upload({ ...input, beforeHttp: check })).rejects.toThrow("synthetic stale fence");
-    expect(check).toHaveBeenCalledTimes(2); expect(request).toHaveBeenCalledOnce();
+    const request = vi.fn(
+      async () => new Response(JSON.stringify({ id: "upload:abcdefgh" })),
+    );
+    const check = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("synthetic stale fence"));
+    await expect(
+      new MetaImageHeaderSampleUploader(
+        request as typeof fetch,
+        fetcher(),
+      ).upload({ ...input, beforeHttp: check }),
+    ).rejects.toThrow("synthetic stale fence");
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledOnce();
   });
   it("aborts an uncooperative source read before any provider HTTP", async () => {
-    const controller = new AbortController(); const request = vi.fn();
-    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, { read: () => new Promise(() => {}) });
+    const controller = new AbortController();
+    const request = vi.fn();
+    const uploader = new MetaImageHeaderSampleUploader(
+      request as typeof fetch,
+      { read: () => new Promise(() => {}) },
+    );
     const operation = uploader.upload({ ...input, signal: controller.signal });
     controller.abort();
     await expect(operation).rejects.toMatchObject({ disposition: "uncertain" });
     expect(request).not.toHaveBeenCalled();
   });
   it("retains safe original Meta error code/message while redacting echoed credentials", async () => {
-    const request = vi.fn(async () => new Response(JSON.stringify({ error: {
-      message: "Invalid access token test-token; please reconnect", code: 190, error_subcode: 463,
-      error_data: { detail: "Authorization: Bearer test-token" }, fbtrace_id: "trace-123",
-    } }), { status: 401, headers: { "x-fb-request-id": "request-456" } }));
-    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher());
-    const failure = await uploader.upload(input).catch((error: unknown) => error);
+    const request = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "Invalid access token test-token; please reconnect",
+              code: 190,
+              error_subcode: 463,
+              error_data: { detail: "Authorization: Bearer test-token" },
+              fbtrace_id: "trace-123",
+            },
+          }),
+          { status: 401, headers: { "x-fb-request-id": "request-456" } },
+        ),
+    );
+    const uploader = new MetaImageHeaderSampleUploader(
+      request as typeof fetch,
+      fetcher(),
+    );
+    const failure = await uploader
+      .upload(input)
+      .catch((error: unknown) => error);
     expect(failure).toMatchObject({
-      code: "META_SAMPLE_SESSION_REJECTED", disposition: "blocked", diagnostics: expect.objectContaining({
-        origin: "provider_response", providerErrorCode: 190, providerErrorSubcode: 463,
-        providerErrorMessage: "Invalid access token [REDACTED]; please reconnect", providerRequestId: "request-456",
+      code: "META_SAMPLE_SESSION_REJECTED",
+      disposition: "blocked",
+      diagnostics: expect.objectContaining({
+        origin: "provider_response",
+        providerErrorCode: 190,
+        providerErrorSubcode: 463,
+        providerErrorMessage:
+          "Invalid access token [REDACTED]; please reconnect",
+        providerRequestId: "request-456",
         redactionApplied: true,
       }),
     });
@@ -193,36 +438,94 @@ describe("trusted Meta template image sample upload", () => {
   it.each([
     [429, "rate limited"],
     [503, "upload backend unavailable"],
-  ])("classifies Meta upload HTTP %i as retryable and preserves its source failure", async (status, message) => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "upload:abcdefgh" })))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message, code: 2, error_subcode: 99 } }), { status }));
-    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher());
-    const failure = await uploader.upload(input).catch((error: unknown) => error);
-    expect(failure).toMatchObject({
-      disposition: "uncertain", diagnostics: expect.objectContaining({ operation: "sample_upload",
-        httpStatus: status, providerErrorCode: 2, providerErrorSubcode: 99, providerErrorMessage: message }),
-    });
-    expect(request).toHaveBeenCalledTimes(2);
-  });
+  ])(
+    "classifies Meta upload HTTP %i as retryable and preserves its source failure",
+    async (status, message) => {
+      const request = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ id: "upload:abcdefgh" })),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ error: { message, code: 2, error_subcode: 99 } }),
+            { status },
+          ),
+        );
+      const uploader = new MetaImageHeaderSampleUploader(
+        request as typeof fetch,
+        fetcher(),
+      );
+      const failure = await uploader
+        .upload(input)
+        .catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        disposition: "uncertain",
+        diagnostics: expect.objectContaining({
+          operation: "sample_upload",
+          httpStatus: status,
+          providerErrorCode: 2,
+          providerErrorSubcode: 99,
+          providerErrorMessage: message,
+        }),
+      });
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it.each([
-    [new ShopBrandMediaError("SOURCE_TIMEOUT", true), "uncertain", "META_SAMPLE_FETCH_SOURCE_TIMEOUT"],
-    [new ShopBrandMediaError("UNSAFE_SOURCE", false), "blocked", "META_SAMPLE_FETCH_UNSAFE_SOURCE"],
-  ] as const)("preserves retryability for a controlled sample-fetch failure", async (fetchError, disposition, code) => {
-    const request = vi.fn();
-    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch,
-      { read: vi.fn(async () => { throw fetchError; }) });
-    await expect(uploader.upload(input)).rejects.toMatchObject({ code, disposition });
-    expect(request).not.toHaveBeenCalled();
-  });
+    [
+      new ShopBrandMediaError("SOURCE_TIMEOUT", true),
+      "uncertain",
+      "META_SAMPLE_FETCH_SOURCE_TIMEOUT",
+    ],
+    [
+      new ShopBrandMediaError("UNSAFE_SOURCE", false),
+      "blocked",
+      "META_SAMPLE_FETCH_UNSAFE_SOURCE",
+    ],
+  ] as const)(
+    "preserves retryability for a controlled sample-fetch failure",
+    async (fetchError, disposition, code) => {
+      const request = vi.fn();
+      const uploader = new MetaImageHeaderSampleUploader(
+        request as typeof fetch,
+        {
+          read: vi.fn(async () => {
+            throw fetchError;
+          }),
+        },
+      );
+      await expect(uploader.upload(input)).rejects.toMatchObject({
+        code,
+        disposition,
+      });
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
 
   it("logs a bounded original SDK exception while redacting token-bearing transport text", async () => {
-    const request = vi.fn(async () => { throw new Error("TLS failed for Bearer test-token at https://graph.example/path"); });
-    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher());
-    const failure = await uploader.upload(input).catch((error: unknown) => error);
-    expect(failure).toMatchObject({ code: "META_SAMPLE_SESSION_TRANSPORT", disposition: "uncertain",
-      diagnostics: expect.objectContaining({ origin: "sdk_exception", errorName: "Error", redactionApplied: true }) });
+    const request = vi.fn(async () => {
+      throw new Error(
+        "TLS failed for Bearer test-token at https://graph.example/path",
+      );
+    });
+    const uploader = new MetaImageHeaderSampleUploader(
+      request as typeof fetch,
+      fetcher(),
+    );
+    const failure = await uploader
+      .upload(input)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "META_SAMPLE_SESSION_TRANSPORT",
+      disposition: "uncertain",
+      diagnostics: expect.objectContaining({
+        origin: "sdk_exception",
+        errorName: "Error",
+        redactionApplied: true,
+      }),
+    });
     expect(JSON.stringify(failure)).not.toContain("test-token");
     expect(JSON.stringify(failure)).not.toContain("https://graph.example");
   });

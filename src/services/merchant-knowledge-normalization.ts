@@ -11,11 +11,16 @@ export function merchantKnowledgeContentUnits(value: string): number {
 }
 
 export function normalizeMerchantKnowledgeText(input: string): string {
-  const lineNormalized = input.normalize("NFC").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lineNormalized = input
+    .normalize("NFC")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
   const converted: string[] = [];
   for (const codePoint of lineNormalized) {
     converted.push(
-      codePoint !== "\n" && UNICODE_WHITE_SPACE.test(codePoint) ? " " : codePoint,
+      codePoint !== "\n" && UNICODE_WHITE_SPACE.test(codePoint)
+        ? " "
+        : codePoint,
     );
   }
 
@@ -50,7 +55,16 @@ export function normalizeMerchantKnowledgeText(input: string): string {
 
   let start = 0;
   let end = blankLinesCollapsed.length;
-  while (start < end && (blankLinesCollapsed[start] === " " || blankLinesCollapsed[start] === "\n")) start += 1;
-  while (end > start && (blankLinesCollapsed[end - 1] === " " || blankLinesCollapsed[end - 1] === "\n")) end -= 1;
+  while (
+    start < end &&
+    (blankLinesCollapsed[start] === " " || blankLinesCollapsed[start] === "\n")
+  )
+    start += 1;
+  while (
+    end > start &&
+    (blankLinesCollapsed[end - 1] === " " ||
+      blankLinesCollapsed[end - 1] === "\n")
+  )
+    end -= 1;
   return blankLinesCollapsed.slice(start, end).join("");
 }

@@ -1,8 +1,14 @@
 import type { RetryFundingLink } from "../../domain/recovery-retry-funding-lineage.js";
-import { decideRecoveryOutreachRetry, isValidRecoveryDeliveryRetryConfig } from "../../domain/recovery-outreach-retry-policy.js";
+import {
+  decideRecoveryOutreachRetry,
+  isValidRecoveryDeliveryRetryConfig,
+} from "../../domain/recovery-outreach-retry-policy.js";
 import { findExactRecoveryReservationSource } from "../recovery-delivery-compensation/lineage.js";
 import { readCommittedCorrectionReplay } from "../recovery-delivery-compensation/committed-usage.js";
-import { requireLineage, type CompensationTransaction } from "../recovery-delivery-compensation/types.js";
+import {
+  requireLineage,
+  type CompensationTransaction,
+} from "../recovery-delivery-compensation/types.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import { requireCurrentInitialRetry } from "./funding-lineage.js";
 
@@ -12,19 +18,34 @@ import { requireCurrentInitialRetry } from "./funding-lineage.js";
  * refund correction does not grant capacity; ordinary billing still decides
  * whether a new credit is available.
  */
-export async function verifyRetryPredecessorFunding(tx: CompensationTransaction, shopId: string, links: readonly RetryFundingLink[]): Promise<void> {
+export async function verifyRetryPredecessorFunding(
+  tx: CompensationTransaction,
+  shopId: string,
+  links: readonly RetryFundingLink[],
+): Promise<void> {
   for (const { predecessor, intent } of links) {
-    const source = await findExactRecoveryReservationSource(tx, shopId, predecessor.id);
-    requireLineage(source && source.reservation.id === intent.fundingReservationId,
-      "retry predecessor reservation mismatch");
+    const source = await findExactRecoveryReservationSource(
+      tx,
+      shopId,
+      predecessor.id,
+    );
+    requireLineage(
+      source && source.reservation.id === intent.fundingReservationId,
+      "retry predecessor reservation mismatch",
+    );
     const reservation = source.reservation;
     if (reservation.status === "COMMITTED") {
       await readCommittedCorrectionReplay(tx, source);
     } else {
-      requireLineage(reservation.status === "RELEASED" && !reservation.committedUsageEventId &&
-        !reservation.compensationUsageEventId && !reservation.compensationReason &&
-        !reservation.compensationDisposition && !reservation.compensatedAt,
-      "retry predecessor funding is not released or corrected");
+      requireLineage(
+        reservation.status === "RELEASED" &&
+          !reservation.committedUsageEventId &&
+          !reservation.compensationUsageEventId &&
+          !reservation.compensationReason &&
+          !reservation.compensationDisposition &&
+          !reservation.compensatedAt,
+        "retry predecessor funding is not released or corrected",
+      );
     }
   }
 }
@@ -35,9 +56,16 @@ export async function verifyRetryPredecessorFunding(tx: CompensationTransaction,
  * revalidate checkout lifetime, consent, sender and final provider admission.
  * Only AFTER_COOLDOWN is actionable here; policy/repair/review holds are inert.
  */
-export async function requireInitialRetryFundingReady(tx: CompensationTransaction, input: {
-  shopId: string; recoveryId: string; conversationId: string; attemptId: string; now: Date;
-}): Promise<readonly RetryFundingLink[]> {
+export async function requireInitialRetryFundingReady(
+  tx: CompensationTransaction,
+  input: {
+    shopId: string;
+    recoveryId: string;
+    conversationId: string;
+    attemptId: string;
+    now: Date;
+  },
+): Promise<readonly RetryFundingLink[]> {
   const links = await requireCurrentInitialRetry(tx, input);
   await requireInitialRetryPredecessorReady(tx, input, links);
   return links;
@@ -48,47 +76,106 @@ export async function requireInitialRetryFundingReady(tx: CompensationTransactio
  * funding owner validates the actual persisted successor before reservation.
  * Neither call grants a provider permit.
  */
-export async function requireInitialRetryPredecessorReady(tx: CompensationTransaction, input: {
-  shopId: string; recoveryId: string; conversationId: string; now: Date;
-}, links: readonly RetryFundingLink[]): Promise<void> {
+export async function requireInitialRetryPredecessorReady(
+  tx: CompensationTransaction,
+  input: {
+    shopId: string;
+    recoveryId: string;
+    conversationId: string;
+    now: Date;
+  },
+  links: readonly RetryFundingLink[],
+): Promise<void> {
   const latest = links.at(-1);
   requireLineage(latest, "initial retry predecessor missing");
-  const intent = await tx.recoveryOutreachRetryIntent.findUnique({ where: { id: latest.intent.id } });
-  const recovery = await tx.checkoutRecovery.findUnique({ where: { id: input.recoveryId }, select: {
-    shopId: true, generation: true, lastExternalActivityAt: true,
-  } });
-  const config = await tx.backgroundRuntimeConfig.findUnique({ where: { id: "default" }, select: {
-    recoveryDeliveryTemporaryRetryDelayMinutes: true,
-    recoveryDeliveryRateLimitRetryDelayMinutes: true,
-    recoveryDeliveryMarketingRetryDelayMinutes: true,
-    recoveryDeliveryMaxRetries: true,
-  } });
-  requireLineage(recovery?.shopId === input.shopId && intent &&
-    intent.failedAttemptId === latest.predecessor.id && intent.failedMessageId === latest.intent.failedMessageId &&
-    intent.fundingReservationId === latest.intent.fundingReservationId, "initial retry intent identity mismatch");
-  requireLineage(!intent.cancelledAt, "initial retry intent cancelled");
-  requireLineage(intent.expectedGeneration === recovery.generation &&
-    intent.expectedLastExternalActivityAt.getTime() === recovery.lastExternalActivityAt.getTime(),
-  "initial retry checkout generation or activity changed");
-  requireLineage(intent.policy === "AFTER_COOLDOWN" && intent.notBeforeAt,
-    `initial retry policy held: ${intent.policy}`);
-  requireLineage(isValidRecoveryDeliveryRetryConfig(config), "initial retry runtime configuration invalid");
-  requireLineage(links.length <= config.recoveryDeliveryMaxRetries, "initial retry budget exhausted");
-  const failedMessage = await tx.conversationMessage.findUnique({
-    where: { id: latest.intent.failedMessageId }, select: { providerFailureCode: true },
+  const intent = await tx.recoveryOutreachRetryIntent.findUnique({
+    where: { id: latest.intent.id },
   });
-  requireLineage(failedMessage && failedMessage.providerFailureCode === intent.providerFailureCode,
-    "retry predecessor failure code mismatch");
-  requireLineage(!await hasLocalNoContact(tx, { shopId: input.shopId, recipient: latest.predecessor.recipient }),
-    "initial retry local contact restriction");
-  requireLineage(!await tx.conversationMessage.findFirst({
-    where: { conversationId: input.conversationId, direction: "INBOUND", senderType: "CUSTOMER" }, select: { id: true },
-  }), "initial retry has customer history");
+  const recovery = await tx.checkoutRecovery.findUnique({
+    where: { id: input.recoveryId },
+    select: {
+      shopId: true,
+      generation: true,
+      lastExternalActivityAt: true,
+    },
+  });
+  const config = await tx.backgroundRuntimeConfig.findUnique({
+    where: { id: "default" },
+    select: {
+      recoveryDeliveryTemporaryRetryDelayMinutes: true,
+      recoveryDeliveryRateLimitRetryDelayMinutes: true,
+      recoveryDeliveryMarketingRetryDelayMinutes: true,
+      recoveryDeliveryMaxRetries: true,
+    },
+  });
+  requireLineage(
+    recovery?.shopId === input.shopId &&
+      intent &&
+      intent.failedAttemptId === latest.predecessor.id &&
+      intent.failedMessageId === latest.intent.failedMessageId &&
+      intent.fundingReservationId === latest.intent.fundingReservationId,
+    "initial retry intent identity mismatch",
+  );
+  requireLineage(!intent.cancelledAt, "initial retry intent cancelled");
+  requireLineage(
+    intent.expectedGeneration === recovery.generation &&
+      intent.expectedLastExternalActivityAt.getTime() ===
+        recovery.lastExternalActivityAt.getTime(),
+    "initial retry checkout generation or activity changed",
+  );
+  requireLineage(
+    intent.policy === "AFTER_COOLDOWN" && intent.notBeforeAt,
+    `initial retry policy held: ${intent.policy}`,
+  );
+  requireLineage(
+    isValidRecoveryDeliveryRetryConfig(config),
+    "initial retry runtime configuration invalid",
+  );
+  requireLineage(
+    links.length <= config.recoveryDeliveryMaxRetries,
+    "initial retry budget exhausted",
+  );
+  const failedMessage = await tx.conversationMessage.findUnique({
+    where: { id: latest.intent.failedMessageId },
+    select: { providerFailureCode: true },
+  });
+  requireLineage(
+    failedMessage &&
+      failedMessage.providerFailureCode === intent.providerFailureCode,
+    "retry predecessor failure code mismatch",
+  );
+  requireLineage(
+    !(await hasLocalNoContact(tx, {
+      shopId: input.shopId,
+      recipient: latest.predecessor.recipient,
+    })),
+    "initial retry local contact restriction",
+  );
+  requireLineage(
+    !(await tx.conversationMessage.findFirst({
+      where: {
+        conversationId: input.conversationId,
+        direction: "INBOUND",
+        senderType: "CUSTOMER",
+      },
+      select: { id: true },
+    })),
+    "initial retry has customer history",
+  );
   const failedAt = latest.predecessor.outboundMessage?.failedAt;
   requireLineage(failedAt, "retry predecessor failure time missing");
-  const currentDecision = decideRecoveryOutreachRetry(intent.providerFailureCode, failedAt, config);
-  requireLineage(currentDecision.policy === "AFTER_COOLDOWN" &&
-    Math.max(intent.notBeforeAt.getTime(), currentDecision.notBeforeAt.getTime()) <= input.now.getTime(),
-  "initial retry cooldown is held");
+  const currentDecision = decideRecoveryOutreachRetry(
+    intent.providerFailureCode,
+    failedAt,
+    config,
+  );
+  requireLineage(
+    currentDecision.policy === "AFTER_COOLDOWN" &&
+      Math.max(
+        intent.notBeforeAt.getTime(),
+        currentDecision.notBeforeAt.getTime(),
+      ) <= input.now.getTime(),
+    "initial retry cooldown is held",
+  );
   await verifyRetryPredecessorFunding(tx, input.shopId, links);
 }

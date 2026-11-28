@@ -1,5 +1,8 @@
 import { Queue, type Worker } from "bullmq";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "./deployment-environment.js";
 
 import { connectionRedis } from "../lib/redis.js";
@@ -9,25 +12,46 @@ import { RECOVERY_CAPACITY_RESUME_QUEUE } from "../domain/recovery-capacity-resu
 import { RECOVERY_OUTREACH_FOLLOW_UP_QUEUE } from "../domain/recovery-outreach-follow-up.js";
 import { BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME } from "@modainteract/moda-interact-shared/billing";
 import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS } from "@modainteract/moda-interact-shared/shopify";
-import type { BackgroundRuntimeConfigService, BackgroundRuntimeConfigSnapshot } from "./background-runtime-config.js";
+import type {
+  BackgroundRuntimeConfigService,
+  BackgroundRuntimeConfigSnapshot,
+} from "./background-runtime-config.js";
 import type { BackgroundRuntimeLeaseService } from "./background-runtime-lease.js";
 
 const RECONCILIATION_INTERVAL_MS = 30_000;
-const logger = createLogger({ serviceName: "moda-background-queue-concurrency", environment: resolveDeploymentEnvironmentName() });
+const logger = createLogger({
+  serviceName: "moda-background-queue-concurrency",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 export const CONTROLLED_QUEUE_DEFINITIONS = [
-  [SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.queueName, "checkoutQueueGlobalConcurrency"],
-  [SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.queueName, "orderQueueGlobalConcurrency"],
+  [
+    SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.queueName,
+    "checkoutQueueGlobalConcurrency",
+  ],
+  [
+    SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.queueName,
+    "orderQueueGlobalConcurrency",
+  ],
   [PENDING_RECOVERY_CANDIDATE_QUEUE, "pendingRecoveryQueueGlobalConcurrency"],
   [RECOVERY_CAPACITY_RESUME_QUEUE, "recoveryResumeQueueGlobalConcurrency"],
   [RECOVERY_OUTREACH_FOLLOW_UP_QUEUE, "pendingRecoveryQueueGlobalConcurrency"],
   ["whatsapp-events", "whatsappQueueGlobalConcurrency"],
-  [MERCHANT_COMMUNICATIONS_QUEUE_NAME, "merchantCommunicationsQueueGlobalConcurrency"],
-  [BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME, "billingSubscriptionQueueGlobalConcurrency"],
+  [
+    MERCHANT_COMMUNICATIONS_QUEUE_NAME,
+    "merchantCommunicationsQueueGlobalConcurrency",
+  ],
+  [
+    BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME,
+    "billingSubscriptionQueueGlobalConcurrency",
+  ],
 ] as const satisfies readonly [string, keyof BackgroundRuntimeConfigSnapshot][];
 
 type QueueDefinition = (typeof CONTROLLED_QUEUE_DEFINITIONS)[number];
-type QueueLike = Pick<Queue, "setGlobalConcurrency" | "getGlobalConcurrency" | "close">;
+type QueueLike = Pick<
+  Queue,
+  "setGlobalConcurrency" | "getGlobalConcurrency" | "close"
+>;
 
 export type QueueConcurrencyControllerOptions = {
   config: BackgroundRuntimeConfigService;
@@ -54,7 +78,11 @@ export async function startQueueConcurrencyController(
   options: QueueConcurrencyControllerOptions,
 ): Promise<() => Promise<void>> {
   options.config.current();
-  const queues = options.queues ?? CONTROLLED_QUEUE_DEFINITIONS.map(([name]) => new Queue(name, { connection: connectionRedis }));
+  const queues =
+    options.queues ??
+    CONTROLLED_QUEUE_DEFINITIONS.map(
+      ([name]) => new Queue(name, { connection: connectionRedis }),
+    );
   const log = options.log ?? logger;
   let stopped = false;
   let timer: NodeJS.Timeout | undefined;
@@ -76,30 +104,41 @@ export async function startQueueConcurrencyController(
       pending = true;
       return;
     }
-    running = options.lease.runWithLease("QUEUE_CONCURRENCY_RECONCILIATION", async () => {
-      const snapshot = await options.config.getFresh();
-      for (const [index, [queueName, configKey]] of CONTROLLED_QUEUE_DEFINITIONS.entries()) {
-        const queue = queues[index];
-        if (!queue) throw new Error(`Missing controlled queue at index ${index}.`);
-        const desired = snapshot[configKey] as number;
-        try {
-          await queue.setGlobalConcurrency(desired);
-          const actual = await queue.getGlobalConcurrency();
-          if (actual !== desired) throw new Error(`expected ${desired}, got ${actual}`);
-        } catch (error) {
-          log.error("background.queue_concurrency.reconcile_failed", { queue: queueName, error,
-            errorMessage: error instanceof Error ? error.message : String(error),
-          });
-          throw error;
+    running = options.lease
+      .runWithLease("QUEUE_CONCURRENCY_RECONCILIATION", async () => {
+        const snapshot = await options.config.getFresh();
+        for (const [
+          index,
+          [queueName, configKey],
+        ] of CONTROLLED_QUEUE_DEFINITIONS.entries()) {
+          const queue = queues[index];
+          if (!queue)
+            throw new Error(`Missing controlled queue at index ${index}.`);
+          const desired = snapshot[configKey] as number;
+          try {
+            await queue.setGlobalConcurrency(desired);
+            const actual = await queue.getGlobalConcurrency();
+            if (actual !== desired)
+              throw new Error(`expected ${desired}, got ${actual}`);
+          } catch (error) {
+            log.error("background.queue_concurrency.reconcile_failed", {
+              queue: queueName,
+              error,
+              errorMessage:
+                error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+          }
         }
-      }
-    }).then(() => undefined).finally(() => {
-      running = undefined;
-      if (pending) {
-        pending = false;
-        void reconcile().catch(() => undefined);
-      } else if (!stopped) schedule();
-    });
+      })
+      .then(() => undefined)
+      .finally(() => {
+        running = undefined;
+        if (pending) {
+          pending = false;
+          void reconcile().catch(() => undefined);
+        } else if (!stopped) schedule();
+      });
     await running;
   };
 
@@ -120,6 +159,7 @@ export async function startQueueConcurrencyController(
     if (timer) clearTimeout(timer);
     timer = undefined;
     await running;
-    if (!options.queues) await Promise.all(queues.map((queue) => queue.close()));
+    if (!options.queues)
+      await Promise.all(queues.map((queue) => queue.close()));
   };
 }

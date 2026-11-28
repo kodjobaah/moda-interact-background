@@ -26,14 +26,16 @@ describe("translation provider submission runtime", () => {
     const provider = createProvider();
     const persistInputFileId = vi.fn();
 
-    await expect(submitTranslationProviderBatch({
-      logicalBatchId: "batch-1",
-      inputFileId: "file-existing",
-      provider,
-      loadRequests: vi.fn(async () => [request]),
-      persistInputFileId,
-      persistSubmitted: vi.fn(async () => undefined),
-    })).resolves.toEqual({
+    await expect(
+      submitTranslationProviderBatch({
+        logicalBatchId: "batch-1",
+        inputFileId: "file-existing",
+        provider,
+        loadRequests: vi.fn(async () => [request]),
+        persistInputFileId,
+        persistSubmitted: vi.fn(async () => undefined),
+      }),
+    ).resolves.toEqual({
       kind: "submitted",
       inputFileId: "file-existing",
       providerBatchId: "provider-batch-1",
@@ -41,7 +43,10 @@ describe("translation provider submission runtime", () => {
 
     expect(provider.prepareBatchInput).not.toHaveBeenCalled();
     expect(persistInputFileId).not.toHaveBeenCalled();
-    expect(provider.createBatch).toHaveBeenCalledWith("batch-1", "file-existing");
+    expect(provider.createBatch).toHaveBeenCalledWith(
+      "batch-1",
+      "file-existing",
+    );
   });
 
   it("prepares and durably records the provider input before creating the batch", async () => {
@@ -73,17 +78,21 @@ describe("translation provider submission runtime", () => {
   it("classifies preparation failures as definitely retryable by default", async () => {
     const failure = new Error("upload unavailable");
     const provider = createProvider({
-      prepareBatchInput: vi.fn(async () => { throw failure; }),
+      prepareBatchInput: vi.fn(async () => {
+        throw failure;
+      }),
     });
 
-    await expect(submitTranslationProviderBatch({
-      logicalBatchId: "batch-1",
-      inputFileId: null,
-      provider,
-      loadRequests: vi.fn(async () => [request]),
-      persistInputFileId: vi.fn(async () => undefined),
-      persistSubmitted: vi.fn(async () => undefined),
-    })).resolves.toEqual({
+    await expect(
+      submitTranslationProviderBatch({
+        logicalBatchId: "batch-1",
+        inputFileId: null,
+        provider,
+        loadRequests: vi.fn(async () => [request]),
+        persistInputFileId: vi.fn(async () => undefined),
+        persistSubmitted: vi.fn(async () => undefined),
+      }),
+    ).resolves.toEqual({
       kind: "failed",
       phase: "prepare",
       classification: "DEFINITE_RETRYABLE_NOT_CREATED",
@@ -98,17 +107,21 @@ describe("translation provider submission runtime", () => {
       classification: "DEFINITE_TERMINAL_NOT_CREATED" as const,
     });
     const provider = createProvider({
-      prepareBatchInput: vi.fn(async () => { throw failure; }),
+      prepareBatchInput: vi.fn(async () => {
+        throw failure;
+      }),
     });
 
-    await expect(submitTranslationProviderBatch({
-      logicalBatchId: "batch-1",
-      inputFileId: null,
-      provider,
-      loadRequests: vi.fn(async () => [request]),
-      persistInputFileId: vi.fn(async () => undefined),
-      persistSubmitted: vi.fn(async () => undefined),
-    })).resolves.toMatchObject({
+    await expect(
+      submitTranslationProviderBatch({
+        logicalBatchId: "batch-1",
+        inputFileId: null,
+        provider,
+        loadRequests: vi.fn(async () => [request]),
+        persistInputFileId: vi.fn(async () => undefined),
+        persistSubmitted: vi.fn(async () => undefined),
+      }),
+    ).resolves.toMatchObject({
       kind: "failed",
       phase: "prepare",
       classification: "DEFINITE_TERMINAL_NOT_CREATED",
@@ -119,15 +132,19 @@ describe("translation provider submission runtime", () => {
     const failure = new Error("input file unavailable");
     const provider = createProvider();
 
-    await expect(submitTranslationProviderBatch({
-      logicalBatchId: "batch-1",
-      inputFileId: "file-existing",
-      provider,
-      loadRequests: vi.fn(async () => [request]),
-      persistInputFileId: vi.fn(async () => undefined),
-      persistSubmitted: vi.fn(async () => undefined),
-      validateInputFileId: () => { throw failure; },
-    })).resolves.toEqual({
+    await expect(
+      submitTranslationProviderBatch({
+        logicalBatchId: "batch-1",
+        inputFileId: "file-existing",
+        provider,
+        loadRequests: vi.fn(async () => [request]),
+        persistInputFileId: vi.fn(async () => undefined),
+        persistSubmitted: vi.fn(async () => undefined),
+        validateInputFileId: () => {
+          throw failure;
+        },
+      }),
+    ).resolves.toEqual({
       kind: "failed",
       phase: "create",
       classification: "AMBIGUOUS_CREATE",
@@ -138,19 +155,26 @@ describe("translation provider submission runtime", () => {
   });
 
   it("treats failure to durably persist an accepted provider batch as ambiguous", async () => {
-    const failure = Object.assign(new Error("accepted batch persistence lost"), {
-      classification: "AMBIGUOUS_CREATE" as const,
-    });
+    const failure = Object.assign(
+      new Error("accepted batch persistence lost"),
+      {
+        classification: "AMBIGUOUS_CREATE" as const,
+      },
+    );
     const provider = createProvider();
 
-    await expect(submitTranslationProviderBatch({
-      logicalBatchId: "batch-1",
-      inputFileId: "file-existing",
-      provider,
-      loadRequests: vi.fn(async () => [request]),
-      persistInputFileId: vi.fn(async () => undefined),
-      persistSubmitted: vi.fn(async () => { throw failure; }),
-    })).resolves.toEqual({
+    await expect(
+      submitTranslationProviderBatch({
+        logicalBatchId: "batch-1",
+        inputFileId: "file-existing",
+        provider,
+        loadRequests: vi.fn(async () => [request]),
+        persistInputFileId: vi.fn(async () => undefined),
+        persistSubmitted: vi.fn(async () => {
+          throw failure;
+        }),
+      }),
+    ).resolves.toEqual({
       kind: "failed",
       phase: "create",
       classification: "AMBIGUOUS_CREATE",
@@ -161,17 +185,21 @@ describe("translation provider submission runtime", () => {
   it("classifies provider create uncertainty as ambiguous by default", async () => {
     const failure = new Error("provider create timed out");
     const provider = createProvider({
-      createBatch: vi.fn(async () => { throw failure; }),
+      createBatch: vi.fn(async () => {
+        throw failure;
+      }),
     });
 
-    await expect(submitTranslationProviderBatch({
-      logicalBatchId: "batch-1",
-      inputFileId: "file-existing",
-      provider,
-      loadRequests: vi.fn(async () => [request]),
-      persistInputFileId: vi.fn(async () => undefined),
-      persistSubmitted: vi.fn(async () => undefined),
-    })).resolves.toEqual({
+    await expect(
+      submitTranslationProviderBatch({
+        logicalBatchId: "batch-1",
+        inputFileId: "file-existing",
+        provider,
+        loadRequests: vi.fn(async () => [request]),
+        persistInputFileId: vi.fn(async () => undefined),
+        persistSubmitted: vi.fn(async () => undefined),
+      }),
+    ).resolves.toEqual({
       kind: "failed",
       phase: "create",
       classification: "AMBIGUOUS_CREATE",

@@ -42,14 +42,14 @@ whole-transaction retry and source error logging retain original errors.
 
 ## Local retry classification (does not gate credit compensation)
 
-| Policy | Codes | Earliest reconsideration |
-| --- | --- | --- |
-| AFTER_COOLDOWN | 2, 131000, 131016, 131057, 133004 | failure + configured temporary delay (default 5 min) |
-| AFTER_COOLDOWN | 4, 80007, 130429, 131056 | failure + configured rate-limit delay (default 15 min) |
-| PROVIDER_POLICY_HOLD | 131049 | failure + configured marketing delay (default/minimum 1440 min) AND verified provider-policy clearance |
-| REPAIR_REQUIRED | listed account, parameter, template, quality or configuration codes | after verified repair; no clock alone |
-| DO_NOT_RETRY | 131021, 131026, 131050 | no automatic retry of this failed action |
-| REVIEW_REQUIRED | all other/absent codes | no automatic retry until classified |
+| Policy               | Codes                                                               | Earliest reconsideration                                                                               |
+| -------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| AFTER_COOLDOWN       | 2, 131000, 131016, 131057, 133004                                   | failure + configured temporary delay (default 5 min)                                                   |
+| AFTER_COOLDOWN       | 4, 80007, 130429, 131056                                            | failure + configured rate-limit delay (default 15 min)                                                 |
+| PROVIDER_POLICY_HOLD | 131049                                                              | failure + configured marketing delay (default/minimum 1440 min) AND verified provider-policy clearance |
+| REPAIR_REQUIRED      | listed account, parameter, template, quality or configuration codes | after verified repair; no clock alone                                                                  |
+| DO_NOT_RETRY         | 131021, 131026, 131050                                              | no automatic retry of this failed action                                                               |
+| REVIEW_REQUIRED      | all other/absent codes                                              | no automatic retry until classified                                                                    |
 
 The delay values are conservative Moda policy choices, not Meta guarantees.
 A 24-hour floor does not establish that a marketing restriction has lifted.
@@ -63,12 +63,12 @@ Use the existing `public.BackgroundRuntimeConfig` singleton through Admin's
 Operational / Recovery delivery retries group. These are initial database
 and UI reset defaults, not execution constants:
 
-| Field | Default | Valid values |
-| --- | ---: | --- |
-| `recoveryDeliveryTemporaryRetryDelayMinutes` | 5 | integer 1 to PostgreSQL Int max |
-| `recoveryDeliveryRateLimitRetryDelayMinutes` | 15 | integer 1 to PostgreSQL Int max |
-| `recoveryDeliveryMarketingRetryDelayMinutes` | 1440 | integer 1440 to PostgreSQL Int max |
-| `recoveryDeliveryMaxRetries` | 3 | integer 0 to PostgreSQL Int max |
+| Field                                        | Default | Valid values                       |
+| -------------------------------------------- | ------: | ---------------------------------- |
+| `recoveryDeliveryTemporaryRetryDelayMinutes` |       5 | integer 1 to PostgreSQL Int max    |
+| `recoveryDeliveryRateLimitRetryDelayMinutes` |      15 | integer 1 to PostgreSQL Int max    |
+| `recoveryDeliveryMarketingRetryDelayMinutes` |    1440 | integer 1440 to PostgreSQL Int max |
+| `recoveryDeliveryMaxRetries`                 |       3 | integer 0 to PostgreSQL Int max    |
 
 The compensation transaction reads the current singleton directly. Missing or
 invalid retry configuration and max retries zero hold recoverable decisions
@@ -226,7 +226,7 @@ initial-outreach settlement, recovery allowance and compensation suites.
   local STOP, existing allowance and follow-up slot. Reject stale generations.
   Require the existing open sender assignment and matching failed message's
   persisted account and phone stamps. Never allocate another sender.
-- The read-only `inspect` method returns an eligible *claim*, not a send
+- The read-only `inspect` method returns an eligible _claim_, not a send
   authorization. `claim` creates the deterministic sequence >=3 PENDING row
   once, using a caller-resolved offer policy, or returns the existing clean
   claim. Conflicting, progressed, or unlinked evidence remains held. A prior
@@ -336,7 +336,6 @@ polling, coalesce repeated unchanged holds across polling cycles; the present
 patch does not provide cross-process log deduplication or a worker-level summary.
 Log offer preparation, outbound admission, provider acceptance and final
 settlement at their actual boundaries when the dispatcher is implemented.
-
 
 ### Patch 4b.1 — last-mile admission (not worker activation)
 

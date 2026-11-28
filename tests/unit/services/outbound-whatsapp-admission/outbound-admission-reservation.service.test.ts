@@ -21,19 +21,23 @@ describe("OutboundAdmissionReservationService", () => {
     );
   });
 
-
   it("retries a serializable P2034 conflict without widening the retry scope", async () => {
     const test = admissionHarness();
-    const conflict = new Prisma.PrismaClientKnownRequestError("write conflict", {
-      code: "P2034",
-      clientVersion: "test",
-    });
+    const conflict = new Prisma.PrismaClientKnownRequestError(
+      "write conflict",
+      {
+        code: "P2034",
+        clientVersion: "test",
+      },
+    );
     const execute = test.database.$transaction.getMockImplementation();
     test.database.$transaction
       .mockRejectedValueOnce(conflict)
       .mockImplementation(execute!);
 
-    await expect(test.reservation.reserve(baseAdmissionInput)).resolves.toMatchObject({
+    await expect(
+      test.reservation.reserve(baseAdmissionInput),
+    ).resolves.toMatchObject({
       kind: "admitted",
       messageId: "message-1",
     });
@@ -41,7 +45,9 @@ describe("OutboundAdmissionReservationService", () => {
   });
 
   it("finds an existing durable admission by idempotency key", async () => {
-    const test = admissionHarness({ existing: { sourceId: "message-existing" } });
+    const test = admissionHarness({
+      existing: { sourceId: "message-existing" },
+    });
 
     await expect(
       test.reservation.findExistingAdmission("outbound-existing"),
@@ -50,10 +56,15 @@ describe("OutboundAdmissionReservationService", () => {
       conversationId: "conversation-1",
       status: "PENDING",
     });
-    expect(test.transaction.conversationMessage.findUnique).toHaveBeenCalledWith({
+    expect(
+      test.transaction.conversationMessage.findUnique,
+    ).toHaveBeenCalledWith({
       where: { id: "message-existing" },
       select: {
-        id: true, conversationId: true, status: true, sentAt: true,
+        id: true,
+        conversationId: true,
+        status: true,
+        sentAt: true,
         providerFailureCode: true,
       },
     });
@@ -62,16 +73,25 @@ describe("OutboundAdmissionReservationService", () => {
   it("checks a missing historical recovery attempt when the usage row is gone", async () => {
     const test = admissionHarness();
 
-    await expect(test.reservation.findExistingAdmission("recovery-outreach:attempt-old"))
-      .resolves.toBeNull();
+    await expect(
+      test.reservation.findExistingAdmission("recovery-outreach:attempt-old"),
+    ).resolves.toBeNull();
 
-    expect(test.transaction.recoveryOutreachAttempt.findUnique).toHaveBeenCalledWith({
+    expect(
+      test.transaction.recoveryOutreachAttempt.findUnique,
+    ).toHaveBeenCalledWith({
       where: { id: "attempt-old" },
       select: {
         checkoutRecovery: { select: { shopId: true } },
-        outboundMessage: { select: {
-          id: true, conversationId: true, status: true, sentAt: true, providerFailureCode: true,
-        } },
+        outboundMessage: {
+          select: {
+            id: true,
+            conversationId: true,
+            status: true,
+            sentAt: true,
+            providerFailureCode: true,
+          },
+        },
       },
     });
   });
@@ -79,8 +99,11 @@ describe("OutboundAdmissionReservationService", () => {
   it("retains the failed recovery-attempt fence after its hard-limit usage row is removed", async () => {
     const test = admissionHarness();
     const failedMessage = {
-      id: "message-failed", conversationId: "conversation-1",
-      status: "FAILED", sentAt: null, providerFailureCode: "131026",
+      id: "message-failed",
+      conversationId: "conversation-1",
+      status: "FAILED",
+      sentAt: null,
+      providerFailureCode: "131026",
     };
     test.transaction.recoveryOutreachAttempt.findUnique.mockResolvedValue({
       checkoutRecovery: { shopId: "shop-1" },
@@ -88,12 +111,16 @@ describe("OutboundAdmissionReservationService", () => {
     });
     const idempotencyKey = "recovery-outreach:attempt-failed";
 
-    await expect(test.reservation.findExistingAdmission(idempotencyKey))
-      .resolves.toEqual(failedMessage);
-    await expect(test.reservation.reserve({ ...baseAdmissionInput, idempotencyKey }))
-      .resolves.toEqual({ kind: "suppressed", reason: "duplicate" });
+    await expect(
+      test.reservation.findExistingAdmission(idempotencyKey),
+    ).resolves.toEqual(failedMessage);
+    await expect(
+      test.reservation.reserve({ ...baseAdmissionInput, idempotencyKey }),
+    ).resolves.toEqual({ kind: "suppressed", reason: "duplicate" });
 
-    expect(test.transaction.recoveryOutreachAttempt.findUnique).toHaveBeenCalledWith(
+    expect(
+      test.transaction.recoveryOutreachAttempt.findUnique,
+    ).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "attempt-failed" } }),
     );
     expect(test.transaction.conversationMessage.create).not.toHaveBeenCalled();
@@ -101,12 +128,16 @@ describe("OutboundAdmissionReservationService", () => {
   });
 
   it("suppresses a duplicate before creating another message", async () => {
-    const test = admissionHarness({ existing: { sourceId: "message-existing" } });
-
-    await expect(test.reservation.reserve(baseAdmissionInput)).resolves.toEqual({
-      kind: "suppressed",
-      reason: "duplicate",
+    const test = admissionHarness({
+      existing: { sourceId: "message-existing" },
     });
+
+    await expect(test.reservation.reserve(baseAdmissionInput)).resolves.toEqual(
+      {
+        kind: "suppressed",
+        reason: "duplicate",
+      },
+    );
 
     expect(test.transaction.conversationMessage.create).not.toHaveBeenCalled();
     expect(test.transaction.usageEvent.create).not.toHaveBeenCalled();
@@ -119,19 +150,25 @@ describe("OutboundAdmissionReservationService", () => {
       checkoutRecovery: null,
     });
 
-    await expect(test.reservation.reserve(baseAdmissionInput)).resolves.toEqual({
-      kind: "suppressed",
-      reason: "conversation-invalid",
-    });
+    await expect(test.reservation.reserve(baseAdmissionInput)).resolves.toEqual(
+      {
+        kind: "suppressed",
+        reason: "conversation-invalid",
+      },
+    );
   });
 
   it("suppresses admission while automated WhatsApp is paused", async () => {
-    const test = admissionHarness({ policy: { automatedWhatsappPaused: true } });
-
-    await expect(test.reservation.reserve(baseAdmissionInput)).resolves.toEqual({
-      kind: "suppressed",
-      reason: "paused",
+    const test = admissionHarness({
+      policy: { automatedWhatsappPaused: true },
     });
+
+    await expect(test.reservation.reserve(baseAdmissionInput)).resolves.toEqual(
+      {
+        kind: "suppressed",
+        reason: "paused",
+      },
+    );
     expect(test.transaction.conversationMessage.create).not.toHaveBeenCalled();
   });
 
@@ -179,9 +216,7 @@ describe("OutboundAdmissionReservationService", () => {
 
   it("reserves the terminal slot once and persists deterministic terminal content", async () => {
     const test = admissionHarness({
-      usageRows: [
-        { sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 2 },
-      ],
+      usageRows: [{ sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 2 }],
     });
 
     const terminal = await test.reservation.reserve(baseAdmissionInput);
@@ -207,8 +242,16 @@ describe("OutboundAdmissionReservationService", () => {
         { id: "b-1", conversationId: "conversation-b" },
       ],
       usageRows: [
-        { sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1, sourceId: "a-1" },
-        { sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1, sourceId: "a-2" },
+        {
+          sourceType: "OUTBOUND_AUTOMATED_MESSAGE",
+          quantity: 1,
+          sourceId: "a-1",
+        },
+        {
+          sourceType: "OUTBOUND_AUTOMATED_MESSAGE",
+          quantity: 1,
+          sourceId: "a-2",
+        },
         { sourceType: "CUSTOMER_INBOUND", quantity: 100, sourceId: "b-1" },
       ],
     });

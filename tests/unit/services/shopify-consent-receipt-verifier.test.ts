@@ -21,17 +21,21 @@ function digest(value: string) {
   return createHash("sha256").update(value, "utf8").digest("base64url");
 }
 
-function receipt(input: {
-  kind?: "c" | "x";
-  decision?: "G" | "R";
-  shop?: string;
-  binding?: string;
-  customerId?: string;
-  keyId?: "old-key" | "new-key";
-} = {}): string {
+function receipt(
+  input: {
+    kind?: "c" | "x";
+    decision?: "G" | "R";
+    shop?: string;
+    binding?: string;
+    customerId?: string;
+    keyId?: "old-key" | "new-key";
+  } = {},
+): string {
   const kind = input.kind ?? "c";
   const expectedShop = input.shop ?? shopId;
-  const bindingDigest = digest(input.binding ?? (kind === "c" ? cartToken : checkoutToken));
+  const bindingDigest = digest(
+    input.binding ?? (kind === "c" ? cartToken : checkoutToken),
+  );
   const claims = [
     1,
     expectedShop,
@@ -110,32 +114,47 @@ describe("Shopify checkout consent receipt verifier", () => {
     const retiredKeyring = JSON.stringify({
       "new-key": Buffer.alloc(32, 2).toString("base64"),
     });
-    expect(verify(receipt({ keyId: "old-key" }), { keyringJson: retiredKeyring }).status)
-      .toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
+    expect(
+      verify(receipt({ keyId: "old-key" }), { keyringJson: retiredKeyring })
+        .status,
+    ).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
   });
 
   it("supports Plus checkout-token binding and revoke claims", () => {
-    expect(verify(receipt({ kind: "x", decision: "R" }), {
-      shopifyPlus: true,
-    })).toMatchObject({ status: "VERIFIED", decision: "REVOKED", kind: "x" });
+    expect(
+      verify(receipt({ kind: "x", decision: "R" }), {
+        shopifyPlus: true,
+      }),
+    ).toMatchObject({ status: "VERIFIED", decision: "REVOKED", kind: "x" });
   });
 
   it("fails closed on copied shop, plan, cart, checkout and customer bindings", () => {
-    expect(verify(receipt({ shop: "cm987654321098765432109876" })).status)
-      .toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
-    expect(verify(receipt({ kind: "x" })).status).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
-    expect(verify(receipt({ binding: "different-cart" })).status)
-      .toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
-    expect(verify(receipt(), { cartToken: null }).status).toBe("DEFER_CHECKOUT_BINDING");
-    expect(verify(receipt({ kind: "x" }), { shopifyPlus: true, checkoutToken: "" }).status)
-      .toBe("DEFER_CHECKOUT_BINDING");
-    expect(verify(receipt({ customerId: "12346" })).status)
-      .toBe("DEFER_IDENTITY_OR_RECIPIENT");
+    expect(verify(receipt({ shop: "cm987654321098765432109876" })).status).toBe(
+      "INVALID_OR_AMBIGUOUS_RECEIPT",
+    );
+    expect(verify(receipt({ kind: "x" })).status).toBe(
+      "INVALID_OR_AMBIGUOUS_RECEIPT",
+    );
+    expect(verify(receipt({ binding: "different-cart" })).status).toBe(
+      "INVALID_OR_AMBIGUOUS_RECEIPT",
+    );
+    expect(verify(receipt(), { cartToken: null }).status).toBe(
+      "DEFER_CHECKOUT_BINDING",
+    );
+    expect(
+      verify(receipt({ kind: "x" }), { shopifyPlus: true, checkoutToken: "" })
+        .status,
+    ).toBe("DEFER_CHECKOUT_BINDING");
+    expect(verify(receipt({ customerId: "12346" })).status).toBe(
+      "DEFER_IDENTITY_OR_RECIPIENT",
+    );
   });
 
   it("accepts an authenticated guest receipt after Shopify later associates a customer", () => {
     const guest = receipt({ customerId: "-" });
-    expect(verify(guest, { verifiedShopifyCustomerId: null }).status).toBe("VERIFIED");
+    expect(verify(guest, { verifiedShopifyCustomerId: null }).status).toBe(
+      "VERIFIED",
+    );
     expect(verify(guest).status).toBe("VERIFIED");
   });
 
@@ -143,37 +162,66 @@ describe("Shopify checkout consent receipt verifier", () => {
     const valid = receipt();
     const fields = valid.split(".");
     fields[4] = `${fields[4]}=`;
-    expect(verify(fields.join(".")).status).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
+    expect(verify(fields.join(".")).status).toBe(
+      "INVALID_OR_AMBIGUOUS_RECEIPT",
+    );
     expect(verify(`${valid}x`).status).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
-    expect(verify(valid.replace(/.$/, valid.endsWith("A") ? "B" : "A")).status)
-      .toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
-    expect(verify(valid, {
-      attribute: { kind: "INVALID" },
-    }).status).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
+    expect(
+      verify(valid.replace(/.$/, valid.endsWith("A") ? "B" : "A")).status,
+    ).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
+    expect(
+      verify(valid, {
+        attribute: { kind: "INVALID" },
+      }).status,
+    ).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
   });
 
   it("distinguishes no explicit choice from invalid receipt data", () => {
-    expect(verifyShopifyConsentReceipt({
-      attribute: { kind: "MISSING" },
-      shopId,
-      shopifyPlus: false,
-      cartToken,
-      checkoutToken,
-      verifiedShopifyCustomerId: customerGid,
-      keyringJson,
-      now,
-    })).toEqual({ status: "NO_EXPLICIT_CHOICE" });
+    expect(
+      verifyShopifyConsentReceipt({
+        attribute: { kind: "MISSING" },
+        shopId,
+        shopifyPlus: false,
+        cartToken,
+        checkoutToken,
+        verifiedShopifyCustomerId: customerGid,
+        keyringJson,
+        now,
+      }),
+    ).toEqual({ status: "NO_EXPLICIT_CHOICE" });
   });
 
   it("fails closed when the keyring is unavailable or the future clock skew is excessive", () => {
-    expect(verify(receipt(), { keyringJson: undefined }).status)
-      .toBe("KEYRING_CONFIGURATION_FAILURE");
+    expect(verify(receipt(), { keyringJson: undefined }).status).toBe(
+      "KEYRING_CONFIGURATION_FAILURE",
+    );
     const future = Math.floor(now.getTime() / 1000) + 301;
     const keyring = parseCredentialKeyring(keyringJson);
     const bindingDigest = digest(cartToken);
-    const plaintext = JSON.stringify([1, shopId, "c", bindingDigest, "G", "1", "en-US", future, "12345"]);
-    const aad = JSON.stringify(["moda-shopify-wa-consent", 1, shopId, "c", bindingDigest]);
-    const envelope = encryptCredential({ keyring, activeKeyId: "new-key", plaintext, aad });
+    const plaintext = JSON.stringify([
+      1,
+      shopId,
+      "c",
+      bindingDigest,
+      "G",
+      "1",
+      "en-US",
+      future,
+      "12345",
+    ]);
+    const aad = JSON.stringify([
+      "moda-shopify-wa-consent",
+      1,
+      shopId,
+      "c",
+      bindingDigest,
+    ]);
+    const envelope = encryptCredential({
+      keyring,
+      activeKeyId: "new-key",
+      plaintext,
+      aad,
+    });
     const value = `v1.${envelope.keyId}.${Buffer.from(envelope.nonce).toString("base64url")}.${Buffer.from(envelope.ciphertext).toString("base64url")}.${Buffer.from(envelope.authTag).toString("base64url")}`;
     expect(verify(value).status).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
   });
@@ -216,7 +264,9 @@ describe("Shopify checkout consent receipt verifier", () => {
 
   it("keeps unknown receipt keys and authentication failures as terminal invalid evidence", () => {
     const keyMissing = verify(receipt(), {
-      keyringJson: JSON.stringify({ "new-key": Buffer.alloc(32, 2).toString("base64") }),
+      keyringJson: JSON.stringify({
+        "new-key": Buffer.alloc(32, 2).toString("base64"),
+      }),
       logger,
     });
     const tampered = verify(receipt().replace(/.$/, "x"), { logger });
@@ -234,15 +284,17 @@ describe("Shopify checkout consent receipt verifier", () => {
 
   it("rejects an empty or malformed attribute without exposing receipt contents", () => {
     const empty: ShopifyConsentReceiptAttribute = { kind: "VALUE", value: "" };
-    expect(verifyShopifyConsentReceipt({
-      attribute: empty,
-      shopId,
-      shopifyPlus: false,
-      cartToken,
-      checkoutToken,
-      verifiedShopifyCustomerId: customerGid,
-      keyringJson,
-      now,
-    }).status).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
+    expect(
+      verifyShopifyConsentReceipt({
+        attribute: empty,
+        shopId,
+        shopifyPlus: false,
+        cartToken,
+        checkoutToken,
+        verifiedShopifyCustomerId: customerGid,
+        keyringJson,
+        now,
+      }).status,
+    ).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
   });
 });

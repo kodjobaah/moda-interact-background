@@ -14,5 +14,4 @@ export class ConversationMessageService {
   }
 }
 
-export const conversationMessageService =
-  new ConversationMessageService();
+export const conversationMessageService = new ConversationMessageService();

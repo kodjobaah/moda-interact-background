@@ -21,9 +21,17 @@ import { retireUnmappedCurrentPeriod } from "../billing-period-transition/retire
 
 const GENERIC_PROJECTION_RETRY_MS = 60 * 1000;
 
-type GenericSubscriptionProjectionDatabase = Pick<PrismaClient, "$transaction" | "billingPlan" | "merchantPricingPlan" | "subscription">;
-type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "enqueue"> &
-  Partial<Pick<BillingReconciliationSchedulerService, "publishCommittedFailure">>;
+type GenericSubscriptionProjectionDatabase = Pick<
+  PrismaClient,
+  "$transaction" | "billingPlan" | "merchantPricingPlan" | "subscription"
+>;
+type ReconciliationScheduler = Pick<
+  BillingReconciliationSchedulerService,
+  "enqueue"
+> &
+  Partial<
+    Pick<BillingReconciliationSchedulerService, "publishCommittedFailure">
+  >;
 
 type GenericSubscriptionProjectionInput = {
   shopId: string;
@@ -46,7 +54,9 @@ export class GenericSubscriptionProjectionService {
     private readonly logger: StructuredLogger,
   ) {}
 
-  async reconcile(input: GenericSubscriptionProjectionInput): Promise<GenericSubscriptionProjectionResult> {
+  async reconcile(
+    input: GenericSubscriptionProjectionInput,
+  ): Promise<GenericSubscriptionProjectionResult> {
     const { shopId, provider, plan, existing, projection, now } = input;
     const existingPending = provider.pendingPlanHandle
       ? await this.database.billingPlan.findUnique({
@@ -54,9 +64,14 @@ export class GenericSubscriptionProjectionService {
           select: { id: true, active: true },
         })
       : null;
-    const pendingPlan = existingPending ?? (provider.pendingPlanHandle
-      ? await new BillingPlanMaterializationService(this.database, this.logger).materializeIfMissing(provider.pendingPlanHandle)
-      : null);
+    const pendingPlan =
+      existingPending ??
+      (provider.pendingPlanHandle
+        ? await new BillingPlanMaterializationService(
+            this.database,
+            this.logger,
+          ).materializeIfMissing(provider.pendingPlanHandle)
+        : null);
 
     if (projection.executableMapped && plan) {
       if (!hasValidProviderBillingCycle(provider)) {
@@ -73,14 +88,31 @@ export class GenericSubscriptionProjectionService {
       });
     }
 
-    const committedSubscriptionId = await this.recordFailClosedProjection({ shopId, provider, plan, existing, pendingPlan, projection, now });
-    if (committedSubscriptionId && (projection.status === SubscriptionProjectionStatus.UNMAPPED || projection.syncErrorCode)) {
-      await this.scheduler.publishCommittedFailure?.(shopId, committedSubscriptionId);
+    const committedSubscriptionId = await this.recordFailClosedProjection({
+      shopId,
+      provider,
+      plan,
+      existing,
+      pendingPlan,
+      projection,
+      now,
+    });
+    if (
+      committedSubscriptionId &&
+      (projection.status === SubscriptionProjectionStatus.UNMAPPED ||
+        projection.syncErrorCode)
+    ) {
+      await this.scheduler.publishCommittedFailure?.(
+        shopId,
+        committedSubscriptionId,
+      );
     }
 
     return {
       billingPeriodId: null,
-      packMeterHandle: plan?.active ? plan.shopifyRecoveryCreditPackEventHandle ?? null : null,
+      packMeterHandle: plan?.active
+        ? (plan.shopifyRecoveryCreditPackEventHandle ?? null)
+        : null,
     };
   }
 
@@ -93,27 +125,45 @@ export class GenericSubscriptionProjectionService {
     projection: ObservedPlanProjection;
     now: Date;
   }): Promise<string | null> {
-    const { shopId, provider, plan, existing, pendingPlan, projection, now } = input;
-    return this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
-      const current = await readLockedGenericSubscription(transaction, shopId, existing);
-      if (!current) return null;
-      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
-      if (projection.status === SubscriptionProjectionStatus.UNMAPPED) {
-        await retireUnmappedCurrentPeriod(transaction, {
-          subscriptionId: current.id,
-          billingPeriodId: current.billingPeriodId,
-          now,
+    const { shopId, provider, plan, existing, pendingPlan, projection, now } =
+      input;
+    return this.database.$transaction(
+      async (transaction: Prisma.TransactionClient) => {
+        const current = await readLockedGenericSubscription(
+          transaction,
+          shopId,
+          existing,
+        );
+        if (!current) return null;
+        const usageEventMapping = await resolveShopifyUsageEventMapping(
+          transaction,
+          provider.planHandle,
+          provider.usageEventHandles,
+        );
+        if (projection.status === SubscriptionProjectionStatus.UNMAPPED) {
+          await retireUnmappedCurrentPeriod(transaction, {
+            subscriptionId: current.id,
+            billingPeriodId: current.billingPeriodId,
+            now,
+          });
+        }
+        await transaction.subscription.update({
+          where: { id: current.id },
+          data: {
+            ...this.failClosedProjectionData(
+              provider,
+              plan,
+              pendingPlan,
+              projection,
+              now,
+            ),
+            unmappedShopifyUsageEventHandles:
+              usageEventMapping.unmappedProviderHandles,
+          },
         });
-      }
-      await transaction.subscription.update({
-        where: { id: current.id },
-        data: {
-          ...this.failClosedProjectionData(provider, plan, pendingPlan, projection, now),
-          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
-        },
-      });
-      return current.id;
-    });
+        return current.id;
+      },
+    );
   }
 
   private async recordMissingBillingCycle(
@@ -122,122 +172,200 @@ export class GenericSubscriptionProjectionService {
     existing: GenericExistingSubscription | null,
     now: Date,
   ): Promise<GenericSubscriptionProjectionResult> {
-    const failed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
-      const current = await readLockedGenericSubscription(transaction, shopId, existing);
-      if (!current) return { kind: "stale" as const };
+    const failed = await this.database.$transaction(
+      async (transaction: Prisma.TransactionClient) => {
+        const current = await readLockedGenericSubscription(
+          transaction,
+          shopId,
+          existing,
+        );
+        if (!current) return { kind: "stale" as const };
 
-      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
-      const nextReconcileAt = new Date(now.getTime() + GENERIC_PROJECTION_RETRY_MS);
-      await transaction.subscription.update({
-        where: { id: current.id },
-        data: {
-          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
-          status: SubscriptionProjectionStatus.SYNC_ERROR,
-          observedShopifyPlanHandle: provider.planHandle,
-          lastSyncErrorCode: "MISSING_BILLING_CYCLE",
-          lastSyncErrorAt: now,
-          lastSyncedAt: now,
+        const usageEventMapping = await resolveShopifyUsageEventMapping(
+          transaction,
+          provider.planHandle,
+          provider.usageEventHandles,
+        );
+        const nextReconcileAt = new Date(
+          now.getTime() + GENERIC_PROJECTION_RETRY_MS,
+        );
+        await transaction.subscription.update({
+          where: { id: current.id },
+          data: {
+            unmappedShopifyUsageEventHandles:
+              usageEventMapping.unmappedProviderHandles,
+            status: SubscriptionProjectionStatus.SYNC_ERROR,
+            observedShopifyPlanHandle: provider.planHandle,
+            lastSyncErrorCode: "MISSING_BILLING_CYCLE",
+            lastSyncErrorAt: now,
+            lastSyncedAt: now,
+            nextReconcileAt,
+          },
+        });
+        return {
+          kind: "failed" as const,
+          subscriptionId: current.id,
           nextReconcileAt,
-        },
-      });
-      return { kind: "failed" as const, subscriptionId: current.id, nextReconcileAt };
-    });
+        };
+      },
+    );
 
     if (failed.kind === "failed") {
-      await this.scheduler.enqueue(shopId, failed.subscriptionId, failed.nextReconcileAt, now);
-      await this.scheduler.publishCommittedFailure?.(shopId, failed.subscriptionId);
+      await this.scheduler.enqueue(
+        shopId,
+        failed.subscriptionId,
+        failed.nextReconcileAt,
+        now,
+      );
+      await this.scheduler.publishCommittedFailure?.(
+        shopId,
+        failed.subscriptionId,
+      );
     }
-    return { billingPeriodId: existing?.billingPeriodId ?? null, packMeterHandle: null };
+    return {
+      billingPeriodId: existing?.billingPeriodId ?? null,
+      packMeterHandle: null,
+    };
   }
 
   private async materialiseMappedProjection(input: {
     shopId: string;
-    provider: PartnerSubscription & { currentPeriodStart: Date; currentPeriodEnd: Date };
+    provider: PartnerSubscription & {
+      currentPeriodStart: Date;
+      currentPeriodEnd: Date;
+    };
     plan: ObservedBillingPlan;
     existing: GenericExistingSubscription | null;
     pendingPlan: { id: string; active: boolean } | null;
     projection: ObservedPlanProjection;
     now: Date;
   }): Promise<GenericSubscriptionProjectionResult> {
-    const { shopId, provider, plan, existing, pendingPlan, projection, now } = input;
-    const result = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
-      const current = await readLockedGenericSubscription(transaction, shopId, existing);
-      if (!current) return { kind: "stale" as const };
+    const { shopId, provider, plan, existing, pendingPlan, projection, now } =
+      input;
+    const result = await this.database.$transaction(
+      async (transaction: Prisma.TransactionClient) => {
+        const current = await readLockedGenericSubscription(
+          transaction,
+          shopId,
+          existing,
+        );
+        if (!current) return { kind: "stale" as const };
 
-      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
-      const lifetimeCounter = await ensureLifetimeFreeCounterForMappedSubscription(transaction, shopId);
-      if (lifetimeCounter.kind === "history-conflict") {
-        await transaction.subscription.update({
-          where: { id: current.id },
-          data: {
-            unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
-            status: SubscriptionProjectionStatus.SYNC_ERROR,
-            lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
-            lastSyncErrorAt: now,
-            lastSyncedAt: now,
-            nextReconcileAt: null,
-          },
+        const usageEventMapping = await resolveShopifyUsageEventMapping(
+          transaction,
+          provider.planHandle,
+          provider.usageEventHandles,
+        );
+        const lifetimeCounter =
+          await ensureLifetimeFreeCounterForMappedSubscription(
+            transaction,
+            shopId,
+          );
+        if (lifetimeCounter.kind === "history-conflict") {
+          await transaction.subscription.update({
+            where: { id: current.id },
+            data: {
+              unmappedShopifyUsageEventHandles:
+                usageEventMapping.unmappedProviderHandles,
+              status: SubscriptionProjectionStatus.SYNC_ERROR,
+              lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
+              lastSyncErrorAt: now,
+              lastSyncedAt: now,
+              nextReconcileAt: null,
+            },
+          });
+          return {
+            kind: "lifetime-counter-conflict" as const,
+            subscriptionId: current.id,
+          };
+        }
+
+        const period = await ensureCurrentBillingPeriodProjection(transaction, {
+          shopId,
+          subscriptionId: current.id,
+          periodStart: provider.currentPeriodStart,
+          periodEnd: provider.currentPeriodEnd,
+          providerPlanHandle: provider.planHandle,
+          plan,
         });
-        return { kind: "lifetime-counter-conflict" as const, subscriptionId: current.id };
-      }
-
-      const period = await ensureCurrentBillingPeriodProjection(transaction, {
-        shopId,
-        subscriptionId: current.id,
-        periodStart: provider.currentPeriodStart,
-        periodEnd: provider.currentPeriodEnd,
-        providerPlanHandle: provider.planHandle,
-        plan,
-      });
-      if (period.kind === "CONFLICT") {
-        const nextReconcileAt = new Date(now.getTime() + GENERIC_PROJECTION_RETRY_MS);
-        await transaction.subscription.update({
-          where: { id: current.id },
-          data: {
-            unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
-            status: SubscriptionProjectionStatus.SYNC_ERROR,
-            lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
-            lastSyncErrorAt: now,
-            lastSyncedAt: now,
+        if (period.kind === "CONFLICT") {
+          const nextReconcileAt = new Date(
+            now.getTime() + GENERIC_PROJECTION_RETRY_MS,
+          );
+          await transaction.subscription.update({
+            where: { id: current.id },
+            data: {
+              unmappedShopifyUsageEventHandles:
+                usageEventMapping.unmappedProviderHandles,
+              status: SubscriptionProjectionStatus.SYNC_ERROR,
+              lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
+              lastSyncErrorAt: now,
+              lastSyncedAt: now,
+              nextReconcileAt,
+            },
+          });
+          return {
+            kind: "conflict" as const,
+            subscriptionId: current.id,
             nextReconcileAt,
+          };
+        }
+
+        await transaction.subscription.update({
+          where: { id: current.id },
+          data: {
+            unmappedShopifyUsageEventHandles:
+              usageEventMapping.unmappedProviderHandles,
+            planId: plan.id,
+            observedShopifyPlanHandle: provider.planHandle,
+            status: projection.status,
+            billingPeriodId: period.billingPeriodId,
+            currentPeriodStart: provider.currentPeriodStart,
+            currentPeriodEnd: provider.currentPeriodEnd,
+            trialEndsAt: provider.trialEndsAt,
+            cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
+            providerSubscriptionId: provider.providerSubscriptionId,
+            lastSyncedAt: now,
+            lastSyncErrorCode: null,
+            lastSyncErrorAt: null,
+            pendingShopifyPlanHandle: provider.pendingPlanHandle,
+            pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+            pendingEffectiveAt: provider.pendingEffectiveAt,
           },
         });
-        return { kind: "conflict" as const, subscriptionId: current.id, nextReconcileAt };
-      }
-
-      await transaction.subscription.update({
-        where: { id: current.id },
-        data: {
-          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
-          planId: plan.id,
-          observedShopifyPlanHandle: provider.planHandle,
-          status: projection.status,
+        return {
+          kind: "ready" as const,
           billingPeriodId: period.billingPeriodId,
-          currentPeriodStart: provider.currentPeriodStart,
-          currentPeriodEnd: provider.currentPeriodEnd,
-          trialEndsAt: provider.trialEndsAt,
-          cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
-          providerSubscriptionId: provider.providerSubscriptionId,
-          lastSyncedAt: now,
-          lastSyncErrorCode: null,
-          lastSyncErrorAt: null,
-          pendingShopifyPlanHandle: provider.pendingPlanHandle,
-          pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
-          pendingEffectiveAt: provider.pendingEffectiveAt,
-        },
-      });
-      return { kind: "ready" as const, billingPeriodId: period.billingPeriodId };
-    });
+        };
+      },
+    );
 
     if (result.kind === "conflict") {
-      await this.scheduler.enqueue(shopId, result.subscriptionId, result.nextReconcileAt, now);
-      await this.scheduler.publishCommittedFailure?.(shopId, result.subscriptionId);
+      await this.scheduler.enqueue(
+        shopId,
+        result.subscriptionId,
+        result.nextReconcileAt,
+        now,
+      );
+      await this.scheduler.publishCommittedFailure?.(
+        shopId,
+        result.subscriptionId,
+      );
       return { billingPeriodId: null, packMeterHandle: null };
     }
     if (result.kind === "lifetime-counter-conflict") {
-      await this.scheduler.publishCommittedFailure?.(shopId, result.subscriptionId);
-      this.logger.warn("billing.subscription_reconciliation.lifetime_free_counter_history_conflict", { shopId });
-      return { billingPeriodId: existing?.billingPeriodId ?? null, packMeterHandle: null };
+      await this.scheduler.publishCommittedFailure?.(
+        shopId,
+        result.subscriptionId,
+      );
+      this.logger.warn(
+        "billing.subscription_reconciliation.lifetime_free_counter_history_conflict",
+        { shopId },
+      );
+      return {
+        billingPeriodId: existing?.billingPeriodId ?? null,
+        packMeterHandle: null,
+      };
     }
     if (result.kind === "ready") {
       return {
@@ -259,13 +387,22 @@ export class GenericSubscriptionProjectionService {
     now: Date,
   ) {
     return {
-      planId: projection.planUsable ? plan?.id ?? null : null,
+      planId: projection.planUsable ? (plan?.id ?? null) : null,
       observedShopifyPlanHandle: provider.planHandle,
       status: projection.status,
       billingPeriodId: null,
-      currentPeriodStart: projection.status === SubscriptionProjectionStatus.UNMAPPED ? null : provider.currentPeriodStart,
-      currentPeriodEnd: projection.status === SubscriptionProjectionStatus.UNMAPPED ? null : provider.currentPeriodEnd,
-      trialEndsAt: projection.status === SubscriptionProjectionStatus.UNMAPPED ? null : provider.trialEndsAt,
+      currentPeriodStart:
+        projection.status === SubscriptionProjectionStatus.UNMAPPED
+          ? null
+          : provider.currentPeriodStart,
+      currentPeriodEnd:
+        projection.status === SubscriptionProjectionStatus.UNMAPPED
+          ? null
+          : provider.currentPeriodEnd,
+      trialEndsAt:
+        projection.status === SubscriptionProjectionStatus.UNMAPPED
+          ? null
+          : provider.trialEndsAt,
       cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
       providerSubscriptionId: provider.providerSubscriptionId,
       lastSyncedAt: now,

@@ -62,7 +62,9 @@ function dependencies(credentials: string[]) {
     if (!next) throw new Error("no test credential");
     return next;
   });
-  const credentialResolver = { resolve } as unknown as OpenRouterCredentialResolver;
+  const credentialResolver = {
+    resolve,
+  } as unknown as OpenRouterCredentialResolver;
   const created: Array<{ options: unknown; client: CommerceModelInvoker }> = [];
   const createClient = vi.fn((options: any) => {
     const client = { invoke: vi.fn(async () => step) };
@@ -78,30 +80,46 @@ const createInvoker = (options: {
   logger?: StructuredLogger;
   conversationId?: string;
   inboundVersion?: number;
-}) => createProductionCommerceModelInvoker({
-  db: {} as PrismaClient,
-  environment: "DEVELOPMENT",
-  shopId: "shop-a",
-  ...options,
-});
+}) =>
+  createProductionCommerceModelInvoker({
+    db: {} as PrismaClient,
+    environment: "DEVELOPMENT",
+    shopId: "shop-a",
+    ...options,
+  });
 
 describe("createProductionCommerceModelInvoker", () => {
   it("forwards the typed current-customer carrier through the actual production proxy unchanged", async () => {
-    const deps = dependencies(["credential-A"]); const invoker = await createInvoker(deps);
-    const currentCustomerMessages = [{ role: "user" as const, content: "How about the new named product?" }];
+    const deps = dependencies(["credential-A"]);
+    const invoker = await createInvoker(deps);
+    const currentCustomerMessages = [
+      { role: "user" as const, content: "How about the new named product?" },
+    ];
     const typedRequest: ModelRequest = { ...request, currentCustomerMessages };
     const signal = new AbortController().signal;
     await invoker.invoke(typedRequest, signal);
-    expect(deps.created[0]!.client.invoke).toHaveBeenCalledWith(typedRequest, signal);
-    expect(vi.mocked(deps.created[0]!.client.invoke).mock.calls[0]![0].currentCustomerMessages).toBe(currentCustomerMessages);
+    expect(deps.created[0]!.client.invoke).toHaveBeenCalledWith(
+      typedRequest,
+      signal,
+    );
+    expect(
+      vi.mocked(deps.created[0]!.client.invoke).mock.calls[0]![0]
+        .currentCustomerMessages,
+    ).toBe(currentCustomerMessages);
   });
   it("resolves model identity once and resolves a fresh credential/client per invocation", async () => {
     const deps = dependencies(["credential-A", "credential-B"]);
     const invoker = await createInvoker(deps);
-    resolveProductionCommerceModel.mockResolvedValue(selection(model("model-B")));
+    resolveProductionCommerceModel.mockResolvedValue(
+      selection(model("model-B")),
+    );
 
-    expect(await invoker.invoke(request, new AbortController().signal)).toBe(step);
-    expect(await invoker.invoke(request, new AbortController().signal)).toBe(step);
+    expect(await invoker.invoke(request, new AbortController().signal)).toBe(
+      step,
+    );
+    expect(await invoker.invoke(request, new AbortController().signal)).toBe(
+      step,
+    );
 
     expect(resolveProductionCommerceModel).toHaveBeenCalledOnce();
     expect(resolveProductionCommerceModel).toHaveBeenCalledWith({
@@ -144,7 +162,10 @@ describe("createProductionCommerceModelInvoker", () => {
     const invoker = await createInvoker(deps);
     const controller = new AbortController();
     await invoker.invoke(request, controller.signal);
-    expect(deps.created[0]?.client.invoke).toHaveBeenCalledWith(request, controller.signal);
+    expect(deps.created[0]?.client.invoke).toHaveBeenCalledWith(
+      request,
+      controller.signal,
+    );
     expect(deps.resolve).toHaveBeenCalledWith({
       environment: "DEVELOPMENT",
       signal: controller.signal,
@@ -166,10 +187,14 @@ describe("createProductionCommerceModelInvoker", () => {
   it("classifies an unexpected provider exception without leaking the provider payload", async () => {
     const deps = dependencies(["credential-A"]);
     deps.createClient.mockImplementation(() => ({
-      invoke: vi.fn(async () => { throw new Error("provider payload credential-A"); }),
+      invoke: vi.fn(async () => {
+        throw new Error("provider payload credential-A");
+      }),
     }));
     const invoker = await createInvoker(deps);
-    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+    await expect(
+      invoker.invoke(request, new AbortController().signal),
+    ).rejects.toMatchObject({
       name: "CommerceModelInvocationFailure",
       message: "Commerce model unavailable",
       diagnostic: { reasonCode: "MODEL_INVOCATION_FAILED" },
@@ -192,38 +217,78 @@ describe("production Commerce model failure diagnostics", () => {
       const logs = logger();
       deps.createClient.mockImplementation((options: any) => ({
         invoke: vi.fn(async () => {
-          options.onDiagnostic({ stage: "provider", reason, statusCode: status });
-          throw new CommerceModelInvocationFailure({
-            stage: "model.invoke", reasonCode: reason,
-            providerStage: "provider", statusCode: status,
-          }, new Error("provider body contains credential-A"));
+          options.onDiagnostic({
+            stage: "provider",
+            reason,
+            statusCode: status,
+          });
+          throw new CommerceModelInvocationFailure(
+            {
+              stage: "model.invoke",
+              reasonCode: reason,
+              providerStage: "provider",
+              statusCode: status,
+            },
+            new Error("provider body contains credential-A"),
+          );
         }),
       }));
       const invoker = await createInvoker({
-        ...deps, logger: logs.value,
-        conversationId: "conversation-a", inboundVersion: 7,
+        ...deps,
+        logger: logs.value,
+        conversationId: "conversation-a",
+        inboundVersion: 7,
       });
-      await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+      await expect(
+        invoker.invoke(request, new AbortController().signal),
+      ).rejects.toMatchObject({
         name: "CommerceModelInvocationFailure",
         diagnostic: { reasonCode: reason, statusCode: status },
       });
-      const providerLog = logs.warn.mock.calls.find(([event]) => event === "commerce.model.provider_diagnostic");
+      const providerLog = logs.warn.mock.calls.find(
+        ([event]) => event === "commerce.model.provider_diagnostic",
+      );
       expect(providerLog?.[1]).toMatchObject({
-        reasonCode: reason, statusCode: status,
-        conversationId: "conversation-a", inboundVersion: 7,
-        selectionSource: "PRICING_PLAN", shopId: "shop-a",
-        reasonMessage: expect.any(String), operatorAction: expect.any(String),
+        reasonCode: reason,
+        statusCode: status,
+        conversationId: "conversation-a",
+        inboundVersion: 7,
+        selectionSource: "PRICING_PLAN",
+        shopId: "shop-a",
+        reasonMessage: expect.any(String),
+        operatorAction: expect.any(String),
       });
-      expect(logs.warn.mock.calls.find(([event]) => event === "commerce.model.invocation_failed")?.[1])
-        .toMatchObject({ origin: "sdk_exception", sdkError: { message: "provider body contains [REDACTED]" }, reasonCode: reason });
-      expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("credential-A");
+      expect(
+        logs.warn.mock.calls.find(
+          ([event]) => event === "commerce.model.invocation_failed",
+        )?.[1],
+      ).toMatchObject({
+        origin: "sdk_exception",
+        sdkError: { message: "provider body contains [REDACTED]" },
+        reasonCode: reason,
+      });
+      expect(JSON.stringify(logs.warn.mock.calls)).not.toContain(
+        "credential-A",
+      );
     }
   });
 
   it("preserves original OpenRouter 400 and 429 provider response details separately from Moda reasons", async () => {
     for (const fixture of [
-      { status: 400, reason: "PROVIDER_HTTP_ERROR", code: "invalid_request_error", message: "This model does not support tool_choice", requestId: "openrouter-400" },
-      { status: 429, reason: "PROVIDER_RATE_LIMITED", code: "rate_limit_exceeded", message: "Distinct provider quota message", requestId: "openrouter-429" },
+      {
+        status: 400,
+        reason: "PROVIDER_HTTP_ERROR",
+        code: "invalid_request_error",
+        message: "This model does not support tool_choice",
+        requestId: "openrouter-400",
+      },
+      {
+        status: 429,
+        reason: "PROVIDER_RATE_LIMITED",
+        code: "rate_limit_exceeded",
+        message: "Distinct provider quota message",
+        requestId: "openrouter-429",
+      },
     ]) {
       const deps = dependencies(["credential-A"]);
       const logs = logger();
@@ -234,25 +299,51 @@ describe("production Commerce model failure diagnostics", () => {
             headers: { "x-request-id": fixture.requestId },
             data: { error: { code: fixture.code, message: fixture.message } },
           };
-          const upstream = Object.assign(new Error("OpenRouter SDK wrapper"), { status: fixture.status, response });
-          options.onDiagnostic({ stage: "provider", reason: fixture.reason, statusCode: fixture.status, providerCode: fixture.code });
-          throw new CommerceModelInvocationFailure({
-            stage: "model.invoke", reasonCode: fixture.reason, providerStage: "provider", statusCode: fixture.status,
-          }, upstream);
+          const upstream = Object.assign(new Error("OpenRouter SDK wrapper"), {
+            status: fixture.status,
+            response,
+          });
+          options.onDiagnostic({
+            stage: "provider",
+            reason: fixture.reason,
+            statusCode: fixture.status,
+            providerCode: fixture.code,
+          });
+          throw new CommerceModelInvocationFailure(
+            {
+              stage: "model.invoke",
+              reasonCode: fixture.reason,
+              providerStage: "provider",
+              statusCode: fixture.status,
+            },
+            upstream,
+          );
         }),
       }));
       const invoker = await createInvoker({ ...deps, logger: logs.value });
-      await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+      await expect(
+        invoker.invoke(request, new AbortController().signal),
+      ).rejects.toMatchObject({
         diagnostic: { reasonCode: fixture.reason },
       });
-      expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
-        ["commerce.model.invocation_failed", expect.objectContaining({
-          origin: "provider_response", provider: "openai", operation: "model.invoke",
-          httpStatus: fixture.status, providerRequestId: fixture.requestId,
-          providerError: { code: fixture.code, message: fixture.message },
-          reasonCode: fixture.reason, redactionApplied: false, truncated: false,
-        })],
-      ]));
+      expect(logs.warn.mock.calls).toEqual(
+        expect.arrayContaining([
+          [
+            "commerce.model.invocation_failed",
+            expect.objectContaining({
+              origin: "provider_response",
+              provider: "openai",
+              operation: "model.invoke",
+              httpStatus: fixture.status,
+              providerRequestId: fixture.requestId,
+              providerError: { code: fixture.code, message: fixture.message },
+              reasonCode: fixture.reason,
+              redactionApplied: false,
+              truncated: false,
+            }),
+          ],
+        ]),
+      );
     }
   });
 
@@ -260,15 +351,24 @@ describe("production Commerce model failure diagnostics", () => {
     const deps = dependencies(["credential-A"]);
     const logs = logger();
     deps.createClient.mockImplementation(() => ({
-      invoke: vi.fn(async () => { throw Object.assign(new Error("certificate validation failed"), { code: "CERT_HAS_EXPIRED" }); }),
+      invoke: vi.fn(async () => {
+        throw Object.assign(new Error("certificate validation failed"), {
+          code: "CERT_HAS_EXPIRED",
+        });
+      }),
     }));
     const invoker = await createInvoker({ ...deps, logger: logs.value });
-    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+    await expect(
+      invoker.invoke(request, new AbortController().signal),
+    ).rejects.toMatchObject({
       diagnostic: { reasonCode: "MODEL_INVOCATION_FAILED" },
     });
-    const record = logs.warn.mock.calls.find(([event]) => event === "commerce.model.invocation_failed")?.[1];
+    const record = logs.warn.mock.calls.find(
+      ([event]) => event === "commerce.model.invocation_failed",
+    )?.[1];
     expect(record).toMatchObject({
-      origin: "sdk_exception", sdkError: { name: "Error", message: "certificate validation failed" },
+      origin: "sdk_exception",
+      sdkError: { name: "Error", message: "certificate validation failed" },
       reasonCode: "MODEL_INVOCATION_FAILED",
     });
     expect(record).not.toHaveProperty("providerError");
@@ -279,31 +379,63 @@ describe("production Commerce model failure diagnostics", () => {
     const logs = logger();
     deps.createClient.mockImplementation((options: any) => ({
       invoke: vi.fn(async () => {
-        const upstream = Object.assign(new Error("OpenRouter request rejected"), {
-          status: 400,
-          response: { status: 400, data: { error: {
-            code: "invalid_request_error",
-            message: "credential-A customer@example.test https://storage.example/file?sig=signed-value",
-          } } },
+        const upstream = Object.assign(
+          new Error("OpenRouter request rejected"),
+          {
+            status: 400,
+            response: {
+              status: 400,
+              data: {
+                error: {
+                  code: "invalid_request_error",
+                  message:
+                    "credential-A customer@example.test https://storage.example/file?sig=signed-value",
+                },
+              },
+            },
+          },
+        );
+        options.onDiagnostic({
+          stage: "provider",
+          reason: "PROVIDER_HTTP_ERROR",
+          statusCode: 400,
         });
-        options.onDiagnostic({ stage: "provider", reason: "PROVIDER_HTTP_ERROR", statusCode: 400 });
-        throw new CommerceModelInvocationFailure({ stage: "model.invoke", reasonCode: "PROVIDER_HTTP_ERROR", statusCode: 400 }, upstream);
+        throw new CommerceModelInvocationFailure(
+          {
+            stage: "model.invoke",
+            reasonCode: "PROVIDER_HTTP_ERROR",
+            statusCode: 400,
+          },
+          upstream,
+        );
       }),
     }));
     const invoker = await createInvoker({ ...deps, logger: logs.value });
-    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+    await expect(
+      invoker.invoke(request, new AbortController().signal),
+    ).rejects.toMatchObject({
       diagnostic: { reasonCode: "PROVIDER_HTTP_ERROR" },
     });
     const serialized = JSON.stringify(logs.warn.mock.calls);
     expect(serialized).not.toContain("credential-A");
     expect(serialized).not.toContain("customer@example.test");
     expect(serialized).not.toContain("signed-value");
-    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
-      ["commerce.model.invocation_failed", expect.objectContaining({
-        origin: "provider_response", httpStatus: 400, redactionApplied: true,
-        providerError: { code: "invalid_request_error", message: "[REDACTED] [REDACTED] [REDACTED_URL]" },
-      })],
-    ]));
+    expect(logs.warn.mock.calls).toEqual(
+      expect.arrayContaining([
+        [
+          "commerce.model.invocation_failed",
+          expect.objectContaining({
+            origin: "provider_response",
+            httpStatus: 400,
+            redactionApplied: true,
+            providerError: {
+              code: "invalid_request_error",
+              message: "[REDACTED] [REDACTED] [REDACTED_URL]",
+            },
+          }),
+        ],
+      ]),
+    );
   });
 
   it("preserves source status without a providerError when no upstream error body exists", async () => {
@@ -311,15 +443,35 @@ describe("production Commerce model failure diagnostics", () => {
     const logs = logger();
     deps.createClient.mockImplementation((options: any) => ({
       invoke: vi.fn(async () => {
-        const upstream = Object.assign(new Error("SDK HTTP error"), { status: 502 });
-        options.onDiagnostic({ stage: "provider", reason: "PROVIDER_HTTP_ERROR", statusCode: 502 });
-        throw new CommerceModelInvocationFailure({ stage: "model.invoke", reasonCode: "PROVIDER_HTTP_ERROR", statusCode: 502 }, upstream);
+        const upstream = Object.assign(new Error("SDK HTTP error"), {
+          status: 502,
+        });
+        options.onDiagnostic({
+          stage: "provider",
+          reason: "PROVIDER_HTTP_ERROR",
+          statusCode: 502,
+        });
+        throw new CommerceModelInvocationFailure(
+          {
+            stage: "model.invoke",
+            reasonCode: "PROVIDER_HTTP_ERROR",
+            statusCode: 502,
+          },
+          upstream,
+        );
       }),
     }));
     const invoker = await createInvoker({ ...deps, logger: logs.value });
-    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toBeInstanceOf(CommerceModelInvocationFailure);
-    const record = logs.warn.mock.calls.find(([event]) => event === "commerce.model.invocation_failed")?.[1];
-    expect(record).toMatchObject({ origin: "provider_response", httpStatus: 502 });
+    await expect(
+      invoker.invoke(request, new AbortController().signal),
+    ).rejects.toBeInstanceOf(CommerceModelInvocationFailure);
+    const record = logs.warn.mock.calls.find(
+      ([event]) => event === "commerce.model.invocation_failed",
+    )?.[1];
+    expect(record).toMatchObject({
+      origin: "provider_response",
+      httpStatus: 502,
+    });
     expect(record).not.toHaveProperty("providerError");
   });
 
@@ -328,23 +480,37 @@ describe("production Commerce model failure diagnostics", () => {
     const logs = logger();
     deps.createClient.mockImplementation((options: any) => ({
       invoke: vi.fn(async () => {
-        options.onDiagnostic({ stage: "response", reason: "PROVIDER_RESPONSE_USAGE_INVALID" });
-        throw new CommerceModelInvocationFailure({
-          stage: "model.invoke", reasonCode: "PROVIDER_RESPONSE_USAGE_INVALID",
-          providerStage: "response",
-        }, new Error("raw provider response credential-A"));
+        options.onDiagnostic({
+          stage: "response",
+          reason: "PROVIDER_RESPONSE_USAGE_INVALID",
+        });
+        throw new CommerceModelInvocationFailure(
+          {
+            stage: "model.invoke",
+            reasonCode: "PROVIDER_RESPONSE_USAGE_INVALID",
+            providerStage: "response",
+          },
+          new Error("raw provider response credential-A"),
+        );
       }),
     }));
     const invoker = await createInvoker({ ...deps, logger: logs.value });
-    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+    await expect(
+      invoker.invoke(request, new AbortController().signal),
+    ).rejects.toMatchObject({
       diagnostic: { reasonCode: "PROVIDER_RESPONSE_USAGE_INVALID" },
     });
-    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
-      ["commerce.model.provider_diagnostic", expect.objectContaining({
-        reasonCode: "PROVIDER_RESPONSE_USAGE_INVALID",
-        reasonMessage: expect.stringContaining("output-token"),
-      })],
-    ]));
+    expect(logs.warn.mock.calls).toEqual(
+      expect.arrayContaining([
+        [
+          "commerce.model.provider_diagnostic",
+          expect.objectContaining({
+            reasonCode: "PROVIDER_RESPONSE_USAGE_INVALID",
+            reasonMessage: expect.stringContaining("output-token"),
+          }),
+        ],
+      ]),
+    );
     expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("credential-A");
   });
 
@@ -355,73 +521,125 @@ describe("production Commerce model failure diagnostics", () => {
     ] as const) {
       const deps = dependencies([]);
       const logs = logger();
-      deps.resolve.mockRejectedValueOnce(new OpenRouterCredentialResolutionFailure(
-        reason, new Error("secret credential store error"),
-      ));
+      deps.resolve.mockRejectedValueOnce(
+        new OpenRouterCredentialResolutionFailure(
+          reason,
+          new Error("secret credential store error"),
+        ),
+      );
       const invoker = await createInvoker({ ...deps, logger: logs.value });
-      await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+      await expect(
+        invoker.invoke(request, new AbortController().signal),
+      ).rejects.toMatchObject({
         diagnostic: { reasonCode: runnerReason },
       });
       expect(deps.createClient).not.toHaveBeenCalled();
-      expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
-        ["commerce.model.credential_failed", expect.objectContaining({
-          reasonCode: reason, reasonMessage: expect.any(String),
-          operatorAction: expect.any(String),
-        })],
-      ]));
-      expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("secret credential store error");
+      expect(logs.warn.mock.calls).toEqual(
+        expect.arrayContaining([
+          [
+            "commerce.model.credential_failed",
+            expect.objectContaining({
+              reasonCode: reason,
+              reasonMessage: expect.any(String),
+              operatorAction: expect.any(String),
+            }),
+          ],
+        ]),
+      );
+      expect(JSON.stringify(logs.warn.mock.calls)).not.toContain(
+        "secret credential store error",
+      );
     }
   });
 
   it("preserves safe client construction exception wording", async () => {
     const deps = dependencies(["credential-A"]);
     const logs = logger();
-    deps.createClient.mockImplementation(() => { throw new Error("secret construction detail"); });
+    deps.createClient.mockImplementation(() => {
+      throw new Error("secret construction detail");
+    });
     const invoker = await createInvoker({ ...deps, logger: logs.value });
-    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+    await expect(
+      invoker.invoke(request, new AbortController().signal),
+    ).rejects.toMatchObject({
       diagnostic: { reasonCode: "MODEL_ADAPTER_INITIALIZATION_FAILED" },
     });
-    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
-      ["commerce.model.invocation_failed", expect.objectContaining({
-        reasonCode: "MODEL_ADAPTER_INITIALIZATION_FAILED",
-      })],
-    ]));
-    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
-      ["commerce.model.invocation_failed", expect.objectContaining({
-        origin: "internal", internalError: expect.objectContaining({ message: "secret construction detail" }),
-      })],
-    ]));
+    expect(logs.warn.mock.calls).toEqual(
+      expect.arrayContaining([
+        [
+          "commerce.model.invocation_failed",
+          expect.objectContaining({
+            reasonCode: "MODEL_ADAPTER_INITIALIZATION_FAILED",
+          }),
+        ],
+      ]),
+    );
+    expect(logs.warn.mock.calls).toEqual(
+      expect.arrayContaining([
+        [
+          "commerce.model.invocation_failed",
+          expect.objectContaining({
+            origin: "internal",
+            internalError: expect.objectContaining({
+              message: "secret construction detail",
+            }),
+          }),
+        ],
+      ]),
+    );
     expect(logs.warn.mock.calls[0]?.[1]).not.toHaveProperty("providerError");
   });
 
   it("preserves outcomes when the diagnostic logger throws", async () => {
     const deps = dependencies(["credential-A"]);
-    const logs = { warn: vi.fn(() => { throw new Error("sink is offline"); }) } as unknown as StructuredLogger;
+    const logs = {
+      warn: vi.fn(() => {
+        throw new Error("sink is offline");
+      }),
+    } as unknown as StructuredLogger;
     deps.createClient.mockImplementation((options: any) => ({
       invoke: vi.fn(async () => {
-        options.onDiagnostic({ stage: "provider", reason: "PROVIDER_RATE_LIMITED", statusCode: 429 });
+        options.onDiagnostic({
+          stage: "provider",
+          reason: "PROVIDER_RATE_LIMITED",
+          statusCode: 429,
+        });
         return step;
       }),
     }));
     const invoker = await createInvoker({ ...deps, logger: logs });
-    await expect(invoker.invoke(request, new AbortController().signal)).resolves.toBe(step);
+    await expect(
+      invoker.invoke(request, new AbortController().signal),
+    ).resolves.toBe(step);
   });
 
   it("preserves unexpected SDK text while redacting the resolved credential", async () => {
     const deps = dependencies(["credential-A"]);
     const logs = logger();
     deps.createClient.mockImplementation(() => ({
-      invoke: vi.fn(async () => { throw new Error("secret token credential-A"); }),
+      invoke: vi.fn(async () => {
+        throw new Error("secret token credential-A");
+      }),
     }));
     const invoker = await createInvoker({ ...deps, logger: logs.value });
-    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+    await expect(
+      invoker.invoke(request, new AbortController().signal),
+    ).rejects.toMatchObject({
       diagnostic: { reasonCode: "MODEL_INVOCATION_FAILED" },
     });
     expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("credential-A");
-    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
-      ["commerce.model.invocation_failed", expect.objectContaining({
-        sdkError: expect.objectContaining({ message: "secret token [REDACTED]" }), redactionApplied: true,
-      })],
-    ]));
+    expect(logs.warn.mock.calls).toEqual(
+      expect.arrayContaining([
+        [
+          "commerce.model.invocation_failed",
+          expect.objectContaining({
+            sdkError: expect.objectContaining({
+              message: "secret token [REDACTED]",
+            }),
+            redactionApplied: true,
+          }),
+        ],
+      ]),
+    );
   });
 });

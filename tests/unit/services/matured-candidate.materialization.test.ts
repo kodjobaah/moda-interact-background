@@ -43,16 +43,23 @@ const hoisted = vi.hoisted(() => {
       },
       recoveryOutreachAttempt: {
         findFirst: vi.fn(async () => null),
-        upsert: vi.fn(async ({ create }: { create: Record<string, unknown> }) => ({
-          id: "attempt-1",
-          status: "PENDING",
-          ...create,
-        })),
+        upsert: vi.fn(
+          async ({ create }: { create: Record<string, unknown> }) => ({
+            id: "attempt-1",
+            status: "PENDING",
+            ...create,
+          }),
+        ),
         updateMany: vi.fn(async () => ({ count: 1 })),
-        update: vi.fn(async ({ where, data }: {
-          where: { id: string };
-          data: Record<string, unknown>;
-        }) => ({ id: where.id, ...data })),
+        update: vi.fn(
+          async ({
+            where,
+            data,
+          }: {
+            where: { id: string };
+            data: Record<string, unknown>;
+          }) => ({ id: where.id, ...data }),
+        ),
       },
       conversation: {
         upsert: vi.fn(),
@@ -84,22 +91,45 @@ const hoisted = vi.hoisted(() => {
     },
     conversationMessageServiceMock: {
       buildRecoveryTemplateDescriptor: vi.fn(
-        ({ purpose, templateName, canonicalLanguageTag, providerLanguageCode }) =>
+        ({
+          purpose,
+          templateName,
+          canonicalLanguageTag,
+          providerLanguageCode,
+        }) =>
           `[WhatsApp template sent; purpose=${purpose}; template=${templateName}; canonicalLanguage=${canonicalLanguageTag}; providerLanguage=${providerLanguageCode}]`,
       ),
     },
     whatsAppServiceMock: {
       sendWhatsAppText: vi.fn(async () => ({ providerMessageId: "wamid-1" })),
-      sendWhatsAppTemplate: vi.fn(async () => ({ providerMessageId: "wamid-1" })),
+      sendWhatsAppTemplate: vi.fn(async () => ({
+        providerMessageId: "wamid-1",
+      })),
       getProviderAccountId: vi.fn(() => "provider-account-1"),
     },
     outboundWhatsAppAdmissionServiceMock: {
       getProviderAccountId: vi.fn(() => "provider-account-1"),
-      reserve: vi.fn(async () => ({ kind: "admitted", messageId: "message-1" })),
-      resumeInitialTemplate: vi.fn(async (input: { template: { to: string; templateName: string; languageCode: string } }) => {
-        await hoisted.outboundWhatsAppAdmissionServiceMock.sendTemplate({ conversationId: "conversation-recovery-1", content: "", ...input.template });
-        return { kind: "admitted", messageId: "message-1", conversationId: "conversation-recovery-1", terminal: false };
-      }),
+      reserve: vi.fn(async () => ({
+        kind: "admitted",
+        messageId: "message-1",
+      })),
+      resumeInitialTemplate: vi.fn(
+        async (input: {
+          template: { to: string; templateName: string; languageCode: string };
+        }) => {
+          await hoisted.outboundWhatsAppAdmissionServiceMock.sendTemplate({
+            conversationId: "conversation-recovery-1",
+            content: "",
+            ...input.template,
+          });
+          return {
+            kind: "admitted",
+            messageId: "message-1",
+            conversationId: "conversation-recovery-1",
+            terminal: false,
+          };
+        },
+      ),
       inspectInitialOutreachAdmission: vi.fn(async () => ({ kind: "absent" })),
       findExistingAdmission: vi.fn(async () => ({
         id: "message-1",
@@ -107,19 +137,27 @@ const hoisted = vi.hoisted(() => {
         status: "SENT",
         sentAt: new Date("2026-09-16T10:00:00Z"),
       })),
-      sendTemplate: vi.fn(async (input: { conversationId: string; content: string; to: string; templateName: string; languageCode: string }) => {
-        await hoisted.whatsAppServiceMock.sendWhatsAppTemplate({
-          to: input.to,
-          templateName: input.templateName,
-          languageCode: input.languageCode,
-        });
-        return {
-          kind: "admitted" as const,
-          messageId: "message-1",
-          conversationId: input.conversationId,
-          terminal: false,
-        };
-      }),
+      sendTemplate: vi.fn(
+        async (input: {
+          conversationId: string;
+          content: string;
+          to: string;
+          templateName: string;
+          languageCode: string;
+        }) => {
+          await hoisted.whatsAppServiceMock.sendWhatsAppTemplate({
+            to: input.to,
+            templateName: input.templateName,
+            languageCode: input.languageCode,
+          });
+          return {
+            kind: "admitted" as const,
+            messageId: "message-1",
+            conversationId: input.conversationId,
+            terminal: false,
+          };
+        },
+      ),
     },
     automatedTemplateMock: {
       prepare: vi.fn(),
@@ -134,17 +172,28 @@ const hoisted = vi.hoisted(() => {
           policy: { shopId: "shop_1" },
         },
       })),
-      revalidateBeforeProvider: vi.fn(async (input: { admission: unknown }) => ({
-        kind: "admitted" as const,
-        admission: input.admission,
+      revalidateBeforeProvider: vi.fn(
+        async (input: { admission: unknown }) => ({
+          kind: "admitted" as const,
+          admission: input.admission,
+        }),
+      ),
+      revalidateExistingInitialOutreach: vi.fn(async () => ({
+        kind: "absent",
       })),
-      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "absent" })),
-      settleConfirmedInitialOutreach: vi.fn(async () => ({ kind: "settled", outboundMessageId: "message-1", sentAt: new Date("2026-09-16T10:00:00Z") })),
+      settleConfirmedInitialOutreach: vi.fn(async () => ({
+        kind: "settled",
+        outboundMessageId: "message-1",
+        sentAt: new Date("2026-09-16T10:00:00Z"),
+      })),
       handleProviderFailure: vi.fn(async () => "definitive" as const),
       releaseBeforeProvider: vi.fn(async () => undefined),
     },
     executionEligibilityMock: {
-      evaluate: vi.fn(async () => ({ allowed: true as const, shopId: "shop_1" })),
+      evaluate: vi.fn(async () => ({
+        allowed: true as const,
+        shopId: "shop_1",
+      })),
     },
   };
 });
@@ -161,7 +210,10 @@ const { automatedTemplateMock } = hoisted;
 const { recoveryBillingServiceMock } = hoisted;
 const { executionEligibilityMock } = hoisted;
 
-vi.mock("../../../src/services/recovery-sender-pool/sender-pool.service.js", () => ({ recoverySenderPoolService: hoisted.senderPoolMock }));
+vi.mock(
+  "../../../src/services/recovery-sender-pool/sender-pool.service.js",
+  () => ({ recoverySenderPoolService: hoisted.senderPoolMock }),
+);
 
 vi.mock("../../../src/lib/db.js", () => ({
   default: hoisted.prismaMock,
@@ -177,16 +229,29 @@ vi.mock("../../../src/services/abandoned-checkout-lookup.service.js", () => ({
   abandonedCheckoutLookupService: hoisted.lookupServiceMock,
 }));
 
-vi.mock("../../../src/services/shopify-whatsapp-consent/phone-resolution.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../../src/services/shopify-whatsapp-consent/phone-resolution.js")>(),
-  selectStoredShopifyCheckoutPhone: hoisted.storedPhone,
-}));
-vi.mock("../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
-  recoveryShopifyCustomerService: { resolve: hoisted.customerServiceMock.resolveCustomer },
-}));
-vi.mock("../../../src/services/checkout-recovery/recovery-consent-admission.service.js", () => ({
-  recoveryConsentAdmissionService: hoisted.consentAdmissionMock,
-}));
+vi.mock(
+  "../../../src/services/shopify-whatsapp-consent/phone-resolution.js",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("../../../src/services/shopify-whatsapp-consent/phone-resolution.js")
+    >()),
+    selectStoredShopifyCheckoutPhone: hoisted.storedPhone,
+  }),
+);
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-shopify-customer.service.js",
+  () => ({
+    recoveryShopifyCustomerService: {
+      resolve: hoisted.customerServiceMock.resolveCustomer,
+    },
+  }),
+);
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-consent-admission.service.js",
+  () => ({
+    recoveryConsentAdmissionService: hoisted.consentAdmissionMock,
+  }),
+);
 vi.mock("../../../src/services/customer.phone.service.js", () => ({
   customerPhoneService: hoisted.customerPhoneServiceMock,
 }));
@@ -200,28 +265,50 @@ vi.mock("../../../src/services/whatsapp.service.js", () => ({
   whatsAppService: hoisted.whatsAppServiceMock,
 }));
 vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
-  outboundWhatsAppAdmissionService: hoisted.outboundWhatsAppAdmissionServiceMock,
+  outboundWhatsAppAdmissionService:
+    hoisted.outboundWhatsAppAdmissionServiceMock,
 }));
-vi.mock("../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
-  automatedRecoveryTemplateService: hoisted.automatedTemplateMock,
-}));
+vi.mock(
+  "../../../src/services/recovery-template-integration/automated-recovery-template.service.js",
+  () => ({
+    automatedRecoveryTemplateService: hoisted.automatedTemplateMock,
+  }),
+);
 // This suite exercises materialisation, admission and send orchestration, not
 // the platform-configuration reader. Provide the actual resolved policy shape.
-vi.mock("../../../src/services/recovery-policy.service.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../../src/services/recovery-policy.service.js")>(),
-  recoveryPolicyService: { resolve: vi.fn(async () => ({
-    recoveryDelayMinutes: 30, recoveryOfferMode: "NONE", fixedShopifyDiscountId: null,
-    followUpEnabled: false, followUpDelayMinutes: null, source: "MERCHANT", offerSnapshot: null,
-  })) },
-}));
+vi.mock(
+  "../../../src/services/recovery-policy.service.js",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("../../../src/services/recovery-policy.service.js")
+    >()),
+    recoveryPolicyService: {
+      resolve: vi.fn(async () => ({
+        recoveryDelayMinutes: 30,
+        recoveryOfferMode: "NONE",
+        fixedShopifyDiscountId: null,
+        followUpEnabled: false,
+        followUpDelayMinutes: null,
+        source: "MERCHANT",
+        offerSnapshot: null,
+      })),
+    },
+  }),
+);
 vi.mock("../../../src/services/recovery-billing.service.js", () => ({
   recoveryBillingService: hoisted.recoveryBillingServiceMock,
 }));
-vi.mock("../../../src/services/checkout-recovery/recovery-initial-outreach-support-notice.service.js", () => ({
-  recoveryInitialOutreachSupportNoticeService: {
-    finalizeConfirmedInitial: vi.fn(async () => ({ outcome: "disabled", outreachAttemptId: "attempt-1" })),
-  },
-}));
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-initial-outreach-support-notice.service.js",
+  () => ({
+    recoveryInitialOutreachSupportNoticeService: {
+      finalizeConfirmedInitial: vi.fn(async () => ({
+        outcome: "disabled",
+        outreachAttemptId: "attempt-1",
+      })),
+    },
+  }),
+);
 vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
   shopExecutionEligibilityService: hoisted.executionEligibilityMock,
 }));
@@ -239,8 +326,17 @@ function preparedTemplateResult(
 ) {
   return {
     kind: "prepared" as const,
-    prepared: { purpose, providerTemplateName, canonicalLanguageTag, providerLanguageCode },
-    admissionToken: { shopId: "shop_1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1" },
+    prepared: {
+      purpose,
+      providerTemplateName,
+      canonicalLanguageTag,
+      providerLanguageCode,
+    },
+    admissionToken: {
+      shopId: "shop_1",
+      checkoutRecoveryId: "recovery-1",
+      outreachAttemptId: "attempt-1",
+    },
     send: {
       templateName: providerTemplateName,
       languageCode: providerLanguageCode,
@@ -307,15 +403,30 @@ const recoverableCheckout = {
 describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    executionEligibilityMock.evaluate.mockResolvedValue({ allowed: true, shopId: "shop_1" });
-    customerServiceMock.resolveCustomer.mockResolvedValue({ id: "customer_1" } as never);
-    hoisted.storedPhone.mockReset().mockResolvedValue({ customerId: "customer_1", customerPhoneId: "phone_1",
-      recipient: "15551234567", source: "customer" });
-    prismaMock.customer.findFirst.mockReset().mockResolvedValue({ id: "customer_1", shopId: "shop_1" });
+    executionEligibilityMock.evaluate.mockResolvedValue({
+      allowed: true,
+      shopId: "shop_1",
+    });
+    customerServiceMock.resolveCustomer.mockResolvedValue({
+      id: "customer_1",
+    } as never);
+    hoisted.storedPhone.mockReset().mockResolvedValue({
+      customerId: "customer_1",
+      customerPhoneId: "phone_1",
+      recipient: "15551234567",
+      source: "customer",
+    });
+    prismaMock.customer.findFirst
+      .mockReset()
+      .mockResolvedValue({ id: "customer_1", shopId: "shop_1" });
     hoisted.consentAdmissionMock.evaluateFirst.mockResolvedValue(true);
     hoisted.consentAdmissionMock.evaluateReentry.mockResolvedValue(true);
-    hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValue({ phone: "+15551234567" } as never);
-    automatedTemplateMock.prepare.mockResolvedValue(preparedTemplateResult() as never);
+    hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValue({
+      phone: "+15551234567",
+    } as never);
+    automatedTemplateMock.prepare.mockResolvedValue(
+      preparedTemplateResult() as never,
+    );
     automatedTemplateMock.validateAdmission.mockResolvedValue(true);
     whatsAppServiceMock.sendWhatsAppTemplate.mockResolvedValue({
       providerMessageId: "wamid-1",
@@ -338,7 +449,9 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       kind: "found",
       checkout: recoverableCheckout,
     });
-    prismaMock.checkoutRecovery.findFirst.mockImplementation(async (args) => prismaMock.checkoutRecovery.findUnique(args));
+    prismaMock.checkoutRecovery.findFirst.mockImplementation(async (args) =>
+      prismaMock.checkoutRecovery.findUnique(args),
+    );
     prismaMock.checkoutRecovery.create.mockImplementation(async ({ data }) => ({
       ...data,
       id: "recovery-1",
@@ -374,7 +487,9 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(call.data.currency).toBe("USD");
     expect(call.data.totalPrice).toBe("49.99");
     expect(call.data.localTotal).toBeUndefined();
-    expect(call.data.checkoutUrl).toBe(recoverableCheckout.abandonedCheckoutUrl);
+    expect(call.data.checkoutUrl).toBe(
+      recoverableCheckout.abandonedCheckoutUrl,
+    );
     expect(call.data.lineItems[0].title).toBe("Teal Dress");
     expect(call.data.lineItems[0].quantity).toBe(2);
 
@@ -398,7 +513,10 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   it("returns admission-denied and never creates recovery when the current checkout lacks consent", async () => {
     hoisted.consentAdmissionMock.evaluateFirst.mockResolvedValue(false);
     const result = await service.materializeMaturedCandidate(candidate);
-    expect(result).toEqual({ outcome: "discarded-admission-denied", checkoutToken: candidate.checkoutToken });
+    expect(result).toEqual({
+      outcome: "discarded-admission-denied",
+      checkoutToken: candidate.checkoutToken,
+    });
     expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
@@ -409,11 +527,16 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     const result = await service.materializeMaturedCandidate(candidate);
 
-    expect(result).toEqual({ outcome: "deferred-no-recipient", checkoutToken: candidate.checkoutToken });
+    expect(result).toEqual({
+      outcome: "deferred-no-recipient",
+      checkoutToken: candidate.checkoutToken,
+    });
     expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.update).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
-    expect(recoveryBillingServiceMock.settleConfirmedInitialOutreach).not.toHaveBeenCalled();
+    expect(
+      recoveryBillingServiceMock.settleConfirmedInitialOutreach,
+    ).not.toHaveBeenCalled();
     expect(outboundWhatsAppAdmissionServiceMock.reserve).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
@@ -433,7 +556,9 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.update).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
-    expect(recoveryBillingServiceMock.settleConfirmedInitialOutreach).not.toHaveBeenCalled();
+    expect(
+      recoveryBillingServiceMock.settleConfirmedInitialOutreach,
+    ).not.toHaveBeenCalled();
     expect(outboundWhatsAppAdmissionServiceMock.reserve).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
@@ -453,8 +578,13 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     };
     let candidateData = tokenOnlyCandidate;
     const activityService = new PendingRecoveryCandidateActivityService({
-      resolveCandidate: vi.fn(async () => ({ jobId: "candidate-job-1", candidate: candidateData })),
-      withCheckoutLock: vi.fn(async (_shopId, _checkoutToken, callback) => callback()),
+      resolveCandidate: vi.fn(async () => ({
+        jobId: "candidate-job-1",
+        candidate: candidateData,
+      })),
+      withCheckoutLock: vi.fn(async (_shopId, _checkoutToken, callback) =>
+        callback(),
+      ),
       cancelCandidate: vi.fn(async () => undefined),
       resolveDelayMinutes: vi.fn(async () => 30),
       getQueue: vi.fn(() => ({ getJob: vi.fn(async () => job) })),
@@ -475,34 +605,43 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       activityAt: "2026-08-28T11:59:00.000Z",
       isEmpty: false,
     });
-    if (enrichment.outcome !== "stale") throw new Error("Expected stale activity enrichment");
+    if (enrichment.outcome !== "stale")
+      throw new Error("Expected stale activity enrichment");
     candidateData = enrichment.candidate;
 
-    expect(job.updateData).toHaveBeenCalledWith(expect.objectContaining({
-      cartToken: "cart_1",
-      checkoutCreatedAt: "2026-08-28T11:00:00.000Z",
-      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",
-      lastActivityAt: "2026-08-28T12:00:00.000Z",
-    }));
+    expect(job.updateData).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cartToken: "cart_1",
+        checkoutCreatedAt: "2026-08-28T11:00:00.000Z",
+        abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",
+        lastActivityAt: "2026-08-28T12:00:00.000Z",
+      }),
+    );
     expect(job.changeDelay).not.toHaveBeenCalled();
 
     const result = await service.materializeMaturedCandidate(candidateData);
 
     expect(result.outcome).toBe("recovery-created");
-    expect(lookupServiceMock.lookup).toHaveBeenCalledWith(expect.objectContaining({
-      checkoutToken: candidate.checkoutToken,
-      cartToken: "cart_1",
-      checkoutCreatedAt: "2026-08-28T11:00:00.000Z",
-      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",
-    }));
+    expect(lookupServiceMock.lookup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        checkoutToken: candidate.checkoutToken,
+        cartToken: "cart_1",
+        checkoutCreatedAt: "2026-08-28T11:00:00.000Z",
+        abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",
+      }),
+    );
   });
 
   it("does not initiate a matured job after newer checkout activity indexed a successor", async () => {
     redisMock.get.mockImplementation(async (key: string) =>
-      key.startsWith("pending-recovery:index:checkout:") ? "successor-job" : null,
+      key.startsWith("pending-recovery:index:checkout:")
+        ? "successor-job"
+        : null,
     );
 
-    const result = await service.materializeMaturedCandidate(candidate, { jobId: "matured-job" });
+    const result = await service.materializeMaturedCandidate(candidate, {
+      jobId: "matured-job",
+    });
 
     expect(result).toEqual({
       outcome: "discarded-superseded",
@@ -517,25 +656,41 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   });
 
   it("uses current CustomerPhone when the checkout snapshot has no phone", async () => {
-    hoisted.storedPhone.mockResolvedValueOnce({ customerId: "customer_1", customerPhoneId: "phone_1",
-      recipient: "442079460958", source: "previous" });
+    hoisted.storedPhone.mockResolvedValueOnce({
+      customerId: "customer_1",
+      customerPhoneId: "phone_1",
+      recipient: "442079460958",
+      source: "previous",
+    });
     lookupServiceMock.lookup.mockResolvedValueOnce({
       kind: "found",
-      checkout: { ...recoverableCheckout, customer: { ...recoverableCheckout.customer, phone: null } },
+      checkout: {
+        ...recoverableCheckout,
+        customer: { ...recoverableCheckout.customer, phone: null },
+      },
     });
 
     await service.materializeMaturedCandidate(candidate);
 
-    expect(hoisted.storedPhone).toHaveBeenCalledWith(expect.objectContaining({ shopId: "shop_1" }));
-    expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({ where: { id: "customer_1", shopId: "shop_1" } });
-    expect(hoisted.customerPhoneServiceMock.getCurrentPhone).not.toHaveBeenCalled();
+    expect(hoisted.storedPhone).toHaveBeenCalledWith(
+      expect.objectContaining({ shopId: "shop_1" }),
+    );
+    expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({
+      where: { id: "customer_1", shopId: "shop_1" },
+    });
+    expect(
+      hoisted.customerPhoneServiceMock.getCurrentPhone,
+    ).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledWith(
       expect.objectContaining({ to: "442079460958" }),
     );
   });
 
   it("discards an inactive matured candidate before resolving Shopify data", async () => {
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "UNINSTALLED",
+    });
     executionEligibilityMock.evaluate.mockResolvedValueOnce({
       allowed: false,
       shopId: "shop_1",
@@ -552,18 +707,19 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.upsert).not.toHaveBeenCalled();
-    expect(conversationServiceMock.getOrCreateRecoveryConversation).not.toHaveBeenCalled();
+    expect(
+      conversationServiceMock.getOrCreateRecoveryConversation,
+    ).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("rechecks matured candidate after checkout-lock acquisition", async () => {
-    executionEligibilityMock.evaluate
-      .mockResolvedValueOnce({
-        allowed: false,
-        shopId: "shop_1",
-        reason: "CONTRACT_REQUIRED",
-      });
+    executionEligibilityMock.evaluate.mockResolvedValueOnce({
+      allowed: false,
+      shopId: "shop_1",
+      reason: "CONTRACT_REQUIRED",
+    });
 
     const result = await service.materializeMaturedCandidate(candidate);
 
@@ -572,7 +728,9 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       checkoutToken: "checkout_1",
       reason: "CONTRACT_REQUIRED",
     });
-    expect(redisMock.set.mock.invocationCallOrder[0]).toBeLessThan(executionEligibilityMock.evaluate.mock.invocationCallOrder[0]);
+    expect(redisMock.set.mock.invocationCallOrder[0]).toBeLessThan(
+      executionEligibilityMock.evaluate.mock.invocationCallOrder[0],
+    );
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.upsert).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
@@ -580,7 +738,12 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
   it("routes provider-check-required templates through existing provider admission", async () => {
     automatedTemplateMock.prepare.mockResolvedValueOnce(
-      preparedTemplateResult("checkout_recovery_fr_ca", "fr-CA", "fr_CA_CUSTOM", "INITIAL_NO_OFFER") as never,
+      preparedTemplateResult(
+        "checkout_recovery_fr_ca",
+        "fr-CA",
+        "fr_CA_CUSTOM",
+        "INITIAL_NO_OFFER",
+      ) as never,
     );
 
     await service.materializeMaturedCandidate(candidate);
@@ -598,14 +761,20 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     const result = await service.materializeMaturedCandidate(candidate);
 
     expect(result.outcome).toBe("recovery-created");
-    expect(recoveryBillingServiceMock.settleConfirmedInitialOutreach).not.toHaveBeenCalled();
+    expect(
+      recoveryBillingServiceMock.settleConfirmedInitialOutreach,
+    ).not.toHaveBeenCalled();
     expect(outboundWhatsAppAdmissionServiceMock.reserve).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("persists a truthful descriptor for a selected non-English template", async () => {
     automatedTemplateMock.prepare.mockResolvedValueOnce(
-      preparedTemplateResult("checkout_recovery_fr_ca", "fr-CA", "fr_CA_CUSTOM") as never,
+      preparedTemplateResult(
+        "checkout_recovery_fr_ca",
+        "fr-CA",
+        "fr_CA_CUSTOM",
+      ) as never,
     );
 
     await service.materializeMaturedCandidate(candidate);
@@ -626,22 +795,28 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
         ),
       }),
     );
-    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate.mock.calls[0]?.[0]?.content).not.toContain(
-      "Hello!",
-    );
+    expect(
+      outboundWhatsAppAdmissionServiceMock.sendTemplate.mock.calls[0]?.[0]
+        ?.content,
+    ).not.toContain("Hello!");
   });
 
   it.each([
     { kind: "unavailable", reason: "no-approved-variant" },
     { kind: "unavailable", reason: "unsupported-market" },
-  ] as const)("does not send when preparation is bounded as $reason", async (preparation) => {
-    automatedTemplateMock.prepare.mockResolvedValueOnce(preparation as never);
+  ] as const)(
+    "does not send when preparation is bounded as $reason",
+    async (preparation) => {
+      automatedTemplateMock.prepare.mockResolvedValueOnce(preparation as never);
 
-    await service.materializeMaturedCandidate(candidate);
+      await service.materializeMaturedCandidate(candidate);
 
-    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
-    expect(outboundWhatsAppAdmissionServiceMock.reserve).not.toHaveBeenCalled();
-  });
+      expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+      expect(
+        outboundWhatsAppAdmissionServiceMock.reserve,
+      ).not.toHaveBeenCalled();
+    },
+  );
 
   it("retains a definitive provider rejection for durable admission reconciliation", async () => {
     whatsAppServiceMock.sendWhatsAppTemplate.mockRejectedValue(
@@ -651,11 +826,15 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       }),
     );
 
-    await expect(service.materializeMaturedCandidate(candidate)).rejects.toThrow(
-      "bounded provider rejection",
-    );
-    expect(outboundWhatsAppAdmissionServiceMock.inspectInitialOutreachAdmission).toHaveBeenCalledTimes(2);
-    expect(recoveryBillingServiceMock.settleConfirmedInitialOutreach).not.toHaveBeenCalled();
+    await expect(
+      service.materializeMaturedCandidate(candidate),
+    ).rejects.toThrow("bounded provider rejection");
+    expect(
+      outboundWhatsAppAdmissionServiceMock.inspectInitialOutreachAdmission,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      recoveryBillingServiceMock.settleConfirmedInitialOutreach,
+    ).not.toHaveBeenCalled();
   });
 
   it.each(["free", "paid"] as const)(
@@ -679,12 +858,16 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
         }),
       );
 
-      await expect(service.materializeMaturedCandidate(candidate)).rejects.toThrow(
-        "malformed response",
-      );
+      await expect(
+        service.materializeMaturedCandidate(candidate),
+      ).rejects.toThrow("malformed response");
 
-      expect(outboundWhatsAppAdmissionServiceMock.inspectInitialOutreachAdmission).toHaveBeenCalledTimes(2);
-      expect(recoveryBillingServiceMock.settleConfirmedInitialOutreach).not.toHaveBeenCalled();
+      expect(
+        outboundWhatsAppAdmissionServiceMock.inspectInitialOutreachAdmission,
+      ).toHaveBeenCalledTimes(2);
+      expect(
+        recoveryBillingServiceMock.settleConfirmedInitialOutreach,
+      ).not.toHaveBeenCalled();
     },
   );
 
@@ -699,7 +882,10 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   });
 
   it("discards and does not create a recovery for an ambiguous lookup", async () => {
-    lookupServiceMock.lookup.mockResolvedValue({ kind: "ambiguous", matched: 2 });
+    lookupServiceMock.lookup.mockResolvedValue({
+      kind: "ambiguous",
+      matched: 2,
+    });
 
     const result = await service.materializeMaturedCandidate(candidate);
 
@@ -736,7 +922,10 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
   it("does not reopen an existing terminal recovery", async () => {
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
-      id: "recovery-1", shopId: "shop_1", generation: 1, status: "COMPLETED",
+      id: "recovery-1",
+      shopId: "shop_1",
+      generation: 1,
+      status: "COMPLETED",
     });
 
     const result = await service.materializeMaturedCandidate(candidate);
@@ -748,7 +937,10 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
   it("does not re-run the message workflow when the recovery already exists and is active", async () => {
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
-      id: "recovery-1", shopId: "shop_1", generation: 1, status: "MESSAGE_SENT",
+      id: "recovery-1",
+      shopId: "shop_1",
+      generation: 1,
+      status: "MESSAGE_SENT",
     });
 
     const result = await service.materializeMaturedCandidate(candidate);
@@ -760,15 +952,32 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
   it("reconciles a confirmed initial send on a detected recovery without sending again", async () => {
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
-      id: "recovery-1", shopId: "shop_1", generation: 1, status: "DETECTED",
+      id: "recovery-1",
+      shopId: "shop_1",
+      generation: 1,
+      status: "DETECTED",
     });
     prismaMock.recoveryOutreachAttempt.findFirst.mockResolvedValueOnce({
-      id: "attempt-1", checkoutRecoveryId: "recovery-1", sequence: 1, trigger: "INITIAL",
-      status: "PENDING", sentAt: null, outboundMessageId: null, followUpDueAt: null,
+      id: "attempt-1",
+      checkoutRecoveryId: "recovery-1",
+      sequence: 1,
+      trigger: "INITIAL",
+      status: "PENDING",
+      sentAt: null,
+      outboundMessageId: null,
+      followUpDueAt: null,
     } as never);
-    outboundWhatsAppAdmissionServiceMock.inspectInitialOutreachAdmission.mockResolvedValueOnce({
-      kind: "confirmed", message: { id: "message-1", conversationId: "conversation-recovery-1", status: "SENT", sentAt: new Date("2026-09-16T10:00:00Z") },
-    } as never);
+    outboundWhatsAppAdmissionServiceMock.inspectInitialOutreachAdmission.mockResolvedValueOnce(
+      {
+        kind: "confirmed",
+        message: {
+          id: "message-1",
+          conversationId: "conversation-recovery-1",
+          status: "SENT",
+          sentAt: new Date("2026-09-16T10:00:00Z"),
+        },
+      } as never,
+    );
 
     const result = await service.materializeMaturedCandidate(candidate);
 
@@ -777,7 +986,9 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
     expect(outboundWhatsAppAdmissionServiceMock.reserve).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
-    expect(recoveryBillingServiceMock.settleConfirmedInitialOutreach).toHaveBeenCalledOnce();
+    expect(
+      recoveryBillingServiceMock.settleConfirmedInitialOutreach,
+    ).toHaveBeenCalledOnce();
   });
 
   it("does not send or commit when billing revalidation blocks the admission", async () => {
@@ -789,9 +1000,13 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     const result = await service.materializeMaturedCandidate(candidate);
 
     expect(result.outcome).toBe("recovery-created");
-    expect(recoveryBillingServiceMock.revalidateBeforeProvider).toHaveBeenCalledOnce();
+    expect(
+      recoveryBillingServiceMock.revalidateBeforeProvider,
+    ).toHaveBeenCalledOnce();
     expect(outboundWhatsAppAdmissionServiceMock.reserve).not.toHaveBeenCalled();
-    expect(recoveryBillingServiceMock.settleConfirmedInitialOutreach).not.toHaveBeenCalled();
+    expect(
+      recoveryBillingServiceMock.settleConfirmedInitialOutreach,
+    ).not.toHaveBeenCalled();
   });
 
   it("admits the fifth Free recovery and blocks the next distinct recovery before send", async () => {
@@ -805,11 +1020,18 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
           policy: { shopId: "shop_1" },
         },
       })
-      .mockResolvedValueOnce({ kind: "blocked", reason: "allowance-exhausted" });
+      .mockResolvedValueOnce({
+        kind: "blocked",
+        reason: "allowance-exhausted",
+      });
     recoveryBillingServiceMock.settleConfirmedInitialOutreach.mockImplementationOnce(
       async () => {
         committed += 1;
-        return { kind: "settled", outboundMessageId: "message-1", sentAt: new Date("2026-09-16T10:00:00Z") };
+        return {
+          kind: "settled",
+          outboundMessageId: "message-1",
+          sentAt: new Date("2026-09-16T10:00:00Z"),
+        };
       },
     );
 
@@ -826,13 +1048,19 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(fifth.outcome).toBe("recovery-created");
     expect(next.outcome).toBe("recovery-created");
     expect(recoveryBillingServiceMock.admit).toHaveBeenCalledTimes(2);
-    expect(recoveryBillingServiceMock.settleConfirmedInitialOutreach).toHaveBeenCalledTimes(1);
+    expect(
+      recoveryBillingServiceMock.settleConfirmedInitialOutreach,
+    ).toHaveBeenCalledTimes(1);
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledTimes(1);
     expect(prismaMock.checkoutRecovery.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: "MESSAGE_SENT" }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "MESSAGE_SENT" }),
+      }),
     );
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: "CANCELLED" }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "CANCELLED" }),
+      }),
     );
   });
 
@@ -851,14 +1079,16 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       shopId: "shop_1",
       status: "MESSAGE_SENT",
       generation: 1,
-      outreachAttempts: [{
-        id: "recovery-outreach:recovery-1:1",
-        sequence: 1,
-        status: "WAITING_FOR_RESPONSE",
-        sentAt: new Date("2026-09-16T10:00:00Z"),
-        followUpDueAt: null,
-        customerRespondedAt: null,
-      }],
+      outreachAttempts: [
+        {
+          id: "recovery-outreach:recovery-1:1",
+          sequence: 1,
+          status: "WAITING_FOR_RESPONSE",
+          sentAt: new Date("2026-09-16T10:00:00Z"),
+          followUpDueAt: null,
+          customerRespondedAt: null,
+        },
+      ],
     });
     const duplicate = await service.materializeMaturedCandidate({
       ...candidate,
@@ -868,7 +1098,9 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(first.outcome).toBe("recovery-created");
     expect(duplicate.outcome).toBe("no-op-existing");
     expect(recoveryBillingServiceMock.admit).toHaveBeenCalledTimes(1);
-    expect(recoveryBillingServiceMock.settleConfirmedInitialOutreach).toHaveBeenCalledTimes(1);
+    expect(
+      recoveryBillingServiceMock.settleConfirmedInitialOutreach,
+    ).toHaveBeenCalledTimes(1);
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledTimes(1);
   });
 
@@ -953,4 +1185,3 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(whatsAppServiceMock.sendWhatsAppText).not.toHaveBeenCalled();
   });
 });
-

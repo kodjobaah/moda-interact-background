@@ -27,7 +27,9 @@ export async function markLinkedMerchantPricingPlanFailed(
       AND "publicationStatus" = 'TRANSLATING'
   `);
   if (changed !== 1) {
-    throw new Error(`Merchant Pricing draft changed while recording ${input.failureCode}`);
+    throw new Error(
+      `Merchant Pricing draft changed while recording ${input.failureCode}`,
+    );
   }
 }
 
@@ -47,7 +49,9 @@ export async function failReadyMerchantPricingRun(
     WHERE "id" = ${input.runId} AND "status" = 'READY_TO_APPLY'
   `);
   if (runChanged !== 1) {
-    throw new Error("Merchant Pricing translation run changed during automatic finalisation");
+    throw new Error(
+      "Merchant Pricing translation run changed during automatic finalisation",
+    );
   }
   await markLinkedMerchantPricingPlanFailed(transaction, input);
 }

@@ -66,14 +66,16 @@ function harness(reservedAmount: number, currentAmount: number) {
           version: 3,
         },
       }),
-      findMany: vi.fn().mockResolvedValue([{
-        purchaseId: "purchase-1",
-        purchase: {
-          status: RecoveryCreditPurchaseStatus.WITHDRAWN,
-          currentAmount,
-          reservedAmount,
+      findMany: vi.fn().mockResolvedValue([
+        {
+          purchaseId: "purchase-1",
+          purchase: {
+            status: RecoveryCreditPurchaseStatus.WITHDRAWN,
+            currentAmount,
+            reservedAmount,
+          },
         },
-      }]),
+      ]),
       updateMany: updateRefund,
     },
     recoveryCreditPurchase: { updateMany: updatePurchase },
@@ -88,7 +90,9 @@ function harness(reservedAmount: number, currentAmount: number) {
     },
   };
   const database = {
-    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(transaction)),
+    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback(transaction),
+    ),
   };
   return {
     database,
@@ -103,10 +107,13 @@ function harness(reservedAmount: number, currentAmount: number) {
 describe("WooRefundHoldPreparationService", () => {
   it("retries a serialization conflict and then prepares the hold", async () => {
     const test = harness(0, 7);
-    const conflict = new Prisma.PrismaClientKnownRequestError("serialization conflict", {
-      code: "P2034",
-      clientVersion: "test",
-    });
+    const conflict = new Prisma.PrismaClientKnownRequestError(
+      "serialization conflict",
+      {
+        code: "P2034",
+        clientVersion: "test",
+      },
+    );
     test.database.$transaction.mockRejectedValueOnce(conflict);
 
     await expect(test.service.prepare(refund())).resolves.toBe("prepared");
@@ -115,10 +122,13 @@ describe("WooRefundHoldPreparationService", () => {
 
   it("leaves the request retryable after bounded serialization conflicts", async () => {
     const test = harness(0, 7);
-    const conflict = new Prisma.PrismaClientKnownRequestError("serialization conflict", {
-      code: "P2034",
-      clientVersion: "test",
-    });
+    const conflict = new Prisma.PrismaClientKnownRequestError(
+      "serialization conflict",
+      {
+        code: "P2034",
+        clientVersion: "test",
+      },
+    );
     test.database.$transaction.mockRejectedValue(conflict);
 
     await expect(test.service.prepare(refund())).rejects.toBe(conflict);
@@ -140,33 +150,44 @@ describe("WooRefundHoldPreparationService", () => {
     const test = harness(0, 0);
 
     await expect(test.service.prepare(refund())).resolves.toBe("cancelled");
-    expect(test.updateRefund).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status: RecoveryCreditRefundStatus.CANCELLED,
-        reason: "NO_CREDITS_REMAINING",
+    expect(test.updateRefund).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: RecoveryCreditRefundStatus.CANCELLED,
+          reason: "NO_CREDITS_REMAINING",
+        }),
       }),
-    }));
-    expect(test.updateCounter).toHaveBeenCalledWith(expect.objectContaining({
-      data: { refundingQuantity: { decrement: 4 }, version: { increment: 1 } },
-    }));
+    );
+    expect(test.updateCounter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          refundingQuantity: { decrement: 4 },
+          version: { increment: 1 },
+        },
+      }),
+    );
   });
 
   it("freezes the remaining credits and expands the hold after reservations release", async () => {
     const test = harness(0, 7);
 
     await expect(test.service.prepare(refund())).resolves.toBe("prepared");
-    expect(test.updateRefund).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        finalCreditQuantity: 7,
-        expectedProviderAmount: null,
-        expectedProviderCurrency: null,
-        status: RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED,
-        reason: "WOO_VENDOR_DASHBOARD_REFUND_REQUIRED",
+    expect(test.updateRefund).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          finalCreditQuantity: 7,
+          expectedProviderAmount: null,
+          expectedProviderCurrency: null,
+          status: RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED,
+          reason: "WOO_VENDOR_DASHBOARD_REFUND_REQUIRED",
+        }),
       }),
-    }));
-    expect(test.updateCounter).toHaveBeenCalledWith(expect.objectContaining({
-      data: { version: { increment: 1 } },
-    }));
+    );
+    expect(test.updateCounter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { version: { increment: 1 } },
+      }),
+    );
     expect(test.updatePurchase).toHaveBeenCalledOnce();
   });
 
@@ -174,9 +195,13 @@ describe("WooRefundHoldPreparationService", () => {
     const test = harness(0, 7);
 
     await expect(test.service.prepare(refund())).resolves.toBe("prepared");
-    expect(test.updateCounter).toHaveBeenCalledWith(expect.objectContaining({
-      data: { version: { increment: 1 } },
-    }));
-    expect(test.updateCounter.mock.calls[0]?.[0].data).not.toHaveProperty("refundingQuantity");
+    expect(test.updateCounter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { version: { increment: 1 } },
+      }),
+    );
+    expect(test.updateCounter.mock.calls[0]?.[0].data).not.toHaveProperty(
+      "refundingQuantity",
+    );
   });
 });

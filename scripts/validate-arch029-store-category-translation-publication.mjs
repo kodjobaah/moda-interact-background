@@ -3,7 +3,8 @@ import path from "node:path";
 import process from "node:process";
 
 const root = process.cwd();
-const servicePath = "src/services/store-category-translation-publication.service.ts";
+const servicePath =
+  "src/services/store-category-translation-publication.service.ts";
 const service = fs.readFileSync(path.join(root, servicePath), "utf8");
 const entrypoint = fs.readFileSync(
   path.join(root, "src/entrypoints/merchant-communications.ts"),
@@ -24,7 +25,9 @@ const required = [
 ];
 for (const token of required) {
   if (!service.includes(token)) {
-    throw new Error(`ARCH-029 B02 missing required publication token: ${token}`);
+    throw new Error(
+      `ARCH-029 B02 missing required publication token: ${token}`,
+    );
   }
 }
 
@@ -43,8 +46,14 @@ for (const token of forbidden) {
   }
 }
 
-if (!entrypoint.includes("storeCategoryTranslationPublicationService.reconcile")) {
-  throw new Error("Store Category translation publication is not attached to translation reconciliation");
+if (
+  !entrypoint.includes("storeCategoryTranslationPublicationService.reconcile")
+) {
+  throw new Error(
+    "Store Category translation publication is not attached to translation reconciliation",
+  );
 }
 
-console.log("ARCH-029 Store Category translation publication validation passed");
+console.log(
+  "ARCH-029 Store Category translation publication validation passed",
+);

@@ -7,11 +7,17 @@ import { MerchantKnowledgeAcquisitionError } from "../../../src/services/merchan
 import { MerchantKnowledgeUploadedAssetAcquisitionError } from "../../../src/services/merchant-knowledge-uploaded-asset-acquirer.js";
 import { MerchantKnowledgeProcessingService } from "../../../src/services/merchant-knowledge-processing.service.js";
 
-type RevisionStatus = "PENDING" | "PROCESSING" | "ACTIVE" | "FAILED" | "SUPERSEDED";
+type RevisionStatus =
+  "PENDING" | "PROCESSING" | "ACTIVE" | "FAILED" | "SUPERSEDED";
 type Format = { key: string; inputKind: "REMOTE_URL" | "UPLOAD" };
 
 interface FixtureState {
-  source: { id: string; shopId: string; currentGeneration: number; updatedAt: Date };
+  source: {
+    id: string;
+    shopId: string;
+    currentGeneration: number;
+    updatedAt: Date;
+  };
   revision: {
     id: string;
     sourceId: string;
@@ -70,20 +76,22 @@ function eligible(maxContentUnitsPerSource = 20) {
   };
 }
 
-function createFixture(options: {
-  status?: RevisionStatus;
-  sourceGeneration?: number;
-  shopId?: string;
-  inputKind?: "REMOTE_URL" | "UPLOAD";
-  dataFormatKey?: string;
-  requestedUrl?: string | null;
-  uploadedAssetId?: string | null;
-  extractedText?: string;
-  maxContentUnits?: number;
-  eligibilityResults?: ReturnType<typeof eligible>[];
-  embed?: (content: string) => Promise<number[]>;
-  incidentReporter?: { report: (occurrence: unknown) => Promise<unknown> };
-} = {}) {
+function createFixture(
+  options: {
+    status?: RevisionStatus;
+    sourceGeneration?: number;
+    shopId?: string;
+    inputKind?: "REMOTE_URL" | "UPLOAD";
+    dataFormatKey?: string;
+    requestedUrl?: string | null;
+    uploadedAssetId?: string | null;
+    extractedText?: string;
+    maxContentUnits?: number;
+    eligibilityResults?: ReturnType<typeof eligible>[];
+    embed?: (content: string) => Promise<number[]>;
+    incidentReporter?: { report: (occurrence: unknown) => Promise<unknown> };
+  } = {},
+) {
   const state: FixtureState = {
     source: {
       id: "source-1",
@@ -97,9 +105,10 @@ function createFixture(options: {
       uploadedAssetId: options.uploadedAssetId ?? null,
       generation,
       status: options.status ?? "PENDING",
-      requestedUrl: options.requestedUrl === undefined
-        ? "https://merchant.example/faq"
-        : options.requestedUrl,
+      requestedUrl:
+        options.requestedUrl === undefined
+          ? "https://merchant.example/faq"
+          : options.requestedUrl,
       failureCode: null,
       processingStartedAt: null,
       contentType: null,
@@ -128,43 +137,71 @@ function createFixture(options: {
   const matchesStatus = (actual: RevisionStatus, expected: unknown) =>
     typeof expected === "string"
       ? actual === expected
-      : Boolean(expected && "in" in expected && (expected as { in: string[] }).in.includes(actual));
-  const sourceMatches = (where: { source?: { is?: { shopId?: string; currentGeneration?: number } } }) => {
+      : Boolean(
+          expected &&
+          "in" in expected &&
+          (expected as { in: string[] }).in.includes(actual),
+        );
+  const sourceMatches = (where: {
+    source?: { is?: { shopId?: string; currentGeneration?: number } };
+  }) => {
     const expected = where.source?.is;
-    return !expected || (
-      (expected.shopId === undefined || expected.shopId === state.source.shopId)
-      && (expected.currentGeneration === undefined
-        || expected.currentGeneration === state.source.currentGeneration)
+    return (
+      !expected ||
+      ((expected.shopId === undefined ||
+        expected.shopId === state.source.shopId) &&
+        (expected.currentGeneration === undefined ||
+          expected.currentGeneration === state.source.currentGeneration))
     );
   };
-  const revisionUpdateMany = vi.fn(async (args: {
-    where: { id: string; generation: number; status?: unknown; source?: { is?: { shopId?: string; currentGeneration?: number } } };
-    data: Partial<FixtureState["revision"]>;
-  }) => {
-    if (
-      args.where.id !== state.revision.id
-      || args.where.generation !== state.revision.generation
-      || !matchesStatus(state.revision.status, args.where.status)
-      || !sourceMatches(args.where)
-    ) return { count: 0 };
-    Object.assign(state.revision, args.data);
-    return { count: 1 };
-  });
-  const chunkDeleteMany = vi.fn(async (args: { where: { revisionId: string } }) => {
-    if (args.where.revisionId === state.revision.id) state.candidateChunkCount = 0;
-    if (args.where.revisionId === state.predecessor.id) state.predecessorChunkCount = 0;
-    return { count: 0 };
-  });
-  const sourceUpdateMany = vi.fn(async (args: {
-    where: { id: string; shopId: string; currentGeneration: number; updatedAt: Date };
-  }) => ({
-    count: args.where.id === state.source.id
-      && args.where.shopId === state.source.shopId
-      && args.where.currentGeneration === state.source.currentGeneration
-      && args.where.updatedAt.getTime() === state.source.updatedAt.getTime()
-      ? 1
-      : 0,
-  }));
+  const revisionUpdateMany = vi.fn(
+    async (args: {
+      where: {
+        id: string;
+        generation: number;
+        status?: unknown;
+        source?: { is?: { shopId?: string; currentGeneration?: number } };
+      };
+      data: Partial<FixtureState["revision"]>;
+    }) => {
+      if (
+        args.where.id !== state.revision.id ||
+        args.where.generation !== state.revision.generation ||
+        !matchesStatus(state.revision.status, args.where.status) ||
+        !sourceMatches(args.where)
+      )
+        return { count: 0 };
+      Object.assign(state.revision, args.data);
+      return { count: 1 };
+    },
+  );
+  const chunkDeleteMany = vi.fn(
+    async (args: { where: { revisionId: string } }) => {
+      if (args.where.revisionId === state.revision.id)
+        state.candidateChunkCount = 0;
+      if (args.where.revisionId === state.predecessor.id)
+        state.predecessorChunkCount = 0;
+      return { count: 0 };
+    },
+  );
+  const sourceUpdateMany = vi.fn(
+    async (args: {
+      where: {
+        id: string;
+        shopId: string;
+        currentGeneration: number;
+        updatedAt: Date;
+      };
+    }) => ({
+      count:
+        args.where.id === state.source.id &&
+        args.where.shopId === state.source.shopId &&
+        args.where.currentGeneration === state.source.currentGeneration &&
+        args.where.updatedAt.getTime() === state.source.updatedAt.getTime()
+          ? 1
+          : 0,
+    }),
+  );
   const transaction = {
     merchantKnowledgeSource: {
       findUnique: vi.fn(async () => ({ ...state.source })),
@@ -172,20 +209,34 @@ function createFixture(options: {
     },
     merchantKnowledgeSourceRevision: {
       updateMany: revisionUpdateMany,
-      findFirst: vi.fn(async (args: { where: { id?: string; status?: RevisionStatus } }) => {
-        if (args.where.id === state.revision.id) {
-          return state.revision.status === "PROCESSING" ? { id: state.revision.id } : null;
-        }
-        if (args.where.status === "ACTIVE" && state.predecessor.status === "ACTIVE") {
-          return { id: state.predecessor.id };
-        }
-        return null;
-      }),
-      update: vi.fn(async (args: { where: { id: string }; data: Record<string, unknown> }) => {
-        if (args.where.id === state.revision.id) Object.assign(state.revision, args.data);
-        if (args.where.id === state.predecessor.id) Object.assign(state.predecessor, args.data);
-        return { id: args.where.id };
-      }),
+      findFirst: vi.fn(
+        async (args: { where: { id?: string; status?: RevisionStatus } }) => {
+          if (args.where.id === state.revision.id) {
+            return state.revision.status === "PROCESSING"
+              ? { id: state.revision.id }
+              : null;
+          }
+          if (
+            args.where.status === "ACTIVE" &&
+            state.predecessor.status === "ACTIVE"
+          ) {
+            return { id: state.predecessor.id };
+          }
+          return null;
+        },
+      ),
+      update: vi.fn(
+        async (args: {
+          where: { id: string };
+          data: Record<string, unknown>;
+        }) => {
+          if (args.where.id === state.revision.id)
+            Object.assign(state.revision, args.data);
+          if (args.where.id === state.predecessor.id)
+            Object.assign(state.predecessor, args.data);
+          return { id: args.where.id };
+        },
+      ),
     },
     merchantKnowledgeChunk: { deleteMany: chunkDeleteMany },
     $executeRaw: vi.fn(async () => {
@@ -207,13 +258,20 @@ function createFixture(options: {
             dataFormat: state.dataFormat,
           },
           uploadedAsset: state.revision.uploadedAssetId
-            ? { id: state.revision.uploadedAssetId, shopId, dataFormat: { ...state.dataFormat } }
+            ? {
+                id: state.revision.uploadedAssetId,
+                shopId,
+                dataFormat: { ...state.dataFormat },
+              }
             : null,
         };
       }),
     },
     merchantKnowledgeChunk: transaction.merchantKnowledgeChunk,
-    $transaction: vi.fn(async (operation: (tx: typeof transaction) => Promise<unknown>) => operation(transaction)),
+    $transaction: vi.fn(
+      async (operation: (tx: typeof transaction) => Promise<unknown>) =>
+        operation(transaction),
+    ),
   };
   const webAcquire = vi.fn(async () => ({
     contentType: "text/html",
@@ -227,9 +285,11 @@ function createFixture(options: {
     resolvedUrl: null,
     fetchedAt: null,
   }));
-  const eligibilityResults = options.eligibilityResults ?? [eligible(options.maxContentUnits)];
-  const resolveSourceEligibility = vi.fn(async () =>
-    eligibilityResults.shift() ?? eligible(options.maxContentUnits),
+  const eligibilityResults = options.eligibilityResults ?? [
+    eligible(options.maxContentUnits),
+  ];
+  const resolveSourceEligibility = vi.fn(
+    async () => eligibilityResults.shift() ?? eligible(options.maxContentUnits),
   );
   const embed = options.embed ?? vi.fn(async () => [0.1, 0.2]);
   const logInfo = vi.fn();
@@ -240,7 +300,12 @@ function createFixture(options: {
     webPageAcquirer: { acquire: webAcquire },
     uploadedAssetAcquirer: { acquire: uploadAcquire },
     embedding: {
-      config: { provider: "openai", model: "test-model", dimensions: 2, indexVersion: "v1" },
+      config: {
+        provider: "openai",
+        model: "test-model",
+        dimensions: 2,
+        indexVersion: "v1",
+      },
       embed,
     } as never,
     logger: { info: logInfo, error: logError } as never,
@@ -293,7 +358,11 @@ describe("MerchantKnowledgeProcessingService", () => {
   });
 
   it("permanently fails a globally unsupported source", async () => {
-    const unsupported = { ...eligible(), globallySupported: false, eligible: false };
+    const unsupported = {
+      ...eligible(),
+      globallySupported: false,
+      eligible: false,
+    };
     const fixture = createFixture({ eligibilityResults: [unsupported] });
     await fixture.service.processJob(job);
     expect(fixture.state.revision).toMatchObject({
@@ -352,7 +421,9 @@ describe("MerchantKnowledgeProcessingService", () => {
     expect(fixture.state.revision).toMatchObject({
       contentUnits: 1,
       truncated: true,
-      contentHash: createHash("sha256").update("\u{1f9ed}abc", "utf8").digest("hex"),
+      contentHash: createHash("sha256")
+        .update("\u{1f9ed}abc", "utf8")
+        .digest("hex"),
       status: "ACTIVE",
     });
   });
@@ -384,11 +455,12 @@ describe("MerchantKnowledgeProcessingService", () => {
     "resets the current candidate to PENDING when eligibility becomes %s",
     async (change) => {
       const before = eligible(20);
-      const after = change === "dormant"
-        ? { ...eligible(20), merchantEnabled: false, eligible: false }
-        : change === "source-type downgrade"
-          ? { ...eligible(20), sourceTypeAllowed: false, eligible: false }
-          : eligible(21);
+      const after =
+        change === "dormant"
+          ? { ...eligible(20), merchantEnabled: false, eligible: false }
+          : change === "source-type downgrade"
+            ? { ...eligible(20), sourceTypeAllowed: false, eligible: false }
+            : eligible(21);
       const fixture = createFixture({ eligibilityResults: [before, after] });
       await fixture.service.processJob(job);
       expect(fixture.state.revision.status).toBe("PENDING");
@@ -420,11 +492,14 @@ describe("MerchantKnowledgeProcessingService", () => {
     const fixture = createFixture({ status: "PROCESSING" });
     fixture.state.candidateChunkCount = 2;
     await fixture.service.processJob(job);
-    expect(fixture.transaction.merchantKnowledgeChunk.deleteMany)
-      .toHaveBeenCalledWith({ where: { revisionId } });
+    expect(
+      fixture.transaction.merchantKnowledgeChunk.deleteMany,
+    ).toHaveBeenCalledWith({ where: { revisionId } });
     expect(fixture.state.candidateChunkCount).toBe(1);
     expect(fixture.state.predecessor.status).toBe("SUPERSEDED");
-    expect(fixture.state.predecessor.normalizedContent).toBe("retained predecessor content");
+    expect(fixture.state.predecessor.normalizedContent).toBe(
+      "retained predecessor content",
+    );
     expect(fixture.state.predecessorChunkCount).toBe(0);
     expect(fixture.state.revision.status).toBe("ACTIVE");
   });
@@ -437,7 +512,10 @@ describe("MerchantKnowledgeProcessingService", () => {
       failureCode: "RETRIES_EXHAUSTED",
     });
 
-    const stale = createFixture({ status: "PROCESSING", sourceGeneration: generation + 1 });
+    const stale = createFixture({
+      status: "PROCESSING",
+      sourceGeneration: generation + 1,
+    });
     await stale.service.markTerminalFailure({ job, failureCode: "anything" });
     expect(stale.state.revision.status).toBe("PROCESSING");
   });
@@ -445,7 +523,9 @@ describe("MerchantKnowledgeProcessingService", () => {
   it("records one operational incident for a persisted XLSX format failure", async () => {
     const report = vi.fn(async (_occurrence: unknown) => ({ recorded: true }));
     const fixture = createFixture({
-      inputKind: "UPLOAD", dataFormatKey: "XLSX", uploadedAssetId: "asset-1",
+      inputKind: "UPLOAD",
+      dataFormatKey: "XLSX",
+      uploadedAssetId: "asset-1",
       incidentReporter: { report },
     });
     fixture.uploadAcquire.mockRejectedValue(
@@ -454,21 +534,26 @@ describe("MerchantKnowledgeProcessingService", () => {
 
     await fixture.service.processJob(job);
     expect(fixture.state.revision).toMatchObject({
-      status: "FAILED", failureCode: "UPLOAD_FORMAT_INVALID",
+      status: "FAILED",
+      failureCode: "UPLOAD_FORMAT_INVALID",
     });
-    expect(report).toHaveBeenCalledWith(expect.objectContaining({
-      contractVersion: "operational-incident.v1",
-      sourceService: "moda-merchant-knowledge-worker",
-      category: "MERCHANT_KNOWLEDGE_XLSX",
-      environment: expect.any(String),
-      reasonCode: "UPLOAD_FORMAT_INVALID.INVALID_XLSX",
-      resourceKey: revisionId,
-      correlationId: revisionId,
-      shopId,
-      severity: "MEDIUM",
-      occurrenceId: expect.any(String),
-    }));
-    const occurrence = parseOperationalIncidentOccurrenceV1(report.mock.calls[0]![0]);
+    expect(report).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contractVersion: "operational-incident.v1",
+        sourceService: "moda-merchant-knowledge-worker",
+        category: "MERCHANT_KNOWLEDGE_XLSX",
+        environment: expect.any(String),
+        reasonCode: "UPLOAD_FORMAT_INVALID.INVALID_XLSX",
+        resourceKey: revisionId,
+        correlationId: revisionId,
+        shopId,
+        severity: "MEDIUM",
+        occurrenceId: expect.any(String),
+      }),
+    );
+    const occurrence = parseOperationalIncidentOccurrenceV1(
+      report.mock.calls[0]![0],
+    );
     expect(occurrence.reasonCode).toBe("UPLOAD_FORMAT_INVALID.INVALID_XLSX");
     expect(occurrence).not.toHaveProperty("filename");
     await fixture.service.processJob(job);
@@ -478,7 +563,9 @@ describe("MerchantKnowledgeProcessingService", () => {
   it("does not report a CSV format failure as an XLSX incident", async () => {
     const report = vi.fn(async (_occurrence: unknown) => ({ recorded: true }));
     const fixture = createFixture({
-      inputKind: "UPLOAD", dataFormatKey: "CSV", uploadedAssetId: "asset-1",
+      inputKind: "UPLOAD",
+      dataFormatKey: "CSV",
+      uploadedAssetId: "asset-1",
       incidentReporter: { report },
     });
     fixture.uploadAcquire.mockRejectedValue(
@@ -490,13 +577,19 @@ describe("MerchantKnowledgeProcessingService", () => {
   });
 
   it("does not undo a permanent failure when incident reporting fails", async () => {
-    const report = vi.fn(async (_occurrence: unknown) => { throw new Error("incident storage unavailable"); });
+    const report = vi.fn(async (_occurrence: unknown) => {
+      throw new Error("incident storage unavailable");
+    });
     const fixture = createFixture({
-      inputKind: "UPLOAD", dataFormatKey: "XLSX", uploadedAssetId: "asset-1",
+      inputKind: "UPLOAD",
+      dataFormatKey: "XLSX",
+      uploadedAssetId: "asset-1",
       incidentReporter: { report },
     });
     fixture.uploadAcquire.mockRejectedValue(
-      new MerchantKnowledgeUploadedAssetAcquisitionError("ASSET_EXTRACTION_FAILED"),
+      new MerchantKnowledgeUploadedAssetAcquisitionError(
+        "ASSET_EXTRACTION_FAILED",
+      ),
     );
     await expect(fixture.service.processJob(job)).resolves.toBeUndefined();
     expect(fixture.state.revision.status).toBe("FAILED");
@@ -505,5 +598,4 @@ describe("MerchantKnowledgeProcessingService", () => {
       expect.objectContaining({ sourceRevisionId: revisionId, shopId }),
     );
   });
-
 });

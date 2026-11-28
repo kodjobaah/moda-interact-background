@@ -1,18 +1,28 @@
 import { receivingSenderKnown } from "./recovery-sender-pool/inbound-authority.js";
 import type { PrismaClient } from "@prisma/client";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import prisma from "../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { whatsAppService } from "./whatsapp.service.js";
-import { canonicalWhatsAppSender, isExplicitWhatsAppStop } from "./whatsapp-contact-opt-out/phone.js";
+import {
+  canonicalWhatsAppSender,
+  isExplicitWhatsAppStop,
+} from "./whatsapp-contact-opt-out/phone.js";
 import { resolveQuotedStopShop } from "./whatsapp-contact-opt-out/quoted-outbound.js";
-import { publishStopNotices, writeLocalStop } from "./whatsapp-contact-opt-out/stop-writer.js";
+import {
+  publishStopNotices,
+  writeLocalStop,
+} from "./whatsapp-contact-opt-out/stop-writer.js";
 
 type Sender = { providerAccountId: string; providerPhoneNumberId: string };
 
 const logger = createLogger({
-  serviceName: "moda-messaging-worker", environment: resolveDeploymentEnvironmentName(),
+  serviceName: "moda-messaging-worker",
+  environment: resolveDeploymentEnvironmentName(),
 });
 
 /** Explicit STOP takes precedence over abuse limits, moderation and routing.
@@ -22,8 +32,12 @@ const logger = createLogger({
 export class WhatsAppContactOptOutService {
   constructor(
     private readonly database: PrismaClient = prisma,
-    private readonly resolveSender: () => Promise<Sender> = () => whatsAppService.resolveSender(),
-    private readonly log: Pick<StructuredLogger, "info" | "warn" | "error"> = logger,
+    private readonly resolveSender: () => Promise<Sender> = () =>
+      whatsAppService.resolveSender(),
+    private readonly log: Pick<
+      StructuredLogger,
+      "info" | "warn" | "error"
+    > = logger,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -32,8 +46,8 @@ export class WhatsAppContactOptOutService {
     let pooled: boolean | null;
     let sender: Sender;
     try {
-      pooled = await receivingSenderKnown(this.database,event);
-      sender = pooled===null?await this.resolveSender():event;
+      pooled = await receivingSenderKnown(this.database, event);
+      sender = pooled === null ? await this.resolveSender() : event;
     } catch (error) {
       this.log.error("whatsapp.stop.failed", {
         operation: "resolve_inbound_sender",
@@ -44,20 +58,32 @@ export class WhatsAppContactOptOutService {
       });
       throw error;
     }
-    if (pooled===false || sender.providerAccountId !== event.providerAccountId ||
-        sender.providerPhoneNumberId !== event.providerPhoneNumberId) {
-      this.log.warn("whatsapp.stop.ignored", { reasonCode: "UNRECOGNISED_PROVIDER_SENDER" });
+    if (
+      pooled === false ||
+      sender.providerAccountId !== event.providerAccountId ||
+      sender.providerPhoneNumberId !== event.providerPhoneNumberId
+    ) {
+      this.log.warn("whatsapp.stop.ignored", {
+        reasonCode: "UNRECOGNISED_PROVIDER_SENDER",
+      });
       return true;
     }
     const canonical = canonicalWhatsAppSender(event.customerPhone);
     if (!canonical) {
-      this.log.warn("whatsapp.stop.unmatched", { reasonCode: "INVALID_CANONICAL_PHONE" });
+      this.log.warn("whatsapp.stop.unmatched", {
+        reasonCode: "INVALID_CANONICAL_PHONE",
+      });
       return true;
     }
     let quotedShop: string | null;
     try {
       quotedShop = event.contextMessageId
-        ? await resolveQuotedStopShop(this.database, event.contextMessageId, canonical, event)
+        ? await resolveQuotedStopShop(
+            this.database,
+            event.contextMessageId,
+            canonical,
+            event,
+          )
         : null;
     } catch (error) {
       this.log.error("whatsapp.stop.failed", {
@@ -70,7 +96,9 @@ export class WhatsAppContactOptOutService {
       });
       throw error;
     }
-    const scope = quotedShop ? "QUOTED_SHOP" as const : "ALL_REGISTERED_SHOPS" as const;
+    const scope = quotedShop
+      ? ("QUOTED_SHOP" as const)
+      : ("ALL_REGISTERED_SHOPS" as const);
     if (event.contextMessageId) {
       this.log.info("whatsapp.stop.quote_resolution", {
         providerMessageId: event.providerMessageId,
@@ -88,7 +116,10 @@ export class WhatsAppContactOptOutService {
     let result: Awaited<ReturnType<typeof writeLocalStop>>;
     try {
       result = await writeLocalStop(this.database, {
-        canonical, shopId: quotedShop, eventId: event.providerMessageId, at: this.now(),
+        canonical,
+        shopId: quotedShop,
+        eventId: event.providerMessageId,
+        at: this.now(),
       });
     } catch (error) {
       this.log.error("whatsapp.stop.failed", {
@@ -102,7 +133,10 @@ export class WhatsAppContactOptOutService {
       throw error;
     }
     if (result.notices.length === 0) {
-      this.log.warn("whatsapp.stop.unmatched", { scope, reasonCode: "NO_ACTIVE_CUSTOMER_PHONE" });
+      this.log.warn("whatsapp.stop.unmatched", {
+        scope,
+        reasonCode: "NO_ACTIVE_CUSTOMER_PHONE",
+      });
       return true;
     }
     // If notice publication fails, throw so the existing inbound BullMQ job
@@ -121,7 +155,9 @@ export class WhatsAppContactOptOutService {
       throw error;
     }
     this.log.info("whatsapp.stop.recorded", {
-      scope, shopCount: result.notices.length, updatedCount: result.changed,
+      scope,
+      shopCount: result.notices.length,
+      updatedCount: result.changed,
     });
     return true;
   }

@@ -58,10 +58,13 @@ interface ParsedNode {
 }
 
 function isHidden(node: ParsedNode): boolean {
-  return node.attrs?.some(
-    ({ name, value }) =>
-      name === "hidden" || (name === "aria-hidden" && value.toLowerCase() === "true"),
-  ) ?? false;
+  return (
+    node.attrs?.some(
+      ({ name, value }) =>
+        name === "hidden" ||
+        (name === "aria-hidden" && value.toLowerCase() === "true"),
+    ) ?? false
+  );
 }
 
 export function extractVisibleHtmlText(html: string): string {

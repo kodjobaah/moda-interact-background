@@ -12,7 +12,9 @@ import {
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 
-const bullMQTelemetry = createBullMQTelemetry({ serviceName: "moda-recovery-worker" });
+const bullMQTelemetry = createBullMQTelemetry({
+  serviceName: "moda-recovery-worker",
+});
 
 let resumeQueue: Queue<RecoveryCapacityResumeJob> | null = null;
 
@@ -31,7 +33,10 @@ function getResumeQueue(): Queue<RecoveryCapacityResumeJob> {
 }
 
 export class RecoveryCapacityResumeService {
-  async schedule(input: RecoveryCapacityResumeJob, dueAt?: Date): Promise<string> {
+  async schedule(
+    input: RecoveryCapacityResumeJob,
+    dueAt?: Date,
+  ): Promise<string> {
     const jobId = createRecoveryCapacityResumeJobId(input);
     const options = dueAt
       ? { jobId, delay: Math.max(0, dueAt.getTime() - Date.now()) + 1_000 }
@@ -44,12 +49,19 @@ export class RecoveryCapacityResumeService {
     return jobId;
   }
 
-  async repair(runtimeConfigOrLimit?: Pick<BackgroundRuntimeConfigSnapshot, "recoveryRepairShopBatchSize"> | number): Promise<number> {
-    const limit = typeof runtimeConfigOrLimit === "number"
-      ? runtimeConfigOrLimit
-      : runtimeConfigOrLimit?.recoveryRepairShopBatchSize ?? 100;
+  async repair(
+    runtimeConfigOrLimit?:
+      | Pick<BackgroundRuntimeConfigSnapshot, "recoveryRepairShopBatchSize">
+      | number,
+  ): Promise<number> {
+    const limit =
+      typeof runtimeConfigOrLimit === "number"
+        ? runtimeConfigOrLimit
+        : (runtimeConfigOrLimit?.recoveryRepairShopBatchSize ?? 100);
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
-      throw new Error("Recovery repair shop batch size is outside the database range.");
+      throw new Error(
+        "Recovery repair shop batch size is outside the database range.",
+      );
     }
     const shops = await prisma.checkoutRecovery.findMany({
       where: {
@@ -66,16 +78,21 @@ export class RecoveryCapacityResumeService {
     let scheduled = 0;
     for (const shop of shops) {
       try {
-        if (!(await shopExecutionEligibilityService.isShopExecutionActive(
-          shop.shopId,
-          "recovery",
-        ))) {
+        if (
+          !(await shopExecutionEligibilityService.isShopExecutionActive(
+            shop.shopId,
+            "recovery",
+          ))
+        ) {
           continue;
         }
         await this.schedule({ shopId: shop.shopId, trigger: "repair" });
         scheduled += 1;
       } catch (error) {
-        console.error(`Failed to schedule capacity resume for shop ${shop.shopId}`, error);
+        console.error(
+          `Failed to schedule capacity resume for shop ${shop.shopId}`,
+          error,
+        );
       }
     }
     return scheduled;
@@ -87,4 +104,5 @@ export class RecoveryCapacityResumeService {
   }
 }
 
-export const recoveryCapacityResumeService = new RecoveryCapacityResumeService();
+export const recoveryCapacityResumeService =
+  new RecoveryCapacityResumeService();

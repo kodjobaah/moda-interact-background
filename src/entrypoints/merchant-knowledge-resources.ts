@@ -13,6 +13,5 @@ export const merchantKnowledgeQueue = new Queue<
   typeof MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME
 >(MERCHANT_KNOWLEDGE_QUEUE_NAME, { connection: connectionRedis });
 
-export const closeMerchantKnowledgeResources: readonly (() => Promise<unknown>)[] = [
-  () => merchantKnowledgeQueue.close(),
-];
+export const closeMerchantKnowledgeResources: readonly (() => Promise<unknown>)[] =
+  [() => merchantKnowledgeQueue.close()];

@@ -1,4 +1,10 @@
-import { resolveSenderInbound, readAssignedOwner, isAssignedConversationActive, type InboundOwnerEvidence, type SenderHandoff } from "./recovery-sender-pool/inbound-authority.js";
+import {
+  resolveSenderInbound,
+  readAssignedOwner,
+  isAssignedConversationActive,
+  type InboundOwnerEvidence,
+  type SenderHandoff,
+} from "./recovery-sender-pool/inbound-authority.js";
 import { createHash } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import {
@@ -27,7 +33,10 @@ export type RecoveryRoute =
   | { kind: "guidance"; reason: RoutingGuidanceReason }
   | { kind: "routing"; scope: SenderHandoff }
   | { kind: "ignored" };
-type ExecutionEligibility = Pick<typeof shopExecutionEligibilityService, "isShopExecutionActive">;
+type ExecutionEligibility = Pick<
+  typeof shopExecutionEligibilityService,
+  "isShopExecutionActive"
+>;
 
 const logger = createLogger({
   serviceName: "moda-messaging-worker",
@@ -35,7 +44,10 @@ const logger = createLogger({
 });
 
 function providerMessageDigest(providerMessageId: string): string {
-  return createHash("sha256").update(providerMessageId).digest("hex").slice(0, 16);
+  return createHash("sha256")
+    .update(providerMessageId)
+    .digest("hex")
+    .slice(0, 16);
 }
 
 export class RecoveryRoutingService {
@@ -44,41 +56,68 @@ export class RecoveryRoutingService {
     private readonly executionEligibility: ExecutionEligibility = shopExecutionEligibilityService,
   ) {}
 
-  async resolveInboundMessage(event: WhatsAppInboundEvent, log: StructuredLogger = logger): Promise<RecoveryRoute> {
+  async resolveInboundMessage(
+    event: WhatsAppInboundEvent,
+    log: StructuredLogger = logger,
+  ): Promise<RecoveryRoute> {
     const messageDigest = providerMessageDigest(event.providerMessageId);
     try {
       const pooled = await resolveSenderInbound(this.database, event);
       if (pooled.kind === "invalid") {
         log.info("whatsapp.inbound.route_decision", {
-          messageDigest, stage: "pool-identity", decision: "ignored",
+          messageDigest,
+          stage: "pool-identity",
+          decision: "ignored",
         });
         return { kind: "ignored" };
       }
       if (pooled.kind === "routing") return pooled;
       const { evidence, mode } = pooled;
-      if (!await this.executionEligibility.isShopExecutionActive(
-        evidence.shopId, mode === "active" ? "recovery" : "general",
-      )) return { kind: "ignored" };
+      if (
+        !(await this.executionEligibility.isShopExecutionActive(
+          evidence.shopId,
+          mode === "active" ? "recovery" : "general",
+        ))
+      )
+        return { kind: "ignored" };
       return {
-        kind: "resolved", conversationId: evidence.conversationId,
-        checkoutRecoveryId: evidence.checkoutRecoveryId, shopId: evidence.shopId,
-        mode, senderEvidence: evidence,
+        kind: "resolved",
+        conversationId: evidence.conversationId,
+        checkoutRecoveryId: evidence.checkoutRecoveryId,
+        shopId: evidence.shopId,
+        mode,
+        senderEvidence: evidence,
       };
     } catch (error) {
-      log.error("whatsapp.inbound.route_failed", { messageDigest, stage: "routing", error });
+      log.error("whatsapp.inbound.route_failed", {
+        messageDigest,
+        stage: "routing",
+        error,
+      });
       throw error;
     }
   }
 
-  async isCurrentActiveRoute(route: Extract<RecoveryRoute, { kind: "resolved" }>): Promise<boolean> {
+  async isCurrentActiveRoute(
+    route: Extract<RecoveryRoute, { kind: "resolved" }>,
+  ): Promise<boolean> {
     if (route.mode !== "active" || !route.senderEvidence) return false;
     const e = route.senderEvidence;
     const current = await readAssignedOwner(this.database, e.conversationId);
-    return !!current && current.threadId === e.threadId && current.routeId === e.routeId &&
+    return (
+      !!current &&
+      current.threadId === e.threadId &&
+      current.routeId === e.routeId &&
       current.providerAccountId === e.providerAccountId &&
       current.providerPhoneNumberId === e.providerPhoneNumberId &&
       current.canonicalRecipient === e.canonicalRecipient &&
-      await isAssignedConversationActive(this.database, e.conversationId, new Date(), e.referenceProviderMessageId) === true;
+      (await isAssignedConversationActive(
+        this.database,
+        e.conversationId,
+        new Date(),
+        e.referenceProviderMessageId,
+      )) === true
+    );
   }
 }
 

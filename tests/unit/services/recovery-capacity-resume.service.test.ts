@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { add, findMany } = vi.hoisted(() => ({ add: vi.fn(), findMany: vi.fn() }));
+const { add, findMany } = vi.hoisted(() => ({
+  add: vi.fn(),
+  findMany: vi.fn(),
+}));
 vi.mock("bullmq", () => ({
   Queue: class {
     add = add;
@@ -75,11 +78,14 @@ describe("RecoveryCapacityResumeService", () => {
     const dueAt = new Date("2026-10-11T00:05:00Z");
 
     try {
-      await service.schedule({
-        shopId: "shop-1",
-        recoveryId: "recovery-1",
-        trigger: `recipient-suppression-recovery-1-${dueAt.getTime()}`,
-      }, dueAt);
+      await service.schedule(
+        {
+          shopId: "shop-1",
+          recoveryId: "recovery-1",
+          trigger: `recipient-suppression-recovery-1-${dueAt.getTime()}`,
+        },
+        dueAt,
+      );
     } finally {
       vi.useRealTimers();
     }

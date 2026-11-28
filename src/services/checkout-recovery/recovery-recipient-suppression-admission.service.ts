@@ -4,8 +4,7 @@ import prisma from "../../lib/db.js";
 import { recoveryCapacityResumeService } from "../recovery-capacity-resume.service.js";
 
 export type RecoveryRecipientSuppression =
-  | { kind: "allowed" }
-  | { kind: "suppressed"; until: Date };
+  { kind: "allowed" } | { kind: "suppressed"; until: Date };
 
 export const RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED =
   "RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED";
@@ -18,9 +17,7 @@ type SuppressionDatabase = Pick<
 >;
 
 export class RecoveryRecipientSuppressionAdmissionService {
-  constructor(
-    private readonly database: SuppressionDatabase = prisma,
-  ) {}
+  constructor(private readonly database: SuppressionDatabase = prisma) {}
 
   async evaluate(
     shopId: string,
@@ -31,7 +28,8 @@ export class RecoveryRecipientSuppressionAdmissionService {
       where: { shopId_recipient: { shopId, recipient } },
       select: { suppressUntil: true },
     });
-    if (!row?.suppressUntil || row.suppressUntil <= now) return { kind: "allowed" };
+    if (!row?.suppressUntil || row.suppressUntil <= now)
+      return { kind: "allowed" };
     return { kind: "suppressed", until: row.suppressUntil };
   }
 
@@ -48,7 +46,9 @@ export class RecoveryRecipientSuppressionAdmissionService {
         select: { status: true, updatedAt: true },
       });
     } catch (error) {
-      throw new Error(RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED, { cause: error });
+      throw new Error(RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED, {
+        cause: error,
+      });
     }
     try {
       const trigger = wakeupTrigger
@@ -59,7 +59,9 @@ export class RecoveryRecipientSuppressionAdmissionService {
         until,
       );
     } catch (error) {
-      throw new Error(RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED, { cause: error });
+      throw new Error(RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED, {
+        cause: error,
+      });
     }
     if (!current || current.status !== "DETECTED") return false;
     const blocked = await this.database.checkoutRecovery.updateMany({
@@ -85,8 +87,11 @@ export class RecoveryRecipientSuppressionAdmissionService {
     if (
       !current ||
       current.status !== "DETECTED" ||
-      ![null, "WHATSAPP_RECIPIENT_SUPPRESSED"].includes(current.admissionBlockReason)
-    ) return;
+      ![null, "WHATSAPP_RECIPIENT_SUPPRESSED"].includes(
+        current.admissionBlockReason,
+      )
+    )
+      return;
 
     await this.database.checkoutRecovery.updateMany({
       where: {
@@ -101,7 +106,9 @@ export class RecoveryRecipientSuppressionAdmissionService {
       data: {
         admissionBlockedAt: null,
         admissionBlockReason: null,
-        updatedAt: new Date(Math.max(Date.now(), current.updatedAt.getTime() + 1)),
+        updatedAt: new Date(
+          Math.max(Date.now(), current.updatedAt.getTime() + 1),
+        ),
       },
     });
   }

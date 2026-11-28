@@ -17,7 +17,11 @@ export type ResolvedLiveBudget = Readonly<{
   initialOutreachToolCallsSource?: LiveBudgetSource;
   merchantPricingPlanId: string | null;
   shopifyPlanHandle: string | null;
-  policyEditVersions: Readonly<{ platform: number; pricePlan: number | null; merchant: number | null }>;
+  policyEditVersions: Readonly<{
+    platform: number;
+    pricePlan: number | null;
+    merchant: number | null;
+  }>;
   resolvedAt: string;
 }>;
 
@@ -30,7 +34,11 @@ export class LiveBudgetPolicyError extends Error {
   }
 }
 
-const BUDGET_KEYS = ["deadlineMs", "outputTokens", "initialOutreachToolCalls"] as const;
+const BUDGET_KEYS = [
+  "deadlineMs",
+  "outputTokens",
+  "initialOutreachToolCalls",
+] as const;
 type Key = (typeof BUDGET_KEYS)[number];
 type Budget = Partial<Record<Key, number>>;
 
@@ -45,7 +53,8 @@ type Policy = {
 };
 
 function parseBudget(row: Policy): Budget {
-  if (row.budgetSchemaVersion !== 1) throw new LiveBudgetPolicyError("UNSUPPORTED_SCHEMA");
+  if (row.budgetSchemaVersion !== 1)
+    throw new LiveBudgetPolicyError("UNSUPPORTED_SCHEMA");
   const value = row.budget;
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new LiveBudgetPolicyError("INVALID_BUDGET");
@@ -55,14 +64,24 @@ function parseBudget(row: Policy): Budget {
     throw new LiveBudgetPolicyError("UNKNOWN_BUDGET_FIELD");
   for (const key of keys) {
     const number = (value as Record<string, unknown>)[key];
-    if (typeof number !== "number" || !Number.isSafeInteger(number) || number <= 0)
+    if (
+      typeof number !== "number" ||
+      !Number.isSafeInteger(number) ||
+      number <= 0
+    )
       throw new LiveBudgetPolicyError("INVALID_BUDGET_VALUE");
     if (key === "initialOutreachToolCalls" && number > 64)
-      throw new LiveBudgetPolicyError("INVALID_INITIAL_OUTREACH_TOOL_CALL_BUDGET");
+      throw new LiveBudgetPolicyError(
+        "INVALID_INITIAL_OUTREACH_TOOL_CALL_BUDGET",
+      );
     result[key as Key] = number;
   }
-  if (row.scope === "PLATFORM" &&
-      (!Object.hasOwn(value, "deadlineMs") || !Object.hasOwn(value, "outputTokens") || (keys.length !== 2 && keys.length !== 3)))
+  if (
+    row.scope === "PLATFORM" &&
+    (!Object.hasOwn(value, "deadlineMs") ||
+      !Object.hasOwn(value, "outputTokens") ||
+      (keys.length !== 2 && keys.length !== 3))
+  )
     throw new LiveBudgetPolicyError("PLATFORM_BUDGET_INCOMPLETE");
   if (row.scope !== "PLATFORM" && keys.length === 0)
     throw new LiveBudgetPolicyError("EMPTY_OVERRIDE");
@@ -71,11 +90,22 @@ function parseBudget(row: Policy): Budget {
   return result;
 }
 
-function single(rows: Policy[], scope: Policy["scope"], owner: string | null): Policy | null {
-  const candidates = rows.filter((row) => row.scope === scope &&
-    (scope === "PRICE_PLAN" ? row.merchantPricingPlanId === owner :
-      scope === "SHOP" ? row.shopId === owner : true));
-  if (candidates.length > 1) throw new LiveBudgetPolicyError("DUPLICATE_POLICY");
+function single(
+  rows: Policy[],
+  scope: Policy["scope"],
+  owner: string | null,
+): Policy | null {
+  const candidates = rows.filter(
+    (row) =>
+      row.scope === scope &&
+      (scope === "PRICE_PLAN"
+        ? row.merchantPricingPlanId === owner
+        : scope === "SHOP"
+          ? row.shopId === owner
+          : true),
+  );
+  if (candidates.length > 1)
+    throw new LiveBudgetPolicyError("DUPLICATE_POLICY");
   return candidates[0] ?? null;
 }
 
@@ -90,67 +120,128 @@ export async function resolveLiveBudget(input: {
   now?: () => Date;
 }): Promise<ResolvedLiveBudget> {
   const { db, environment, shopId } = input;
-  return db.$transaction(async (tx) => {
-    const subscription = await tx.subscription.findUnique({
-      where: { shopId },
-      select: { status: true, planId: true, plan: { select: { shopifyPlanHandle: true } } },
-    });
-    let planId: string | null = null;
-    let handle: string | null = null;
-    if (subscription && (subscription.status === "ACTIVE" || subscription.status === "TRIALING")) {
-      if (!subscription.planId || !subscription.plan?.shopifyPlanHandle)
-        throw new LiveBudgetPolicyError("ACTIVE_PLAN_UNRESOLVED");
-      handle = subscription.plan.shopifyPlanHandle;
-      const plan = await tx.merchantPricingPlan.findUnique({
-        where: { shopifyPlanHandle: handle }, select: { id: true },
+  return db.$transaction(
+    async (tx) => {
+      const subscription = await tx.subscription.findUnique({
+        where: { shopId },
+        select: {
+          status: true,
+          planId: true,
+          plan: { select: { shopifyPlanHandle: true } },
+        },
       });
-      if (!plan) throw new LiveBudgetPolicyError("ACTIVE_PLAN_UNMATCHED");
-      planId = plan.id;
-    }
-    const rows: Policy[] = await tx.commerceModelPolicy.findMany({
-      where: {
-        environment, context: "LIVE",
-        OR: [
-          { scope: "PLATFORM" },
-          { scope: "SHOP", shopId },
-          ...(planId ? [{ scope: "PRICE_PLAN" as const, merchantPricingPlanId: planId }] : []),
-        ],
-      },
-      select: {
-        id: true, scope: true, shopId: true, merchantPricingPlanId: true,
-        budgetSchemaVersion: true, budget: true, editVersion: true,
-      },
-    });
-    const platform = single(rows, "PLATFORM", null);
-    if (!platform) throw new LiveBudgetPolicyError("PLATFORM_DEFAULT_MISSING");
-    const pricePlan = planId ? single(rows, "PRICE_PLAN", planId) : null;
-    const merchant = single(rows, "SHOP", shopId);
-    const base = parseBudget(platform);
-    const plan = pricePlan ? parseBudget(pricePlan) : {};
-    const shop = merchant ? parseBudget(merchant) : {};
-    const deadlineMs = shop.deadlineMs ?? plan.deadlineMs ?? base.deadlineMs!;
-    const outputTokens = shop.outputTokens ?? plan.outputTokens ?? base.outputTokens!;
-    const initialOutreachToolCalls = shop.initialOutreachToolCalls ?? plan.initialOutreachToolCalls ?? base.initialOutreachToolCalls ?? 16;
-    return {
-      shopId, conversationId: input.conversationId, recoveryId: input.recoveryId,
-      inboundVersion: input.inboundVersion, environment,
-      deadlineMs, outputTokens, initialOutreachToolCalls,
-      deadlineSource: shop.deadlineMs !== undefined ? "MERCHANT" : plan.deadlineMs !== undefined ? "PRICE_PLAN" : "PLATFORM",
-      outputTokenSource: shop.outputTokens !== undefined ? "MERCHANT" : plan.outputTokens !== undefined ? "PRICE_PLAN" : "PLATFORM",
-      initialOutreachToolCallsSource: shop.initialOutreachToolCalls !== undefined ? "MERCHANT" :
-        plan.initialOutreachToolCalls !== undefined ? "PRICE_PLAN" : "PLATFORM",
-      merchantPricingPlanId: planId, shopifyPlanHandle: handle,
-      policyEditVersions: { platform: platform.editVersion, pricePlan: pricePlan?.editVersion ?? null, merchant: merchant?.editVersion ?? null },
-      resolvedAt: (input.now ?? (() => new Date()))().toISOString(),
-    };
-  }, { isolationLevel: "RepeatableRead" });
+      let planId: string | null = null;
+      let handle: string | null = null;
+      if (
+        subscription &&
+        (subscription.status === "ACTIVE" || subscription.status === "TRIALING")
+      ) {
+        if (!subscription.planId || !subscription.plan?.shopifyPlanHandle)
+          throw new LiveBudgetPolicyError("ACTIVE_PLAN_UNRESOLVED");
+        handle = subscription.plan.shopifyPlanHandle;
+        const plan = await tx.merchantPricingPlan.findUnique({
+          where: { shopifyPlanHandle: handle },
+          select: { id: true },
+        });
+        if (!plan) throw new LiveBudgetPolicyError("ACTIVE_PLAN_UNMATCHED");
+        planId = plan.id;
+      }
+      const rows: Policy[] = await tx.commerceModelPolicy.findMany({
+        where: {
+          environment,
+          context: "LIVE",
+          OR: [
+            { scope: "PLATFORM" },
+            { scope: "SHOP", shopId },
+            ...(planId
+              ? [
+                  {
+                    scope: "PRICE_PLAN" as const,
+                    merchantPricingPlanId: planId,
+                  },
+                ]
+              : []),
+          ],
+        },
+        select: {
+          id: true,
+          scope: true,
+          shopId: true,
+          merchantPricingPlanId: true,
+          budgetSchemaVersion: true,
+          budget: true,
+          editVersion: true,
+        },
+      });
+      const platform = single(rows, "PLATFORM", null);
+      if (!platform)
+        throw new LiveBudgetPolicyError("PLATFORM_DEFAULT_MISSING");
+      const pricePlan = planId ? single(rows, "PRICE_PLAN", planId) : null;
+      const merchant = single(rows, "SHOP", shopId);
+      const base = parseBudget(platform);
+      const plan = pricePlan ? parseBudget(pricePlan) : {};
+      const shop = merchant ? parseBudget(merchant) : {};
+      const deadlineMs = shop.deadlineMs ?? plan.deadlineMs ?? base.deadlineMs!;
+      const outputTokens =
+        shop.outputTokens ?? plan.outputTokens ?? base.outputTokens!;
+      const initialOutreachToolCalls =
+        shop.initialOutreachToolCalls ??
+        plan.initialOutreachToolCalls ??
+        base.initialOutreachToolCalls ??
+        16;
+      return {
+        shopId,
+        conversationId: input.conversationId,
+        recoveryId: input.recoveryId,
+        inboundVersion: input.inboundVersion,
+        environment,
+        deadlineMs,
+        outputTokens,
+        initialOutreachToolCalls,
+        deadlineSource:
+          shop.deadlineMs !== undefined
+            ? "MERCHANT"
+            : plan.deadlineMs !== undefined
+              ? "PRICE_PLAN"
+              : "PLATFORM",
+        outputTokenSource:
+          shop.outputTokens !== undefined
+            ? "MERCHANT"
+            : plan.outputTokens !== undefined
+              ? "PRICE_PLAN"
+              : "PLATFORM",
+        initialOutreachToolCallsSource:
+          shop.initialOutreachToolCalls !== undefined
+            ? "MERCHANT"
+            : plan.initialOutreachToolCalls !== undefined
+              ? "PRICE_PLAN"
+              : "PLATFORM",
+        merchantPricingPlanId: planId,
+        shopifyPlanHandle: handle,
+        policyEditVersions: {
+          platform: platform.editVersion,
+          pricePlan: pricePlan?.editVersion ?? null,
+          merchant: merchant?.editVersion ?? null,
+        },
+        resolvedAt: (input.now ?? (() => new Date()))().toISOString(),
+      };
+    },
+    { isolationLevel: "RepeatableRead" },
+  );
 }
 
 /** The existing processing lease is 120 s. Reserve 2 s for completion and fencing. */
 export const LIVE_TURN_LEASE_MS = 120_000;
 export const LIVE_TURN_COMPLETION_RESERVE_MS = 2_000;
-export function assertLiveBudgetFitsLease(budget: ResolvedLiveBudget, processingStartedAt: Date, now = Date.now()): void {
+export function assertLiveBudgetFitsLease(
+  budget: ResolvedLiveBudget,
+  processingStartedAt: Date,
+  now = Date.now(),
+): void {
   const remaining = LIVE_TURN_LEASE_MS - (now - processingStartedAt.getTime());
-  if (!Number.isFinite(remaining) || budget.deadlineMs > remaining - LIVE_TURN_COMPLETION_RESERVE_MS)
+  if (
+    !Number.isFinite(remaining) ||
+    budget.deadlineMs > remaining - LIVE_TURN_COMPLETION_RESERVE_MS
+  )
     throw new LiveBudgetPolicyError("DEADLINE_EXCEEDS_PROCESSING_LEASE");
 }

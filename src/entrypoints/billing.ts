@@ -8,7 +8,10 @@ import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lea
 import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { connectionRedis } from "../lib/redis.js";
-import { startQueuePerformanceTelemetry, type QueueName } from "../observability/queue-performance.js";
+import {
+  startQueuePerformanceTelemetry,
+  type QueueName,
+} from "../observability/queue-performance.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 import { wooSubscriptionReceiptReconciliationService } from "../services/woocommerce-billing/subscription-receipt-reconciliation.service.js";
 import { wooChargeReceiptReconciliationService } from "../services/woocommerce-billing/charge-receipt-reconciliation.service.js";
@@ -22,18 +25,28 @@ const logger = createLogger({
 export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
   runtimeConfig: BackgroundRuntimeConfigSnapshot,
   leaseHandle: { generation: number },
-  reconcileGlobalBilling: (config: BackgroundRuntimeConfigSnapshot) => Promise<T>,
+  reconcileGlobalBilling: (
+    config: BackgroundRuntimeConfigSnapshot,
+  ) => Promise<T>,
 ): Promise<T> {
-  let wooReceipts: Awaited<ReturnType<typeof wooSubscriptionReceiptReconciliationService.reconcileBatch>> | undefined;
+  let wooReceipts:
+    | Awaited<
+        ReturnType<
+          typeof wooSubscriptionReceiptReconciliationService.reconcileBatch
+        >
+      >
+    | undefined;
   try {
-    wooReceipts = await wooSubscriptionReceiptReconciliationService.reconcileBatch(
-      runtimeConfig.billingReconciliationShopBatchSize,
-    );
+    wooReceipts =
+      await wooSubscriptionReceiptReconciliationService.reconcileBatch(
+        runtimeConfig.billingReconciliationShopBatchSize,
+      );
   } catch (error) {
     logger.error("billing.woocommerce.subscription_receipts.failed", {
       leaseGeneration: leaseHandle.generation,
       configVersion: runtimeConfig.version,
-      errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+      errorName:
+        error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
       errorMessage: error instanceof Error ? error.message : "unknown failure",
       error: error,
     });
@@ -46,9 +59,14 @@ export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
     });
   }
 
-  let wooChargeReceipts: Awaited<ReturnType<typeof wooChargeReceiptReconciliationService.reconcileBatch>> | undefined;
+  let wooChargeReceipts:
+    | Awaited<
+        ReturnType<typeof wooChargeReceiptReconciliationService.reconcileBatch>
+      >
+    | undefined;
   try {
-    wooChargeReceipts = await wooChargeReceiptReconciliationService.reconcileBatch();
+    wooChargeReceipts =
+      await wooChargeReceiptReconciliationService.reconcileBatch();
   } catch (error) {
     logger.error("billing.woocommerce.charge_receipts.failed", {
       leaseGeneration: leaseHandle.generation,
@@ -66,9 +84,16 @@ export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
     });
   }
 
-  let wooChargeRefundReceipts: Awaited<ReturnType<typeof wooChargeRefundReceiptReconciliationService.reconcileBatch>> | undefined;
+  let wooChargeRefundReceipts:
+    | Awaited<
+        ReturnType<
+          typeof wooChargeRefundReceiptReconciliationService.reconcileBatch
+        >
+      >
+    | undefined;
   try {
-    wooChargeRefundReceipts = await wooChargeRefundReceiptReconciliationService.reconcileBatch();
+    wooChargeRefundReceipts =
+      await wooChargeRefundReceiptReconciliationService.reconcileBatch();
   } catch (error) {
     logger.error("billing.woocommerce.charge_refund_receipts.failed", {
       leaseGeneration: leaseHandle.generation,
@@ -96,15 +121,19 @@ export async function reconcileWooPaidEntitlementsAndContinue<T>(
 ): Promise<T> {
   try {
     const wooEntitlements = await reconcileWooEntitlements();
-    logger.info("billing.woocommerce.paid_entitlement.reconciliation_completed", {
-      leaseGeneration: leaseHandle.generation,
-      ...wooEntitlements,
-    });
+    logger.info(
+      "billing.woocommerce.paid_entitlement.reconciliation_completed",
+      {
+        leaseGeneration: leaseHandle.generation,
+        ...wooEntitlements,
+      },
+    );
   } catch (error) {
     logger.error("billing.woocommerce.paid_entitlement.reconciliation_failed", {
       leaseGeneration: leaseHandle.generation,
       configVersion: runtimeConfig.version,
-      errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+      errorName:
+        error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
       errorMessage: error instanceof Error ? error.message : "unknown failure",
       error: error,
     });
@@ -115,7 +144,8 @@ export async function reconcileWooPaidEntitlementsAndContinue<T>(
 
 function reportBillingReconciliationFailure(error: unknown): void {
   logger.error("billing.reconciliation.scan_failed", {
-    errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+    errorName:
+      error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
     reasonCode: "BILLING_RECONCILIATION_SCAN_FAILED",
   });
 }
@@ -127,12 +157,19 @@ void startReadyWorkerProcess({
     const startupConfig = backgroundRuntimeConfigService.current();
     logger.info("billing.worker.started", {
       configVersion: startupConfig.version,
-      reconciliationIntervalSeconds: startupConfig.billingReconciliationIntervalSeconds,
-      reconciliationShopBatchSize: startupConfig.billingReconciliationShopBatchSize,
-      subscriptionQueueGlobalConcurrency: startupConfig.billingSubscriptionQueueGlobalConcurrency,
+      reconciliationIntervalSeconds:
+        startupConfig.billingReconciliationIntervalSeconds,
+      reconciliationShopBatchSize:
+        startupConfig.billingReconciliationShopBatchSize,
+      subscriptionQueueGlobalConcurrency:
+        startupConfig.billingSubscriptionQueueGlobalConcurrency,
     });
     const [
-      { closeBillingResources, billingSubscriptionQueue, shopifyDiscountSyncQueue },
+      {
+        closeBillingResources,
+        billingSubscriptionQueue,
+        shopifyDiscountSyncQueue,
+      },
       { createBillingReconciliationService },
       { RecoveryCreditRefundCorrectionService },
       { PromotionSelectionExpiryReconciliationService },
@@ -146,21 +183,40 @@ void startReadyWorkerProcess({
       import("../services/woocommerce-billing/paid-entitlement-time-reconciliation.service.js"),
       import("../services/billing-operational-incident-replay.service.js"),
     ]);
-    const [, { BillingSubscriptionReconciliationService }, { createBillingSubscriptionReconciliationWorker }] = await Promise.all([
+    const [
+      ,
+      { BillingSubscriptionReconciliationService },
+      { createBillingSubscriptionReconciliationWorker },
+    ] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-subscription-reconciliation.service.js"),
       import("../workers/billing-subscription-reconciliation.worker.js"),
     ]);
-    const billingReconciliationService = createBillingReconciliationService(billingSubscriptionQueue, shopifyDiscountSyncQueue);
-    const recoveryCreditRefundCorrectionService = new RecoveryCreditRefundCorrectionService();
+    const billingReconciliationService = createBillingReconciliationService(
+      billingSubscriptionQueue,
+      shopifyDiscountSyncQueue,
+    );
+    const recoveryCreditRefundCorrectionService =
+      new RecoveryCreditRefundCorrectionService();
     const promotionSelectionExpiryReconciliationService =
       new PromotionSelectionExpiryReconciliationService();
-    const subscriptionReconciliation = new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue, undefined, undefined, backgroundRuntimeConfigService, shopifyDiscountSyncQueue);
-    const billingSubscriptionReconciliationWorker = createBillingSubscriptionReconciliationWorker(subscriptionReconciliation);
-    const stopQueueConcurrencyController = await startQueueConcurrencyController({
-      config: backgroundRuntimeConfigService,
-      lease: backgroundRuntimeLeaseService,
-    });
+    const subscriptionReconciliation =
+      new BillingSubscriptionReconciliationService(
+        undefined,
+        undefined,
+        billingSubscriptionQueue,
+        undefined,
+        undefined,
+        backgroundRuntimeConfigService,
+        shopifyDiscountSyncQueue,
+      );
+    const billingSubscriptionReconciliationWorker =
+      createBillingSubscriptionReconciliationWorker(subscriptionReconciliation);
+    const stopQueueConcurrencyController =
+      await startQueueConcurrencyController({
+        config: backgroundRuntimeConfigService,
+        lease: backgroundRuntimeLeaseService,
+      });
     const stopQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
       queueNames: [billingSubscriptionQueue.name as QueueName],
@@ -181,11 +237,15 @@ void startReadyWorkerProcess({
       // A committed error can have nextReconcileAt = null, and incident storage
       // may have been unavailable when that error was first recorded.
       try {
-        const inspected = await billingOperationalIncidentReplayService.replayOnce();
-        logger.info("billing.operational_incident.replay_completed", { inspected });
+        const inspected =
+          await billingOperationalIncidentReplayService.replayOnce();
+        logger.info("billing.operational_incident.replay_completed", {
+          inspected,
+        });
       } catch (error) {
         logger.error("billing.operational_incident.replay_scan_failed", {
-          errorMessage: error instanceof Error ? error.message : String(error), error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
         });
       }
 
@@ -198,9 +258,10 @@ void startReadyWorkerProcess({
       await reconcileWooPaidEntitlementsAndContinue(
         runtimeConfig,
         leaseHandle,
-        () => wooPaidEntitlementTimeReconciliationService.reconcileOnce(
-          runtimeConfig.billingReconciliationShopBatchSize,
-        ),
+        () =>
+          wooPaidEntitlementTimeReconciliationService.reconcileOnce(
+            runtimeConfig.billingReconciliationShopBatchSize,
+          ),
         async () => {
           logger.info("billing.reconciliation.global_scan_completed", {
             leaseGeneration: leaseHandle.generation,
@@ -218,30 +279,39 @@ void startReadyWorkerProcess({
 
           try {
             const promotionExpiry =
-              await promotionSelectionExpiryReconciliationService.reconcileOnce(runtimeConfig);
+              await promotionSelectionExpiryReconciliationService.reconcileOnce(
+                runtimeConfig,
+              );
 
-            logger.info("billing.reconciliation.promotion_selection_expiry_completed", {
-              leaseGeneration: leaseHandle.generation,
-              configVersion: runtimeConfig.version,
-              selected: promotionExpiry.selected,
-              released: promotionExpiry.released,
-              raced: promotionExpiry.raced,
-            });
+            logger.info(
+              "billing.reconciliation.promotion_selection_expiry_completed",
+              {
+                leaseGeneration: leaseHandle.generation,
+                configVersion: runtimeConfig.version,
+                selected: promotionExpiry.selected,
+                released: promotionExpiry.released,
+                raced: promotionExpiry.raced,
+              },
+            );
           } catch (error) {
-            logger.error("billing.reconciliation.promotion_selection_expiry_failed", {
-              leaseGeneration: leaseHandle.generation,
-              configVersion: runtimeConfig.version,
-              errorName:
-                error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
-              errorMessage:
-                error instanceof Error
-                  ? error.message
-                  : "unknown failure",
-              error: error,
-            });
+            logger.error(
+              "billing.reconciliation.promotion_selection_expiry_failed",
+              {
+                leaseGeneration: leaseHandle.generation,
+                configVersion: runtimeConfig.version,
+                errorName:
+                  error instanceof Error
+                    ? error.name.slice(0, 64)
+                    : "UnknownError",
+                errorMessage:
+                  error instanceof Error ? error.message : "unknown failure",
+                error: error,
+              },
+            );
           }
 
-          const refundCorrection = await recoveryCreditRefundCorrectionService.processDue();
+          const refundCorrection =
+            await recoveryCreditRefundCorrectionService.processDue();
           logger.info("billing.reconciliation.refund_correction_completed", {
             leaseGeneration: leaseHandle.generation,
             selected: refundCorrection.selected,
@@ -253,10 +323,13 @@ void startReadyWorkerProcess({
           });
 
           const reconstructed = await subscriptionReconciliation.reconstruct();
-          logger.info("billing.subscription_reconciliation.reconstruction_completed", {
-            leaseGeneration: leaseHandle.generation,
-            enqueued: reconstructed,
-          });
+          logger.info(
+            "billing.subscription_reconciliation.reconstruction_completed",
+            {
+              leaseGeneration: leaseHandle.generation,
+              enqueued: reconstructed,
+            },
+          );
 
           logger.info("billing.reconciliation.cycle_completed", {
             leaseGeneration: leaseHandle.generation,
@@ -271,7 +344,8 @@ void startReadyWorkerProcess({
       leaseName: "BILLING_RECONCILIATION",
       intervalMs: 0,
       runImmediately: true,
-      getIntervalMs: (runtimeConfig) => runtimeConfig.billingReconciliationIntervalSeconds * 1000,
+      getIntervalMs: (runtimeConfig) =>
+        runtimeConfig.billingReconciliationIntervalSeconds * 1000,
       run: runBillingCycle,
       onLeaseSkipped: () => {
         const current = backgroundRuntimeConfigService.current();

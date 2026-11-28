@@ -1,12 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { MODA_SUPPORTED_LANGUAGE_TAGS } from "@modainteract/moda-interact-shared/internationalization";
 
-import {
-  MerchantPricingTranslationPublicationService,
-} from "../../../../src/services/merchant-pricing-translation-publication.service.js";
-import {
-  buildMerchantPricingPublicationPayload,
-} from "../../../../src/services/merchant-pricing-translation/publication-payload.js";
+import { MerchantPricingTranslationPublicationService } from "../../../../src/services/merchant-pricing-translation-publication.service.js";
+import { buildMerchantPricingPublicationPayload } from "../../../../src/services/merchant-pricing-translation/publication-payload.js";
 import {
   canonicalMerchantPricingPublicationSource,
   merchantPricingPublicationSourceHash,
@@ -108,7 +104,9 @@ describe("Merchant Pricing translation publication", () => {
 
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
-    expect(merchantPricingPublicationSourceHash(first!)).toBe(merchantPricingPublicationSourceHash(second!));
+    expect(merchantPricingPublicationSourceHash(first!)).toBe(
+      merchantPricingPublicationSourceHash(second!),
+    );
   });
 
   it("builds exactly 20 plan translations and 20 translations per highlight", () => {
@@ -118,11 +116,15 @@ describe("Merchant Pricing translation publication", () => {
     });
 
     expect(payload).not.toBeNull();
-    expect(payload?.planTranslations).toHaveLength(MODA_SUPPORTED_LANGUAGE_TAGS.length);
+    expect(payload?.planTranslations).toHaveLength(
+      MODA_SUPPORTED_LANGUAGE_TAGS.length,
+    );
     expect(payload?.highlightTranslations).toHaveLength(
       MODA_SUPPORTED_LANGUAGE_TAGS.length,
     );
-    expect(payload?.planTranslations.find((row) => row.locale === "en")).toMatchObject({
+    expect(
+      payload?.planTranslations.find((row) => row.locale === "en"),
+    ).toMatchObject({
       merchantDescription: source().englishDescription,
     });
   });
@@ -132,19 +134,39 @@ describe("Merchant Pricing translation publication", () => {
 
     const incomplete = translationItems();
     incomplete.pop();
-    expect(buildMerchantPricingPublicationPayload({ source: currentSource, items: incomplete })).toBeNull();
+    expect(
+      buildMerchantPricingPublicationPayload({
+        source: currentSource,
+        items: incomplete,
+      }),
+    ).toBeNull();
 
     const duplicate = translationItems();
     duplicate[1] = { ...duplicate[0] };
-    expect(buildMerchantPricingPublicationPayload({ source: currentSource, items: duplicate })).toBeNull();
+    expect(
+      buildMerchantPricingPublicationPayload({
+        source: currentSource,
+        items: duplicate,
+      }),
+    ).toBeNull();
 
     const failed = translationItems();
     failed[0] = { ...failed[0], status: "FAILED" };
-    expect(buildMerchantPricingPublicationPayload({ source: currentSource, items: failed })).toBeNull();
+    expect(
+      buildMerchantPricingPublicationPayload({
+        source: currentSource,
+        items: failed,
+      }),
+    ).toBeNull();
 
     const sourceMismatch = translationItems();
     sourceMismatch[0] = { ...sourceMismatch[0], sourceText: "different" };
-    expect(buildMerchantPricingPublicationPayload({ source: currentSource, items: sourceMismatch })).toBeNull();
+    expect(
+      buildMerchantPricingPublicationPayload({
+        source: currentSource,
+        items: sourceMismatch,
+      }),
+    ).toBeNull();
 
     const overlong = translationItems();
     const titleIndex = overlong.findIndex(
@@ -157,19 +179,28 @@ describe("Merchant Pricing translation publication", () => {
       ...overlong[titleIndex],
       translatedText: "x".repeat(121),
     };
-    expect(buildMerchantPricingPublicationPayload({ source: currentSource, items: overlong })).toBeNull();
+    expect(
+      buildMerchantPricingPublicationPayload({
+        source: currentSource,
+        items: overlong,
+      }),
+    ).toBeNull();
   });
 
   it("atomically promotes READY_TO_APPLY draft translations to READY while leaving the plan inactive", async () => {
     const currentSource = source();
-    const executeRaw = vi.fn(async (statement: { strings: readonly string[] }) => {
-      const sql = statementText(statement);
-      if (sql.includes("UPDATE \"billing\".\"MerchantPricingPlan\"") ||
-          sql.includes("UPDATE \"billing\".\"MerchantPricingTranslationRun\"")) {
+    const executeRaw = vi.fn(
+      async (statement: { strings: readonly string[] }) => {
+        const sql = statementText(statement);
+        if (
+          sql.includes('UPDATE "billing"."MerchantPricingPlan"') ||
+          sql.includes('UPDATE "billing"."MerchantPricingTranslationRun"')
+        ) {
+          return 1;
+        }
         return 1;
-      }
-      return 1;
-    });
+      },
+    );
     const transaction = {
       $queryRaw: vi.fn(async (statement: { strings: readonly string[] }) => {
         const sql = statementText(statement);
@@ -226,8 +257,9 @@ describe("Merchant Pricing translation publication", () => {
     };
     const database = {
       $queryRaw: vi.fn(),
-      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) =>
-        callback(transaction),
+      $transaction: vi.fn(
+        async (callback: (tx: typeof transaction) => Promise<unknown>) =>
+          callback(transaction),
       ),
     };
     const service = new MerchantPricingTranslationPublicationService({
@@ -244,12 +276,14 @@ describe("Merchant Pricing translation publication", () => {
       highlightTranslationCount: MODA_SUPPORTED_LANGUAGE_TAGS.length,
     });
 
-    const statements = executeRaw.mock.calls.map(([statement]) => statementText(statement));
+    const statements = executeRaw.mock.calls.map(([statement]) =>
+      statementText(statement),
+    );
     expect(
       statements.some(
         (sql) =>
           sql.includes('UPDATE "billing"."MerchantPricingPlan"') &&
-          sql.includes('"publicationStatus" = \'READY\'') &&
+          sql.includes("\"publicationStatus\" = 'READY'") &&
           sql.includes('"currentTranslationRunId" = NULL') &&
           sql.includes('"isActive" = false'),
       ),
@@ -258,7 +292,7 @@ describe("Merchant Pricing translation publication", () => {
       statements.some(
         (sql) =>
           sql.includes('UPDATE "billing"."MerchantPricingTranslationRun"') &&
-          sql.includes('"status" = \'APPLIED\''),
+          sql.includes("\"status\" = 'APPLIED'"),
       ),
     ).toBe(true);
   });
@@ -299,8 +333,9 @@ describe("Merchant Pricing translation publication", () => {
     };
     const database = {
       $queryRaw: vi.fn(),
-      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) =>
-        callback(transaction),
+      $transaction: vi.fn(
+        async (callback: (tx: typeof transaction) => Promise<unknown>) =>
+          callback(transaction),
       ),
     };
     const service = new MerchantPricingTranslationPublicationService({
@@ -321,7 +356,7 @@ describe("Merchant Pricing translation publication", () => {
         const sql = statementText(statement);
         return (
           sql.includes('UPDATE "billing"."MerchantPricingPlan"') &&
-          sql.includes('"publicationStatus" = \'TRANSLATION_FAILED\'') &&
+          sql.includes("\"publicationStatus\" = 'TRANSLATION_FAILED'") &&
           sql.includes('"isActive" = false')
         );
       }),

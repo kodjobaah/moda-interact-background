@@ -2,8 +2,7 @@ import type { EffectiveBillingPolicy } from "../effective-billing-policy.service
 import type { PostContractRecoveryPolicy } from "../post-contract-recovery-policy.service.js";
 
 export type RecoveryPolicy =
-  | EffectiveBillingPolicy
-  | PostContractRecoveryPolicy;
+  EffectiveBillingPolicy | PostContractRecoveryPolicy;
 
 export type RecoveryBillingAdmission =
   | {
@@ -55,13 +54,15 @@ export type InitialOutreachCreditIdentity = {
   outreachAttemptId: string;
 };
 
-export type ConfirmedInitialOutreachCreditInput = InitialOutreachCreditIdentity & {
-  outboundMessageId: string;
-};
+export type ConfirmedInitialOutreachCreditInput =
+  InitialOutreachCreditIdentity & {
+    outboundMessageId: string;
+  };
 
-export type ExistingInitialOutreachCreditInput = InitialOutreachCreditIdentity & {
-  outboundMessageId: string | null;
-};
+export type ExistingInitialOutreachCreditInput =
+  InitialOutreachCreditIdentity & {
+    outboundMessageId: string | null;
+  };
 
 export type ConfirmedInitialOutreachSettlement =
   | {

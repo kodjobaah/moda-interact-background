@@ -9,7 +9,10 @@ import type { RefundRow } from "../../../../src/services/recovery-credit-refund-
 import { RefundPreparationService } from "../../../../src/services/recovery-credit-refund-correction/refund-preparation.service.js";
 import type { RefundProviderPreparationStateProof } from "../../../../src/services/recovery-credit-refund-correction/refund-provider-state.service.js";
 
-type SafeProviderProof = Extract<RefundProviderPreparationStateProof, { safe: true }>;
+type SafeProviderProof = Extract<
+  RefundProviderPreparationStateProof,
+  { safe: true }
+>;
 
 export function refundRow(overrides: Partial<RefundRow> = {}): RefundRow {
   return {
@@ -50,7 +53,9 @@ export function refundRow(overrides: Partial<RefundRow> = {}): RefundRow {
   };
 }
 
-export function providerProof(overrides: Partial<SafeProviderProof> = {}): SafeProviderProof {
+export function providerProof(
+  overrides: Partial<SafeProviderProof> = {},
+): SafeProviderProof {
   return {
     safe: true as const,
     quantity: new Prisma.Decimal("1"),
@@ -78,9 +83,11 @@ export function preparationHarness(
       updateMany: refundUpdate,
     },
     usageEvent: { upsert: usageUpsert },
-    $transaction: vi.fn().mockImplementation(
-      async (callback: (transaction: unknown) => unknown) => callback(database),
-    ),
+    $transaction: vi
+      .fn()
+      .mockImplementation(async (callback: (transaction: unknown) => unknown) =>
+        callback(database),
+      ),
   };
   const providerState = {
     readForPrepare: vi.fn().mockResolvedValue(proof),

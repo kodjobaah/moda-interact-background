@@ -37,9 +37,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@modainteract/moda-interact-shared/logging", async () => {
-  const actual = await vi.importActual<typeof import("@modainteract/moda-interact-shared/logging")>(
-    "@modainteract/moda-interact-shared/logging",
-  );
+  const actual = await vi.importActual<
+    typeof import("@modainteract/moda-interact-shared/logging")
+  >("@modainteract/moda-interact-shared/logging");
   const sharedLogger = actual.createLogger({
     serviceName: "moda-messaging-worker",
     environment: "test",
@@ -49,24 +49,38 @@ vi.mock("@modainteract/moda-interact-shared/logging", async () => {
     },
   });
   for (const level of ["debug", "info", "warn", "error"] as const) {
-    mocks.logger[level].mockImplementation((event: string, fields?: Record<string, unknown>) => {
-      sharedLogger[level](event, fields);
-    });
+    mocks.logger[level].mockImplementation(
+      (event: string, fields?: Record<string, unknown>) => {
+        sharedLogger[level](event, fields);
+      },
+    );
   }
   return { ...actual, createLogger: vi.fn(() => mocks.logger) };
 });
 vi.mock("../../../src/runtime/deployment-environment.js", () => ({
   resolveDeploymentEnvironmentName: vi.fn(() => "test"),
 }));
-vi.mock("../../../src/services/recovery-sender-pool/routing-runtime.js", () => ({ routingRuntime: mocks.routingRuntime }));
-vi.mock("../../../src/services/routing-guidance.service.js", () => ({ sendRoutingGuidance: mocks.guidance }));
+vi.mock(
+  "../../../src/services/recovery-sender-pool/routing-runtime.js",
+  () => ({ routingRuntime: mocks.routingRuntime }),
+);
+vi.mock("../../../src/services/routing-guidance.service.js", () => ({
+  sendRoutingGuidance: mocks.guidance,
+}));
 vi.mock("../../../src/services/whatsapp-contact-opt-out.service.js", () => ({
   whatsAppContactOptOutService: { handleInbound: mocks.optOut },
 }));
-vi.mock("../../../src/services/recipient-reachability-positive.service.js", () => ({
-  recipientReachabilityPositiveService: { fromRoutedInbound: mocks.reachability },
+vi.mock(
+  "../../../src/services/recipient-reachability-positive.service.js",
+  () => ({
+    recipientReachabilityPositiveService: {
+      fromRoutedInbound: mocks.reachability,
+    },
+  }),
+);
+vi.mock("../../../src/services/inbound-whatsapp-audio.service.js", () => ({
+  inboundWhatsAppAudioService: { process: mocks.audio },
 }));
-vi.mock("../../../src/services/inbound-whatsapp-audio.service.js", () => ({ inboundWhatsAppAudioService: { process: mocks.audio } }));
 vi.mock("bullmq", () => ({
   Queue: class {
     add() {
@@ -107,9 +121,12 @@ vi.mock("../../../src/services/checkout-recovery.service.js", () => ({
 vi.mock("../../../src/services/conversation.service.js", () => ({
   conversationService: mocks.conversation,
 }));
-vi.mock("../../../src/services/inbound-whatsapp-abuse-admission.service.js", () => ({
-  inboundWhatsAppAbuseAdmissionService: mocks.abuse,
-}));
+vi.mock(
+  "../../../src/services/inbound-whatsapp-abuse-admission.service.js",
+  () => ({
+    inboundWhatsAppAbuseAdmissionService: mocks.abuse,
+  }),
+);
 vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
   outboundWhatsAppAdmissionService: {},
 }));
@@ -120,20 +137,19 @@ vi.mock("../../../src/services/whatsapp-provider-status.service.js", () => ({
   whatsappProviderStatusService: { process: vi.fn() },
 }));
 vi.mock("../../../src/services/meta-template-management/service.js", () => ({
-  metaTemplateManagementService: { processTemplateStatusObservation: mocks.templateStatus },
+  metaTemplateManagementService: {
+    processTemplateStatusObservation: mocks.templateStatus,
+  },
 }));
 vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
   shopExecutionEligibilityService: mocks.eligibility,
 }));
 
-vi.mock(
-  "../../../src/services/conversation-turn-processor.service.js",
-  () => ({
-    ConversationTurnProcessor: class {
-      enqueue = mocks.processor.enqueue;
-    },
-  }),
-);
+vi.mock("../../../src/services/conversation-turn-processor.service.js", () => ({
+  ConversationTurnProcessor: class {
+    enqueue = mocks.processor.enqueue;
+  },
+}));
 
 import {
   createWhatsappWorker,
@@ -191,11 +207,23 @@ describe("WhatsApp worker inbound execution gate", () => {
   });
 
   it("hands unresolved pooled input to the durable routing runtime without merchant effects", async () => {
-    const scope = { threadId: "thread-1", routeId: null, canonicalRecipient: "447700900000",
-      providerAccountId: event.providerAccountId, providerPhoneNumberId: event.providerPhoneNumberId };
-    mocks.routing.resolveInboundMessage.mockResolvedValue({ kind: "routing", scope });
+    const scope = {
+      threadId: "thread-1",
+      routeId: null,
+      canonicalRecipient: "447700900000",
+      providerAccountId: event.providerAccountId,
+      providerPhoneNumberId: event.providerPhoneNumberId,
+    };
+    mocks.routing.resolveInboundMessage.mockResolvedValue({
+      kind: "routing",
+      scope,
+    });
     await processInboundMessage(event);
-    expect(mocks.routingRuntime.accept).toHaveBeenCalledWith(event, scope, expect.any(Function));
+    expect(mocks.routingRuntime.accept).toHaveBeenCalledWith(
+      event,
+      scope,
+      expect.any(Function),
+    );
     expect(mocks.routingRuntime.receivingScope).not.toHaveBeenCalled();
     expect(mocks.guidance).not.toHaveBeenCalled();
     expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
@@ -204,24 +232,51 @@ describe("WhatsApp worker inbound execution gate", () => {
   });
 
   it("uses durable pooled guidance before any legacy neutral sender or audio download", async () => {
-    const scope = { threadId: "thread-1", routeId: null, canonicalRecipient: "447700900000",
-      providerAccountId: event.providerAccountId, providerPhoneNumberId: event.providerPhoneNumberId };
-    const audio = { ...event, content: { type: "audio" as const, mediaId: "media-1", mimeType: "audio/ogg", sha256: null, voice: true } };
-    mocks.routing.resolveInboundMessage.mockResolvedValue({ kind: "guidance", reason: "MULTIPLE_RECOVERIES" });
+    const scope = {
+      threadId: "thread-1",
+      routeId: null,
+      canonicalRecipient: "447700900000",
+      providerAccountId: event.providerAccountId,
+      providerPhoneNumberId: event.providerPhoneNumberId,
+    };
+    const audio = {
+      ...event,
+      content: {
+        type: "audio" as const,
+        mediaId: "media-1",
+        mimeType: "audio/ogg",
+        sha256: null,
+        voice: true,
+      },
+    };
+    mocks.routing.resolveInboundMessage.mockResolvedValue({
+      kind: "guidance",
+      reason: "MULTIPLE_RECOVERIES",
+    });
     mocks.routingRuntime.receivingScope.mockResolvedValue(scope);
     await processInboundMessage(audio);
     expect(mocks.routingRuntime.receivingScope).toHaveBeenCalledWith(audio);
-    expect(mocks.routingRuntime.accept).toHaveBeenCalledWith(audio, scope, expect.any(Function));
+    expect(mocks.routingRuntime.accept).toHaveBeenCalledWith(
+      audio,
+      scope,
+      expect.any(Function),
+    );
     expect(mocks.guidance).not.toHaveBeenCalled();
     expect(mocks.audio).not.toHaveBeenCalled();
     expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
     expect(mocks.recovery.recordExternalActivity).not.toHaveBeenCalled();
   });
 
-  it("never sends guidance or enqueues a reply for a foreign-sender quote ignored by routing",async()=>{
-    mocks.routing.resolveInboundMessage.mockResolvedValue({kind:"ignored"});
-    await processInboundJobData({...event,providerAccountId:"foreign-account",contextMessageId:"known-physical-part"});
-    expect(mocks.guidance).not.toHaveBeenCalled();expect(mocks.processor.enqueue).not.toHaveBeenCalled();expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
+  it("never sends guidance or enqueues a reply for a foreign-sender quote ignored by routing", async () => {
+    mocks.routing.resolveInboundMessage.mockResolvedValue({ kind: "ignored" });
+    await processInboundJobData({
+      ...event,
+      providerAccountId: "foreign-account",
+      contextMessageId: "known-physical-part",
+    });
+    expect(mocks.guidance).not.toHaveBeenCalled();
+    expect(mocks.processor.enqueue).not.toHaveBeenCalled();
+    expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
   });
   it("B011-03 performs raw admission before routing and persistence", async () => {
     mocks.routing.resolveInboundMessage.mockResolvedValue({
@@ -284,18 +339,27 @@ describe("WhatsApp worker inbound execution gate", () => {
     },
   );
 
-  it.each(["STOP", "UNSUBSCRIBE", "STOPP", "DUR", "PARAR", "STOPPA"])("handles authenticated %s ahead of raw-abuse denial and ignored routing", async (command) => {
-    mocks.optOut.mockResolvedValueOnce(true);
-    // Use a persistent denial within this test: the STOP shortcut MUST NOT
-    // consume it, and a queued mockResolvedValueOnce would leak into the next test.
-    mocks.abuse.admitRaw.mockResolvedValue({ kind: "denied", reason: "RAW_SENDER" });
-    await processInboundMessage({ ...event, content: { type: "text", text: command } });
-    expect(mocks.optOut).toHaveBeenCalledOnce();
-    expect(mocks.abuse.admitRaw).not.toHaveBeenCalled();
-    expect(mocks.routing.resolveInboundMessage).not.toHaveBeenCalled();
-    expect(mocks.guidance).not.toHaveBeenCalled();
-    expect(mocks.processor.enqueue).not.toHaveBeenCalled();
-  });
+  it.each(["STOP", "UNSUBSCRIBE", "STOPP", "DUR", "PARAR", "STOPPA"])(
+    "handles authenticated %s ahead of raw-abuse denial and ignored routing",
+    async (command) => {
+      mocks.optOut.mockResolvedValueOnce(true);
+      // Use a persistent denial within this test: the STOP shortcut MUST NOT
+      // consume it, and a queued mockResolvedValueOnce would leak into the next test.
+      mocks.abuse.admitRaw.mockResolvedValue({
+        kind: "denied",
+        reason: "RAW_SENDER",
+      });
+      await processInboundMessage({
+        ...event,
+        content: { type: "text", text: command },
+      });
+      expect(mocks.optOut).toHaveBeenCalledOnce();
+      expect(mocks.abuse.admitRaw).not.toHaveBeenCalled();
+      expect(mocks.routing.resolveInboundMessage).not.toHaveBeenCalled();
+      expect(mocks.guidance).not.toHaveBeenCalled();
+      expect(mocks.processor.enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it("persists and enqueues an active context-linked inbound message", async () => {
     mocks.routing.resolveInboundMessage.mockResolvedValue({
@@ -321,8 +385,10 @@ describe("WhatsApp worker inbound execution gate", () => {
     });
     expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
     expect(mocks.reachability).toHaveBeenCalledWith({
-      shopId: "shop-1", conversationId: "conversation-1",
-      providerMessageId: event.providerMessageId, customerPhone: event.customerPhone,
+      shopId: "shop-1",
+      conversationId: "conversation-1",
+      providerMessageId: event.providerMessageId,
+      customerPhone: event.customerPhone,
     });
   });
 
@@ -337,11 +403,13 @@ describe("WhatsApp worker inbound execution gate", () => {
 
     await processInboundJobData(event);
 
-    expect(mocks.conversation.receiveMessage).toHaveBeenCalledWith(expect.objectContaining({
-      conversationId: "conversation-1",
-      providerMessageId: event.providerMessageId,
-      content: event.content.text,
-    }));
+    expect(mocks.conversation.receiveMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-1",
+        providerMessageId: event.providerMessageId,
+        content: event.content.text,
+      }),
+    );
     expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
   });
 
@@ -371,7 +439,6 @@ describe("WhatsApp worker inbound execution gate", () => {
       }),
     );
   });
-
 
   it("uses recovery execution scope only for a continuing delayed recovery turn", async () => {
     mocks.eligibility.isShopExecutionActive.mockResolvedValue(false);
@@ -451,7 +518,11 @@ describe("WhatsApp worker inbound execution gate", () => {
         checkoutRecovery: {
           shopId: "shop-1",
           shop: { domain: "example.myshopify.com", status },
-          customer: { phone: "+447700900000", id: "customer-1", firstName: null },
+          customer: {
+            phone: "+447700900000",
+            id: "customer-1",
+            firstName: null,
+          },
         },
         messages: [],
       });
@@ -459,7 +530,9 @@ describe("WhatsApp worker inbound execution gate", () => {
       const loaded = await loadConversationTurn("conversation-1", new Date());
 
       expect(loaded).toMatchObject({ shopId: "shop-1", shopUnavailable: true });
-      expect(mocks.database.conversation.findUniqueOrThrow).toHaveBeenCalledTimes(1);
+      expect(
+        mocks.database.conversation.findUniqueOrThrow,
+      ).toHaveBeenCalledTimes(1);
     },
   );
 });
@@ -468,19 +541,32 @@ describe("WhatsApp worker terminal error records", () => {
   it("emits bounded original callback diagnostics without a raw Error override", () => {
     createWhatsappWorker();
     const sourceError = Object.assign(
-      new Error("arch056-worker-fixture-source-failure email customer@example.com phone +447700900000 token=secret-value"),
+      new Error(
+        "arch056-worker-fixture-source-failure email customer@example.com phone +447700900000 token=secret-value",
+      ),
       { code: "P2002", clientVersion: "6.19.3" },
     );
 
-    mocks.workerListeners.failed({
-      id: "job-arch056-1",
-      name: "message-received",
-      attemptsMade: 2,
-    }, sourceError);
+    mocks.workerListeners.failed(
+      {
+        id: "job-arch056-1",
+        name: "message-received",
+        attemptsMade: 2,
+      },
+      sourceError,
+    );
     mocks.workerListeners.error(sourceError);
 
-    const failed = JSON.parse(mocks.logRecords.find((line) => JSON.parse(line).event === "whatsapp.job.failed")!);
-    const workerError = JSON.parse(mocks.logRecords.find((line) => JSON.parse(line).event === "whatsapp.worker.error")!);
+    const failed = JSON.parse(
+      mocks.logRecords.find(
+        (line) => JSON.parse(line).event === "whatsapp.job.failed",
+      )!,
+    );
+    const workerError = JSON.parse(
+      mocks.logRecords.find(
+        (line) => JSON.parse(line).event === "whatsapp.worker.error",
+      )!,
+    );
     expect(failed).toMatchObject({
       level: "error",
       event: "whatsapp.job.failed",
@@ -491,7 +577,8 @@ describe("WhatsApp worker terminal error records", () => {
         jobName: "message-received",
         attemptsMade: 2,
         errorName: "Error",
-        errorMessage: "arch056-worker-fixture-source-failure email [REDACTED] phone [REDACTED] token=[REDACTED]",
+        errorMessage:
+          "arch056-worker-fixture-source-failure email [REDACTED] phone [REDACTED] token=[REDACTED]",
         prismaCode: "P2002",
         prismaClientVersion: "6.19.3",
         redactionApplied: true,
@@ -499,36 +586,57 @@ describe("WhatsApp worker terminal error records", () => {
     });
     expect(workerError.data).toMatchObject({
       errorName: "Error",
-      errorMessage: "arch056-worker-fixture-source-failure email [REDACTED] phone [REDACTED] token=[REDACTED]",
+      errorMessage:
+        "arch056-worker-fixture-source-failure email [REDACTED] phone [REDACTED] token=[REDACTED]",
       prismaCode: "P2002",
       prismaClientVersion: "6.19.3",
       redactionApplied: true,
     });
     expect(failed.data.error).toBeUndefined();
-    expect(JSON.stringify([failed, workerError])).not.toContain("customer@example.com");
-    expect(JSON.stringify([failed, workerError])).not.toContain("+447700900000");
+    expect(JSON.stringify([failed, workerError])).not.toContain(
+      "customer@example.com",
+    );
+    expect(JSON.stringify([failed, workerError])).not.toContain(
+      "+447700900000",
+    );
     expect(JSON.stringify([failed, workerError])).not.toContain("secret-value");
   });
 
   it("keeps failed-job handling best-effort when the Shared sink throws", () => {
     createWhatsappWorker();
     mocks.throwSink = true;
-    expect(() => mocks.workerListeners.failed(
-      { id: "job-arch056-sink", name: "message-status", attemptsMade: 0 },
-      new Error("arch056-worker-fixture-source-failure"),
-    )).not.toThrow();
+    expect(() =>
+      mocks.workerListeners.failed(
+        { id: "job-arch056-sink", name: "message-status", attemptsMade: 0 },
+        new Error("arch056-worker-fixture-source-failure"),
+      ),
+    ).not.toThrow();
   });
 });
 
 it("routes ambiguous voice to guidance before downloading or recording engagement", async () => {
- mocks.abuse.admitRaw.mockResolvedValue({kind:"allowed"});
- mocks.guidance.mockResolvedValue({kind:"sent"});
- mocks.routing.resolveInboundMessage.mockResolvedValue({kind:"guidance",reason:"MULTIPLE_RECOVERIES"});
- mocks.audio.mockClear(); mocks.recovery.recordExternalActivity.mockClear();
- await processInboundMessage({...event,content:{type:"audio",mediaId:"media",mimeType:"audio/ogg",sha256:null,voice:true}} as any);
- expect(mocks.audio).not.toHaveBeenCalled(); expect(mocks.recovery.recordExternalActivity).not.toHaveBeenCalled(); expect(mocks.guidance).toHaveBeenCalled();
+  mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
+  mocks.guidance.mockResolvedValue({ kind: "sent" });
+  mocks.routing.resolveInboundMessage.mockResolvedValue({
+    kind: "guidance",
+    reason: "MULTIPLE_RECOVERIES",
+  });
+  mocks.audio.mockClear();
+  mocks.recovery.recordExternalActivity.mockClear();
+  await processInboundMessage({
+    ...event,
+    content: {
+      type: "audio",
+      mediaId: "media",
+      mimeType: "audio/ogg",
+      sha256: null,
+      voice: true,
+    },
+  } as any);
+  expect(mocks.audio).not.toHaveBeenCalled();
+  expect(mocks.recovery.recordExternalActivity).not.toHaveBeenCalled();
+  expect(mocks.guidance).toHaveBeenCalled();
 });
-
 
 describe("ARCH-028 inbound reachability route gate", () => {
   beforeEach(() => {
@@ -537,13 +645,17 @@ describe("ARCH-028 inbound reachability route gate", () => {
     mocks.optOut.mockResolvedValue(false);
     mocks.guidance.mockResolvedValue({ kind: "sent" });
     mocks.reachability.mockResolvedValue("recorded");
-    mocks.conversation.receiveMessage.mockResolvedValue({ duplicate: false, version: 1 });
+    mocks.conversation.receiveMessage.mockResolvedValue({
+      duplicate: false,
+      version: 1,
+    });
     mocks.recovery.recordExternalActivity.mockResolvedValue({ count: 1 });
   });
 
   it("does not clear either shop for an ambiguous same-phone route", async () => {
     mocks.routing.resolveInboundMessage.mockResolvedValue({
-      kind: "guidance", reason: "MULTIPLE_RECOVERIES",
+      kind: "guidance",
+      reason: "MULTIPLE_RECOVERIES",
     });
     await processInboundMessage(event);
     expect(mocks.reachability).not.toHaveBeenCalled();
@@ -552,27 +664,42 @@ describe("ARCH-028 inbound reachability route gate", () => {
 
   it("retries clearing after a persisted inbound duplicate", async () => {
     mocks.routing.resolveInboundMessage.mockResolvedValue({
-      kind: "resolved", conversationId: "conversation-2",
-      checkoutRecoveryId: "recovery-2", shopId: "shop-2", mode: "active",
+      kind: "resolved",
+      conversationId: "conversation-2",
+      checkoutRecoveryId: "recovery-2",
+      shopId: "shop-2",
+      mode: "active",
     });
-    mocks.conversation.receiveMessage.mockResolvedValue({ duplicate: true, version: 1 });
+    mocks.conversation.receiveMessage.mockResolvedValue({
+      duplicate: true,
+      version: 1,
+    });
     await processInboundMessage(event);
-    expect(mocks.reachability).toHaveBeenCalledWith(expect.objectContaining({
-      shopId: "shop-2", conversationId: "conversation-2",
-    }));
+    expect(mocks.reachability).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shopId: "shop-2",
+        conversationId: "conversation-2",
+      }),
+    );
   });
 
   it("never clears on failed inbound persistence", async () => {
     mocks.routing.resolveInboundMessage.mockResolvedValue({
-      kind: "resolved", conversationId: "conversation-2",
-      checkoutRecoveryId: "recovery-2", shopId: "shop-2", mode: "active",
+      kind: "resolved",
+      conversationId: "conversation-2",
+      checkoutRecoveryId: "recovery-2",
+      shopId: "shop-2",
+      mode: "active",
     });
-    mocks.conversation.receiveMessage.mockRejectedValueOnce(new Error("database unavailable"));
-    await expect(processInboundMessage(event)).rejects.toThrow("database unavailable");
+    mocks.conversation.receiveMessage.mockRejectedValueOnce(
+      new Error("database unavailable"),
+    );
+    await expect(processInboundMessage(event)).rejects.toThrow(
+      "database unavailable",
+    );
     expect(mocks.reachability).not.toHaveBeenCalled();
   });
 });
-
 
 describe("ARCH-047 BG003 strict Shared-v2 template-status dispatch", () => {
   const uuid = "550e8400-e29b-41d4-a716-446655440000";
@@ -598,16 +725,28 @@ describe("ARCH-047 BG003 strict Shared-v2 template-status dispatch", () => {
       "@modainteract/moda-interact-shared/whatsapp-template-events/fixtures",
     );
     const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
-      observation: typeof event; expectedJobId: string;
+      observation: typeof event;
+      expectedJobId: string;
     };
-    expect(fixture.observation).toEqual({ ...event, providerStatus: "APPROVED" });
+    expect(fixture.observation).toEqual({
+      ...event,
+      providerStatus: "APPROVED",
+    });
     expect(fixture.expectedJobId).toBe(formatMetaTemplateStatusJobId(uuid));
-    await processTemplateStatusJob("meta-template-status-update", fixture.observation, fixture.expectedJobId);
+    await processTemplateStatusJob(
+      "meta-template-status-update",
+      fixture.observation,
+      fixture.expectedJobId,
+    );
     expect(mocks.templateStatus).toHaveBeenCalledOnce();
   });
 
   it("maps Shared-v2 receipt time and invokes only the template status port", async () => {
-    await processTemplateStatusJob("meta-template-status-update", event, formatMetaTemplateStatusJobId(uuid));
+    await processTemplateStatusJob(
+      "meta-template-status-update",
+      event,
+      formatMetaTemplateStatusJobId(uuid),
+    );
     expect(mocks.templateStatus).toHaveBeenCalledExactlyOnceWith({
       eventIdentity: event.eventIdentity,
       wabaId: event.wabaId,
@@ -622,37 +761,89 @@ describe("ARCH-047 BG003 strict Shared-v2 template-status dispatch", () => {
 
   it("processes distinct occurrence UUIDs even when Meta statuses are identical", async () => {
     const second = "550e8400-e29b-41d4-a716-446655440001";
-    await processTemplateStatusJob("meta-template-status-update", event, formatMetaTemplateStatusJobId(uuid));
-    await processTemplateStatusJob("meta-template-status-update", {
-      ...event, eventIdentity: formatMetaTemplateStatusEventIdentity(second),
-    }, formatMetaTemplateStatusJobId(second));
+    await processTemplateStatusJob(
+      "meta-template-status-update",
+      event,
+      formatMetaTemplateStatusJobId(uuid),
+    );
+    await processTemplateStatusJob(
+      "meta-template-status-update",
+      {
+        ...event,
+        eventIdentity: formatMetaTemplateStatusEventIdentity(second),
+      },
+      formatMetaTemplateStatusJobId(second),
+    );
     expect(mocks.templateStatus).toHaveBeenCalledTimes(2);
-    expect(mocks.templateStatus.mock.calls[0]![0].eventIdentity)
-      .not.toEqual(mocks.templateStatus.mock.calls[1]![0].eventIdentity);
+    expect(mocks.templateStatus.mock.calls[0]![0].eventIdentity).not.toEqual(
+      mocks.templateStatus.mock.calls[1]![0].eventIdentity,
+    );
   });
 
   it.each([
     ["wrong job", "message-status", event, formatMetaTemplateStatusJobId(uuid)],
-    ["wrong version", "meta-template-status-update", { ...event, schemaVersion: 1 }, formatMetaTemplateStatusJobId(uuid)],
-    ["extra field", "meta-template-status-update", { ...event, extra: "x" }, formatMetaTemplateStatusJobId(uuid)],
-    ["content hash v1", "meta-template-status-update", { ...event, eventIdentity: "meta-template-status:v1:hash" }, formatMetaTemplateStatusJobId(uuid)],
-    ["wrong job ID", "meta-template-status-update", event, "meta-template-status-v1-stale"],
-    ["wrong provider ID", "meta-template-status-update", { ...event, providerTemplateId: "p-99" }, formatMetaTemplateStatusJobId(uuid)],
-    ["noncanonical receipt", "meta-template-status-update", { ...event, receivedAt: "2026-10-25T19:00:00Z" }, formatMetaTemplateStatusJobId(uuid)],
-    ["oversized payload", "meta-template-status-update", { ...event, providerTemplateName: "x".repeat(5000) }, formatMetaTemplateStatusJobId(uuid)],
-  ])("rejects %s before any Meta service work", async (_label, name, data, jobId) => {
-    await expect(processTemplateStatusJob(name as string, data, jobId as string)).rejects.toThrow();
-    expect(mocks.templateStatus).not.toHaveBeenCalled();
-    expect(mocks.logger.error).toHaveBeenCalled();
-  });
+    [
+      "wrong version",
+      "meta-template-status-update",
+      { ...event, schemaVersion: 1 },
+      formatMetaTemplateStatusJobId(uuid),
+    ],
+    [
+      "extra field",
+      "meta-template-status-update",
+      { ...event, extra: "x" },
+      formatMetaTemplateStatusJobId(uuid),
+    ],
+    [
+      "content hash v1",
+      "meta-template-status-update",
+      { ...event, eventIdentity: "meta-template-status:v1:hash" },
+      formatMetaTemplateStatusJobId(uuid),
+    ],
+    [
+      "wrong job ID",
+      "meta-template-status-update",
+      event,
+      "meta-template-status-v1-stale",
+    ],
+    [
+      "wrong provider ID",
+      "meta-template-status-update",
+      { ...event, providerTemplateId: "p-99" },
+      formatMetaTemplateStatusJobId(uuid),
+    ],
+    [
+      "noncanonical receipt",
+      "meta-template-status-update",
+      { ...event, receivedAt: "2026-10-25T19:00:00Z" },
+      formatMetaTemplateStatusJobId(uuid),
+    ],
+    [
+      "oversized payload",
+      "meta-template-status-update",
+      { ...event, providerTemplateName: "x".repeat(5000) },
+      formatMetaTemplateStatusJobId(uuid),
+    ],
+  ])(
+    "rejects %s before any Meta service work",
+    async (_label, name, data, jobId) => {
+      await expect(
+        processTemplateStatusJob(name as string, data, jobId as string),
+      ).rejects.toThrow();
+      expect(mocks.templateStatus).not.toHaveBeenCalled();
+      expect(mocks.logger.error).toHaveBeenCalled();
+    },
+  );
 
   it("the actual WhatsApp worker switch dispatches this job without touching customer messages", async () => {
     createWhatsappWorker();
     expect(mocks.dispatch).toBeTypeOf("function");
     await mocks.dispatch!({
       id: formatMetaTemplateStatusJobId(uuid),
-      name: "meta-template-status-update", data: event,
-      attemptsMade: 0, opts: { attempts: 5 },
+      name: "meta-template-status-update",
+      data: event,
+      attemptsMade: 0,
+      opts: { attempts: 5 },
     });
     expect(mocks.templateStatus).toHaveBeenCalledTimes(1);
     expect(mocks.routing.resolveInboundMessage).not.toHaveBeenCalled();
@@ -662,38 +853,100 @@ describe("ARCH-047 BG003 strict Shared-v2 template-status dispatch", () => {
   it("logs and rethrows provider reconciliation errors for BullMQ retry", async () => {
     const error = new Error("provider outage");
     mocks.templateStatus.mockRejectedValueOnce(error);
-    await expect(processTemplateStatusJob("meta-template-status-update", event,
-      formatMetaTemplateStatusJobId(uuid))).rejects.toBe(error);
-    expect(mocks.logger.error).toHaveBeenCalledWith("whatsapp.template_status.failed", expect.anything());
+    await expect(
+      processTemplateStatusJob(
+        "meta-template-status-update",
+        event,
+        formatMetaTemplateStatusJobId(uuid),
+      ),
+    ).rejects.toBe(error);
+    expect(mocks.logger.error).toHaveBeenCalledWith(
+      "whatsapp.template_status.failed",
+      expect.anything(),
+    );
   });
 });
-
 
 it("loads a recovery turn with its current, outreach-pinned CustomerPhone when the legacy phone is null", async () => {
   mocks.eligibility.isShopExecutionActive.mockResolvedValue(true);
-  mocks.recovery.getAgentContext.mockResolvedValue({ conversation: { messages: [] } });
+  mocks.recovery.getAgentContext.mockResolvedValue({
+    conversation: { messages: [] },
+  });
   const owned = {
-    id: "recovery-1", shopId: "shop-1", status: "ENGAGED",
-    shop: { domain: "example.myshopify.com", status: "ACTIVE", defaultCountryCode: "US" },
-    customer: { id: "customer-1", shopId: "shop-1", phone: null, firstName: null, _count: { phones: 1 }, phones: [{
-      phone: "+447400123456", whatsappCanonicalPhone: "447400123456", whatsappNoContact: false,
-    }] },
-    outreachAttempts: [{ recipient: "447400123456", sentAt: new Date(), outboundMessage: {
-      providerMessageId: "outbound-1", sentAt: new Date(), direction: "OUTBOUND", conversationId: "conversation-1",
-    } }],
+    id: "recovery-1",
+    shopId: "shop-1",
+    status: "ENGAGED",
+    shop: {
+      domain: "example.myshopify.com",
+      status: "ACTIVE",
+      defaultCountryCode: "US",
+    },
+    customer: {
+      id: "customer-1",
+      shopId: "shop-1",
+      phone: null,
+      firstName: null,
+      _count: { phones: 1 },
+      phones: [
+        {
+          phone: "+447400123456",
+          whatsappCanonicalPhone: "447400123456",
+          whatsappNoContact: false,
+        },
+      ],
+    },
+    outreachAttempts: [
+      {
+        recipient: "447400123456",
+        sentAt: new Date(),
+        outboundMessage: {
+          providerMessageId: "outbound-1",
+          sentAt: new Date(),
+          direction: "OUTBOUND",
+          conversationId: "conversation-1",
+        },
+      },
+    ],
   };
   mocks.database.conversation.findUniqueOrThrow.mockResolvedValue({
-    id: "conversation-1", type: "RECOVERY", shopId: null, checkoutRecoveryId: owned.id,
-    checkoutRecovery: owned, messages: [],
+    id: "conversation-1",
+    type: "RECOVERY",
+    shopId: null,
+    checkoutRecoveryId: owned.id,
+    checkoutRecovery: owned,
+    messages: [],
   });
-  await expect(loadConversationTurn("conversation-1", new Date())).resolves.toMatchObject({
-    to: "+447400123456", customerPhone: "+447400123456", shopId: "shop-1",
+  await expect(
+    loadConversationTurn("conversation-1", new Date()),
+  ).resolves.toMatchObject({
+    to: "+447400123456",
+    customerPhone: "+447400123456",
+    shopId: "shop-1",
   });
   owned.customer.phones[0]!.phone = "+447400123457";
   owned.customer.phones[0]!.whatsappCanonicalPhone = "447400123457";
-  await expect(loadConversationTurn("conversation-1", new Date())).rejects.toThrow("no outbound ownership");
+  await expect(
+    loadConversationTurn("conversation-1", new Date()),
+  ).rejects.toThrow("no outbound ownership");
 });
 
-describe('branded main rollout startup proof',()=>{
- it.each([undefined,'false','TRUE','true'])('emits only safe enabled boolean for %s',value=>{vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED',value);try{vi.clearAllMocks();createWhatsappWorker();expect(mocks.logger.info).toHaveBeenCalledWith('whatsapp.worker.started',expect.objectContaining({recoveryBrandedMainReplyEnabled:value==='true'}));}finally{vi.unstubAllEnvs();}});
+describe("branded main rollout startup proof", () => {
+  it.each([undefined, "false", "TRUE", "true"])(
+    "emits only safe enabled boolean for %s",
+    (value) => {
+      vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", value);
+      try {
+        vi.clearAllMocks();
+        createWhatsappWorker();
+        expect(mocks.logger.info).toHaveBeenCalledWith(
+          "whatsapp.worker.started",
+          expect.objectContaining({
+            recoveryBrandedMainReplyEnabled: value === "true",
+          }),
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 });

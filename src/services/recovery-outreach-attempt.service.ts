@@ -1,15 +1,24 @@
-import { Prisma, RecoveryOutreachStatus, RecoveryOutreachTrigger } from "@prisma/client";
+import {
+  Prisma,
+  RecoveryOutreachStatus,
+  RecoveryOutreachTrigger,
+} from "@prisma/client";
 import prisma from "../lib/db.js";
 import type { RecoveryPolicySnapshot } from "./recovery-policy.service.js";
-import { originalOutreachTrigger, type OriginalOutreachSequence } from "../domain/recovery-outreach-identity.js";
+import {
+  originalOutreachTrigger,
+  type OriginalOutreachSequence,
+} from "../domain/recovery-outreach-identity.js";
 
 export class RecoveryOutreachAttemptService {
   constructor(private readonly database = prisma) {}
 
   private get attemptModel() {
-    return (this.database as unknown as {
-      recoveryOutreachAttempt?: typeof prisma.recoveryOutreachAttempt;
-    }).recoveryOutreachAttempt;
+    return (
+      this.database as unknown as {
+        recoveryOutreachAttempt?: typeof prisma.recoveryOutreachAttempt;
+      }
+    ).recoveryOutreachAttempt;
   }
 
   private requireAttemptModel() {
@@ -74,9 +83,10 @@ export class RecoveryOutreachAttemptService {
         recipient: input.recipient,
         configuredOfferMode: input.initialAttempt.configuredOfferMode,
         fixedShopifyDiscountId: input.initialAttempt.fixedShopifyDiscountId,
-        offerSnapshot: input.initialAttempt.offerSnapshot === null
-          ? Prisma.JsonNull
-          : (input.initialAttempt.offerSnapshot as Prisma.InputJsonValue),
+        offerSnapshot:
+          input.initialAttempt.offerSnapshot === null
+            ? Prisma.JsonNull
+            : (input.initialAttempt.offerSnapshot as Prisma.InputJsonValue),
       },
       update: {},
     });
@@ -103,14 +113,22 @@ export class RecoveryOutreachAttemptService {
   async markNoResponseIfWaiting(id: string) {
     if (!this.attemptModel) return null;
     return this.attemptModel.updateMany({
-      where: { id, status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE, customerRespondedAt: null },
+      where: {
+        id,
+        status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE,
+        customerRespondedAt: null,
+      },
       data: { status: RecoveryOutreachStatus.NO_RESPONSE },
     });
   }
 
   async markWaitingAfterConfirmedSend(
     id: string,
-    data: { sentAt: Date; outboundMessageId: string; followUpDueAt?: Date | null },
+    data: {
+      sentAt: Date;
+      outboundMessageId: string;
+      followUpDueAt?: Date | null;
+    },
   ) {
     if (!this.attemptModel) return null;
     return this.attemptModel.updateMany({
@@ -119,7 +137,10 @@ export class RecoveryOutreachAttemptService {
         OR: [
           {
             status: {
-              in: [RecoveryOutreachStatus.PENDING, RecoveryOutreachStatus.CAPACITY_BLOCKED],
+              in: [
+                RecoveryOutreachStatus.PENDING,
+                RecoveryOutreachStatus.CAPACITY_BLOCKED,
+              ],
             },
           },
           {
@@ -170,22 +191,28 @@ export class RecoveryOutreachAttemptService {
   }
 
   async markEngagedForConversation(conversationId: string, occurredAt: Date) {
-    const conversationModel = (this.database as unknown as {
-      conversation?: {
-        findUnique?: (args: {
-          where: { id: string };
-          select: { checkoutRecoveryId: true };
-        }) => Promise<{ checkoutRecoveryId: string | null } | null>;
-      };
-    }).conversation;
+    const conversationModel = (
+      this.database as unknown as {
+        conversation?: {
+          findUnique?: (args: {
+            where: { id: string };
+            select: { checkoutRecoveryId: true };
+          }) => Promise<{ checkoutRecoveryId: string | null } | null>;
+        };
+      }
+    ).conversation;
     if (!conversationModel?.findUnique) return null;
     const conversation = await conversationModel.findUnique({
       where: { id: conversationId },
       select: { checkoutRecoveryId: true },
     });
     if (!conversation?.checkoutRecoveryId) return null;
-    return this.markEngagedFromInbound(conversation.checkoutRecoveryId, occurredAt);
+    return this.markEngagedFromInbound(
+      conversation.checkoutRecoveryId,
+      occurredAt,
+    );
   }
 }
 
-export const recoveryOutreachAttemptService = new RecoveryOutreachAttemptService();
+export const recoveryOutreachAttemptService =
+  new RecoveryOutreachAttemptService();

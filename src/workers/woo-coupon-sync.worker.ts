@@ -5,7 +5,10 @@ import { connectionRedis } from "../lib/redis.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { WooCouponCatalogueService } from "../services/woo-coupon-catalogue.service.js";
 import { WooCouponReaderService } from "../services/woo-coupon-reader.service.js";
-import { WooCouponPageTransport, WooCouponReadError } from "../providers/woo-coupon-transport.js";
+import {
+  WooCouponPageTransport,
+  WooCouponReadError,
+} from "../providers/woo-coupon-transport.js";
 import { WooCouponGrantService } from "../services/woo-coupon-grant.service.js";
 import { readWooCouponPolicy } from "../services/platform-configuration/consumers.js";
 import {
@@ -29,10 +32,16 @@ function safeErrorName(error: unknown): string {
   return /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : "UnknownError";
 }
 
-function safeCauseField(error: unknown, key: "code" | "syscall"): string | undefined {
+function safeCauseField(
+  error: unknown,
+  key: "code" | "syscall",
+): string | undefined {
   if (!error || typeof error !== "object") return undefined;
   const value = (error as Record<string, unknown>)[key];
-  return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value) ? value : undefined;
+  return typeof value === "string" &&
+    /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)
+    ? value
+    : undefined;
 }
 
 function wooCouponErrorFields(error: unknown) {
@@ -40,19 +49,35 @@ function wooCouponErrorFields(error: unknown) {
   const messageSource = cause instanceof Error ? cause : error;
   return {
     errorName: safeErrorName(error),
-    errorMessage: error instanceof WooCouponReadError && error.message !== error.code
-      ? error.message
-      : boundedErrorMessage(messageSource instanceof Error ? messageSource.message : String(error)),
-    ...(safeCauseField(cause, "code") ? { causeCode: safeCauseField(cause, "code") } : {}),
-    ...(safeCauseField(cause, "syscall") ? { causeSyscall: safeCauseField(cause, "syscall") } : {}),
-    ...(error instanceof WooCouponReadError && error.stage ? { errorStage: error.stage } : {}),
-    ...(error instanceof WooCouponReadError && Number.isInteger(error.httpStatus)
+    errorMessage:
+      error instanceof WooCouponReadError && error.message !== error.code
+        ? error.message
+        : boundedErrorMessage(
+            messageSource instanceof Error
+              ? messageSource.message
+              : String(error),
+          ),
+    ...(safeCauseField(cause, "code")
+      ? { causeCode: safeCauseField(cause, "code") }
+      : {}),
+    ...(safeCauseField(cause, "syscall")
+      ? { causeSyscall: safeCauseField(cause, "syscall") }
+      : {}),
+    ...(error instanceof WooCouponReadError && error.stage
+      ? { errorStage: error.stage }
+      : {}),
+    ...(error instanceof WooCouponReadError &&
+    Number.isInteger(error.httpStatus)
       ? { httpStatus: error.httpStatus }
       : {}),
-    ...(error instanceof WooCouponReadError && error.providerResponseBody !== undefined
-      ? { providerResponseBody: error.providerResponseBody } : {}),
-    ...(error instanceof WooCouponReadError && error.redirectLocation !== undefined
-      ? { redirectLocation: error.redirectLocation } : {}),
+    ...(error instanceof WooCouponReadError &&
+    error.providerResponseBody !== undefined
+      ? { providerResponseBody: error.providerResponseBody }
+      : {}),
+    ...(error instanceof WooCouponReadError &&
+    error.redirectLocation !== undefined
+      ? { redirectLocation: error.redirectLocation }
+      : {}),
   };
 }
 
@@ -67,35 +92,51 @@ export function parseWooCouponSyncJob(job: Pick<Job, "name" | "id" | "data">): {
   requestedAt: Date;
 } {
   const value: unknown = job.data;
-  if (job.name !== WOO_COUPON_SYNC_JOB_NAME ||
-      !value || typeof value !== "object" || Array.isArray(value)) {
+  if (
+    job.name !== WOO_COUPON_SYNC_JOB_NAME ||
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
     throw new Error("Invalid Woo coupon synchronisation job");
   }
   const data = value as Record<string, unknown>;
-  if (Object.keys(data).length !== 2 ||
-      typeof data.shopId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(data.shopId) ||
-      typeof data.requestedAt !== "string" || data.requestedAt.length > 35 ||
-      typeof job.id !== "string") {
+  if (
+    Object.keys(data).length !== 2 ||
+    typeof data.shopId !== "string" ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(data.shopId) ||
+    typeof data.requestedAt !== "string" ||
+    data.requestedAt.length > 35 ||
+    typeof job.id !== "string"
+  ) {
     throw new Error("Invalid Woo coupon synchronisation job");
   }
   const requestedAt = new Date(data.requestedAt);
-  if (!Number.isFinite(requestedAt.getTime()) ||
-      requestedAt.toISOString() !== data.requestedAt ||
-      job.id !== createWooCouponJobId(data.shopId, data.requestedAt)) {
+  if (
+    !Number.isFinite(requestedAt.getTime()) ||
+    requestedAt.toISOString() !== data.requestedAt ||
+    job.id !== createWooCouponJobId(data.shopId, data.requestedAt)
+  ) {
     throw new Error("Invalid Woo coupon synchronisation job");
   }
   return { shopId: data.shopId, requestedAt };
 }
 
-export function wooCouponWorkerConcurrency(environment: NodeJS.ProcessEnv): number {
+export function wooCouponWorkerConcurrency(
+  environment: NodeJS.ProcessEnv,
+): number {
   const raw = environment.WOO_COUPON_SYNC_WORKER_CONCURRENCY;
   if (raw === undefined || raw === "") return 4;
   if (!/^[1-9]\d*$/.test(raw)) {
-    throw new RangeError("WOO_COUPON_SYNC_WORKER_CONCURRENCY must be an integer from 1 to 32");
+    throw new RangeError(
+      "WOO_COUPON_SYNC_WORKER_CONCURRENCY must be an integer from 1 to 32",
+    );
   }
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed > 32) {
-    throw new RangeError("WOO_COUPON_SYNC_WORKER_CONCURRENCY must be an integer from 1 to 32");
+    throw new RangeError(
+      "WOO_COUPON_SYNC_WORKER_CONCURRENCY must be an integer from 1 to 32",
+    );
   }
   return parsed;
 }
@@ -106,11 +147,21 @@ export function wooCouponWorkerConcurrency(environment: NodeJS.ProcessEnv): numb
  */
 const defaultWooCouponCatalogue = new WooCouponCatalogueService();
 export function createWooCouponSyncWorker(
-  catalogue: Pick<WooCouponCatalogueService, "reconcile"> = defaultWooCouponCatalogue,
+  catalogue: Pick<
+    WooCouponCatalogueService,
+    "reconcile"
+  > = defaultWooCouponCatalogue,
   concurrency?: number,
 ) {
-  if (typeof concurrency !== "number" || !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) {
-    throw new RangeError("Woo coupon worker concurrency must be between 1 and 32");
+  if (
+    typeof concurrency !== "number" ||
+    !Number.isInteger(concurrency) ||
+    concurrency < 1 ||
+    concurrency > 32
+  ) {
+    throw new RangeError(
+      "Woo coupon worker concurrency must be between 1 and 32",
+    );
   }
   const worker = new Worker<WooCouponSyncJobData>(
     WOO_COUPON_SYNC_QUEUE_NAME,
@@ -124,17 +175,28 @@ export function createWooCouponSyncWorker(
       logger.info("woo.coupon_sync.received", fields);
       try {
         // One fresh policy snapshot for this job; no captured environment values.
-        const scoped = catalogue === defaultWooCouponCatalogue
-          ? await (async () => {
-              const settings = await readWooCouponPolicy();
-              return new WooCouponCatalogueService(undefined, (shop) => new WooCouponReaderService(
-                new WooCouponGrantService(), new WooCouponPageTransport(undefined, settings), settings,
-              ).fetchAll(shop), undefined, settings);
-            })()
-          : catalogue;
+        const scoped =
+          catalogue === defaultWooCouponCatalogue
+            ? await (async () => {
+                const settings = await readWooCouponPolicy();
+                return new WooCouponCatalogueService(
+                  undefined,
+                  (shop) =>
+                    new WooCouponReaderService(
+                      new WooCouponGrantService(),
+                      new WooCouponPageTransport(undefined, settings),
+                      settings,
+                    ).fetchAll(shop),
+                  undefined,
+                  settings,
+                );
+              })()
+            : catalogue;
         const outcome = await scoped.reconcile(shopId, requestedAt);
-        if (outcome === "current") logger.info("woo.coupon_sync.completed", { ...fields, outcome });
-        else if (outcome === "unavailable") logger.warn("woo.coupon_sync.unavailable", { ...fields, outcome });
+        if (outcome === "current")
+          logger.info("woo.coupon_sync.completed", { ...fields, outcome });
+        else if (outcome === "unavailable")
+          logger.warn("woo.coupon_sync.unavailable", { ...fields, outcome });
         else logger.info("woo.coupon_sync.skipped", { ...fields, outcome });
         // Unavailable / already-running / superseded are non-retryable outcomes.
         // The global dispatcher will revisit the shop after its cooldown.
@@ -142,9 +204,10 @@ export function createWooCouponSyncWorker(
       } catch (error) {
         logger.error("woo.coupon_sync.failed", {
           ...fields,
-          errorCode: error instanceof Error && error.name === "WooCouponReadError"
-            ? String((error as Error & { code?: unknown }).code).slice(0, 64)
-            : "woo_coupon_sync_error",
+          errorCode:
+            error instanceof Error && error.name === "WooCouponReadError"
+              ? String((error as Error & { code?: unknown }).code).slice(0, 64)
+              : "woo_coupon_sync_error",
           ...wooCouponErrorFields(error),
           error,
         });

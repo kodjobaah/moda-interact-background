@@ -25,22 +25,22 @@ const descriptor = {
 };
 const evidence = (overrides: Record<string, unknown> = {}) => {
   const content = {
-  turn,
-  grantId: "grant-1",
-  releaseId: "release-1",
-  offerId: "offer-1",
-  proposal: null,
-  basketFingerprint: "a".repeat(64),
-  ruleFingerprint: "b".repeat(64),
-  evaluatedAt: "2026-09-21T00:00:00.000Z",
-  expiresAt: "2026-09-21T00:00:30.000Z",
-  outcome: "QUALIFIES_FOR_KNOWN_RULES" as const,
-  currency: "GBP",
-  savings: "10.00",
-  resultingTotal: "90.00",
-  evaluatedConditions: [],
-  unresolvedConditions: [],
-  ...overrides,
+    turn,
+    grantId: "grant-1",
+    releaseId: "release-1",
+    offerId: "offer-1",
+    proposal: null,
+    basketFingerprint: "a".repeat(64),
+    ruleFingerprint: "b".repeat(64),
+    evaluatedAt: "2026-09-21T00:00:00.000Z",
+    expiresAt: "2026-09-21T00:00:30.000Z",
+    outcome: "QUALIFIES_FOR_KNOWN_RULES" as const,
+    currency: "GBP",
+    savings: "10.00",
+    resultingTotal: "90.00",
+    evaluatedConditions: [],
+    unresolvedConditions: [],
+    ...overrides,
   };
   return { ...content, evidenceId: digest(canonicalJson(content)) };
 };
@@ -148,7 +148,9 @@ describe("turn-local offer evidence", () => {
               observedAt: "2026-09-21T00:00:00.000Z",
             },
             proposal: {
-              operations: [{ kind: "ADD", variantId: "variant-1", quantity: 1 }],
+              operations: [
+                { kind: "ADD", variantId: "variant-1", quantity: 1 },
+              ],
             },
             extraSpend: "0.00",
             resultingTotal: "90.00",
@@ -177,13 +179,16 @@ describe("turn-local offer evidence", () => {
   });
 
   it("replays two distinct canonical recommendation alternatives once in reverse order", async () => {
-    const first = canonicalFixture.original.data.alternatives[0]!.evidence as Record<string, unknown>;
+    const first = canonicalFixture.original.data.alternatives[0]!
+      .evidence as Record<string, unknown>;
     const { evidenceId: _firstEvidenceId, ...firstContent } = first;
     const secondContent = {
       ...firstContent,
       offerId: "offer-fixture-2",
       proposal: {
-        operations: [{ kind: "ADD", variantId: "variant-fixture-2", quantity: 1 }],
+        operations: [
+          { kind: "ADD", variantId: "variant-fixture-2", quantity: 1 },
+        ],
       },
     };
     const second = {
@@ -194,13 +199,20 @@ describe("turn-local offer evidence", () => {
     const recommendationResult = result({
       alternatives: [
         {
-          ...(canonicalFixture.original.data.alternatives[0] as Record<string, unknown>),
+          ...(canonicalFixture.original.data.alternatives[0] as Record<
+            string,
+            unknown
+          >),
           evidence: first,
         },
         {
-          ...(canonicalFixture.original.data.alternatives[0] as Record<string, unknown>),
+          ...(canonicalFixture.original.data.alternatives[0] as Record<
+            string,
+            unknown
+          >),
           product: {
-            ...(canonicalFixture.original.data.alternatives[0]!.product as Record<string, unknown>),
+            ...(canonicalFixture.original.data.alternatives[0]!
+              .product as Record<string, unknown>),
             productId: "product-fixture-2",
             variantId: "variant-fixture-2",
           },
@@ -299,25 +311,28 @@ describe("turn-local offer evidence", () => {
       "proposal",
       { operations: [{ kind: "ADD", variantId: "variant-2", quantity: 1 }] },
     ],
-  ])("rejects each independently changed recommendation field: %s", async (field, value) => {
-    const registry = new TurnEvidenceRegistry();
-    const original = evidence();
-    registry.record(descriptor, {}, result(original), extractTrustedEvidence);
-    const changed = vi.fn().mockResolvedValue(
-      result(evidence({ [field]: value })),
-    );
-    await expect(
-      registry.refresh([original.evidenceId], {
-        remoteCalls: 0,
-        maxRemoteCalls: 10,
-        now: () => Date.parse("2026-09-21T00:00:10.000Z"),
-        assertCurrent: vi.fn().mockResolvedValue(undefined),
-        replay: changed,
-        extractEvidence: extractTrustedEvidence,
-      }),
-    ).resolves.toEqual({ kind: "refer" });
-    expect(changed).toHaveBeenCalledOnce();
-  });
+  ])(
+    "rejects each independently changed recommendation field: %s",
+    async (field, value) => {
+      const registry = new TurnEvidenceRegistry();
+      const original = evidence();
+      registry.record(descriptor, {}, result(original), extractTrustedEvidence);
+      const changed = vi
+        .fn()
+        .mockResolvedValue(result(evidence({ [field]: value })));
+      await expect(
+        registry.refresh([original.evidenceId], {
+          remoteCalls: 0,
+          maxRemoteCalls: 10,
+          now: () => Date.parse("2026-09-21T00:00:10.000Z"),
+          assertCurrent: vi.fn().mockResolvedValue(undefined),
+          replay: changed,
+          extractEvidence: extractTrustedEvidence,
+        }),
+      ).resolves.toEqual({ kind: "refer" });
+      expect(changed).toHaveBeenCalledOnce();
+    },
+  );
 
   it("rejects exhausted refresh budget without replay", async () => {
     const registry = new TurnEvidenceRegistry();
@@ -363,8 +378,18 @@ describe("turn-local offer evidence", () => {
       result({ ...original, evidenceId: "c".repeat(64) }),
       extractTrustedEvidence,
     );
-    registry.record(descriptor, { query: "one" }, result(original), extractTrustedEvidence);
-    registry.record(descriptor, { query: "two" }, result(original), extractTrustedEvidence);
+    registry.record(
+      descriptor,
+      { query: "one" },
+      result(original),
+      extractTrustedEvidence,
+    );
+    registry.record(
+      descriptor,
+      { query: "two" },
+      result(original),
+      extractTrustedEvidence,
+    );
     const replay = vi.fn().mockResolvedValue(result(original));
     await expect(
       registry.refresh([original.evidenceId], {
@@ -407,7 +432,10 @@ describe("turn-local offer evidence", () => {
     expect(replay).not.toHaveBeenCalled();
 
     const incomplete = new TurnEvidenceRegistry();
-    const unusable = evidence({ savings: null, unresolvedConditions: [{ code: "x", description: "unknown" }] });
+    const unusable = evidence({
+      savings: null,
+      unresolvedConditions: [{ code: "x", description: "unknown" }],
+    });
     incomplete.record(descriptor, {}, result(unusable), extractTrustedEvidence);
     await expect(
       incomplete.refresh([unusable.evidenceId], {
@@ -429,29 +457,46 @@ describe("turn-local offer evidence", () => {
       "duplicate",
       {
         alternatives: [
-          { product: null, proposal: null, extraSpend: null, resultingTotal: null, currency: null, evidence: evidence() },
-          { product: null, proposal: null, extraSpend: null, resultingTotal: null, currency: null, evidence: evidence() },
+          {
+            product: null,
+            proposal: null,
+            extraSpend: null,
+            resultingTotal: null,
+            currency: null,
+            evidence: evidence(),
+          },
+          {
+            product: null,
+            proposal: null,
+            extraSpend: null,
+            resultingTotal: null,
+            currency: null,
+            evidence: evidence(),
+          },
         ],
         truncated: false,
       },
     ],
-  ])("refers for an independent %s recommendation match", async (_name, data) => {
-    const registry = new TurnEvidenceRegistry();
-    const original = evidence();
-    registry.record(descriptor, {}, result(original), extractTrustedEvidence);
-    const replay = vi.fn().mockResolvedValue(result(data));
-    await expect(
-      registry.refresh([original.evidenceId], {
-        remoteCalls: 0,
-        maxRemoteCalls: 10,
-        now: () => Date.parse("2026-09-21T00:00:10.000Z"),
-        assertCurrent: vi.fn().mockResolvedValue(undefined),
-        replay,
-        extractEvidence: extractTrustedEvidence,
-      }),
-    ).resolves.toEqual({ kind: "refer" });
-    expect(replay).toHaveBeenCalledOnce();
-  });
+  ])(
+    "refers for an independent %s recommendation match",
+    async (_name, data) => {
+      const registry = new TurnEvidenceRegistry();
+      const original = evidence();
+      registry.record(descriptor, {}, result(original), extractTrustedEvidence);
+      const replay = vi.fn().mockResolvedValue(result(data));
+      await expect(
+        registry.refresh([original.evidenceId], {
+          remoteCalls: 0,
+          maxRemoteCalls: 10,
+          now: () => Date.parse("2026-09-21T00:00:10.000Z"),
+          assertCurrent: vi.fn().mockResolvedValue(undefined),
+          replay,
+          extractEvidence: extractTrustedEvidence,
+        }),
+      ).resolves.toEqual({ kind: "refer" });
+      expect(replay).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([
     [
@@ -468,38 +513,61 @@ describe("turn-local offer evidence", () => {
         outcome: "UNKNOWN",
         savings: null,
         resultingTotal: null,
-        unresolvedConditions: [{ code: "UNKNOWN", description: "Needs checkout" }],
+        unresolvedConditions: [
+          { code: "UNKNOWN", description: "Needs checkout" },
+        ],
       },
     ],
-  ])("keeps schema-valid %s out of positive eligibility", async (_name, overrides) => {
-    const candidate = evidence(overrides);
-    expect(CommerceEvidenceSchema.safeParse(candidate).success).toBe(true);
-    const registry = new TurnEvidenceRegistry();
-    registry.record(descriptor, {}, result(candidate), extractTrustedEvidence);
-    const replay = vi.fn().mockResolvedValue(result(candidate));
-    await expect(
-      registry.refresh([candidate.evidenceId], {
-        remoteCalls: 0,
-        maxRemoteCalls: 10,
-        now: () => Date.parse("2026-09-21T00:00:10.000Z"),
-        assertCurrent: vi.fn().mockResolvedValue(undefined),
-        replay,
-        extractEvidence: extractTrustedEvidence,
-      }),
-    ).resolves.toEqual({ kind: "refer" });
-    expect(replay).toHaveBeenCalledOnce();
-  });
+  ])(
+    "keeps schema-valid %s out of positive eligibility",
+    async (_name, overrides) => {
+      const candidate = evidence(overrides);
+      expect(CommerceEvidenceSchema.safeParse(candidate).success).toBe(true);
+      const registry = new TurnEvidenceRegistry();
+      registry.record(
+        descriptor,
+        {},
+        result(candidate),
+        extractTrustedEvidence,
+      );
+      const replay = vi.fn().mockResolvedValue(result(candidate));
+      await expect(
+        registry.refresh([candidate.evidenceId], {
+          remoteCalls: 0,
+          maxRemoteCalls: 10,
+          now: () => Date.parse("2026-09-21T00:00:10.000Z"),
+          assertCurrent: vi.fn().mockResolvedValue(undefined),
+          replay,
+          extractEvidence: extractTrustedEvidence,
+        }),
+      ).resolves.toEqual({ kind: "refer" });
+      expect(replay).toHaveBeenCalledOnce();
+    },
+  );
 
   it("distinguishes stale and cancelled replay failures from referral failures", async () => {
     const original = evidence();
     for (const [failure, expected] of [
       [
-        { contractVersion: "commerce.v1", status: "ERROR", code: "STALE_TURN", retryable: false },
+        {
+          contractVersion: "commerce.v1",
+          status: "ERROR",
+          code: "STALE_TURN",
+          retryable: false,
+        },
         { kind: "suppress", reason: "STALE_TURN" },
       ],
-      [new DOMException("cancelled", "AbortError"), { kind: "suppress", reason: "CANCELLED" }],
       [
-        { contractVersion: "commerce.v1", status: "ERROR", code: "THROTTLED", retryable: true },
+        new DOMException("cancelled", "AbortError"),
+        { kind: "suppress", reason: "CANCELLED" },
+      ],
+      [
+        {
+          contractVersion: "commerce.v1",
+          status: "ERROR",
+          code: "THROTTLED",
+          retryable: true,
+        },
         { kind: "refer" },
       ],
     ] as const) {
@@ -546,28 +614,31 @@ describe("turn-local offer evidence", () => {
     "THROTTLED",
     "INVALID_INPUT",
     "INCOMPATIBLE_VERSION",
-  ] as const)("refers once for a resolved structured %s error", async (code) => {
-    const registry = new TurnEvidenceRegistry();
-    const original = evidence();
-    registry.record(descriptor, {}, result(original), extractTrustedEvidence);
-    const replay = vi.fn().mockResolvedValue({
-      contractVersion: "commerce.v1",
-      status: "ERROR",
-      code,
-      retryable: true,
-    } satisfies CommerceToolResult);
-    await expect(
-      registry.refresh([original.evidenceId], {
-        remoteCalls: 0,
-        maxRemoteCalls: 10,
-        now: () => Date.parse("2026-09-21T00:00:10.000Z"),
-        assertCurrent: vi.fn().mockResolvedValue(undefined),
-        replay,
-        extractEvidence: extractTrustedEvidence,
-      }),
-    ).resolves.toEqual({ kind: "refer" });
-    expect(replay).toHaveBeenCalledOnce();
-  });
+  ] as const)(
+    "refers once for a resolved structured %s error",
+    async (code) => {
+      const registry = new TurnEvidenceRegistry();
+      const original = evidence();
+      registry.record(descriptor, {}, result(original), extractTrustedEvidence);
+      const replay = vi.fn().mockResolvedValue({
+        contractVersion: "commerce.v1",
+        status: "ERROR",
+        code,
+        retryable: true,
+      } satisfies CommerceToolResult);
+      await expect(
+        registry.refresh([original.evidenceId], {
+          remoteCalls: 0,
+          maxRemoteCalls: 10,
+          now: () => Date.parse("2026-09-21T00:00:10.000Z"),
+          assertCurrent: vi.fn().mockResolvedValue(undefined),
+          replay,
+          extractEvidence: extractTrustedEvidence,
+        }),
+      ).resolves.toEqual({ kind: "refer" });
+      expect(replay).toHaveBeenCalledOnce();
+    },
+  );
 
   it("extracts only strict evaluator and non-truncated recommendation evidence", () => {
     const original = evidence({

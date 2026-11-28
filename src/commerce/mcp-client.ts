@@ -1,4 +1,4 @@
-import { createLogger } from '@modainteract/moda-interact-shared/logging';
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { isDeepStrictEqual } from "node:util";
 import { observeCommerceTool } from "./observe-tool.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -46,34 +46,75 @@ export type McpSourceFailure = Readonly<{
   operation: CommerceHostOperation;
   httpStatus: number;
   providerRequestId?: string;
-  providerError?: Readonly<{ code?: string; message?: string; details?: unknown }>;
+  providerError?: Readonly<{
+    code?: string;
+    message?: string;
+    details?: unknown;
+  }>;
   providerErrorBody?: string;
   redactionApplied: boolean;
   truncated: boolean;
 }>;
 
-function safeErrorDetails(value: unknown, depth = 0): { value: unknown; redacted: boolean; truncated: boolean } {
-  if (depth > 4) return { value: "[TRUNCATED]", redacted: false, truncated: true };
+function safeErrorDetails(
+  value: unknown,
+  depth = 0,
+): { value: unknown; redacted: boolean; truncated: boolean } {
+  if (depth > 4)
+    return { value: "[TRUNCATED]", redacted: false, truncated: true };
   if (typeof value === "string") {
     const safe = safeCommerceDiagnosticText(value, 256);
-    return { value: safe.value, redacted: safe.redacted, truncated: safe.truncated };
+    return {
+      value: safe.value,
+      redacted: safe.redacted,
+      truncated: safe.truncated,
+    };
   }
   if (value === null || typeof value === "boolean" || typeof value === "number")
-    return { value: typeof value === "number" && !Number.isFinite(value) ? "[REDACTED]" : value,
-      redacted: typeof value === "number" && !Number.isFinite(value), truncated: false };
+    return {
+      value:
+        typeof value === "number" && !Number.isFinite(value)
+          ? "[REDACTED]"
+          : value,
+      redacted: typeof value === "number" && !Number.isFinite(value),
+      truncated: false,
+    };
   if (Array.isArray(value)) {
-    const items = value.slice(0, 8).map((item) => safeErrorDetails(item, depth + 1));
-    return { value: items.map((item) => item.value), redacted: items.some((item) => item.redacted),
-      truncated: value.length > 8 || items.some((item) => item.truncated) };
+    const items = value
+      .slice(0, 8)
+      .map((item) => safeErrorDetails(item, depth + 1));
+    return {
+      value: items.map((item) => item.value),
+      redacted: items.some((item) => item.redacted),
+      truncated: value.length > 8 || items.some((item) => item.truncated),
+    };
   }
-  if (value === null || typeof value !== "object") return { value: "[REDACTED]", redacted: true, truncated: false };
+  if (value === null || typeof value !== "object")
+    return { value: "[REDACTED]", redacted: true, truncated: false };
   const source = value as Record<string, unknown>;
-  const allowed = new Set(["code", "message", "type", "details", "errors", "error_data", "error_subcode", "subcode", "param", "field", "extensions"]);
+  const allowed = new Set([
+    "code",
+    "message",
+    "type",
+    "details",
+    "errors",
+    "error_data",
+    "error_subcode",
+    "subcode",
+    "param",
+    "field",
+    "extensions",
+  ]);
   const output: Record<string, unknown> = {};
   let redacted = false;
   let truncated = false;
   for (const [key, child] of Object.entries(source).slice(0, 8)) {
-    if (!allowed.has(key.toLowerCase()) || /email|phone|address|customer|token|secret|password|authorization|cookie|url|prompt|header|body|success/.test(key.toLowerCase())) {
+    if (
+      !allowed.has(key.toLowerCase()) ||
+      /email|phone|address|customer|token|secret|password|authorization|cookie|url|prompt|header|body|success/.test(
+        key.toLowerCase(),
+      )
+    ) {
       redacted = true;
       continue;
     }
@@ -82,17 +123,25 @@ function safeErrorDetails(value: unknown, depth = 0): { value: unknown; redacted
     redacted ||= safe.redacted;
     truncated ||= safe.truncated;
   }
-  return { value: output, redacted, truncated: truncated || Object.keys(source).length > 8 };
+  return {
+    value: output,
+    redacted,
+    truncated: truncated || Object.keys(source).length > 8,
+  };
 }
 
 async function readMcpSourceFailure(
   response: Response,
   operation: CommerceHostOperation,
 ): Promise<McpSourceFailure> {
-  const requestIdValue = response.headers.get("x-request-id") ?? response.headers.get("request-id") ??
+  const requestIdValue =
+    response.headers.get("x-request-id") ??
+    response.headers.get("request-id") ??
     response.headers.get("x-correlation-id");
-  const providerRequestId = requestIdValue && /^[A-Za-z0-9._:-]{1,128}$/.test(requestIdValue)
-    ? requestIdValue : undefined;
+  const providerRequestId =
+    requestIdValue && /^[A-Za-z0-9._:-]{1,128}$/.test(requestIdValue)
+      ? requestIdValue
+      : undefined;
   let text = "";
   let truncated = false;
   if (response.body) {
@@ -104,7 +153,10 @@ async function readMcpSourceFailure(
         const { done, value } = await reader.read();
         if (done) break;
         const remaining = 8 * 1024 - size;
-        if (remaining <= 0) { truncated = true; break; }
+        if (remaining <= 0) {
+          truncated = true;
+          break;
+        }
         if (value.byteLength > remaining) {
           chunks.push(value.slice(0, remaining));
           size += remaining;
@@ -116,25 +168,57 @@ async function readMcpSourceFailure(
       }
       text = new TextDecoder().decode(Buffer.concat(chunks));
     } catch {
-      return { origin: "mcp_response", provider: "commerce-mcp", operation, httpStatus: response.status,
-        ...(providerRequestId ? { providerRequestId } : {}), redactionApplied: true, truncated };
+      return {
+        origin: "mcp_response",
+        provider: "commerce-mcp",
+        operation,
+        httpStatus: response.status,
+        ...(providerRequestId ? { providerRequestId } : {}),
+        redactionApplied: true,
+        truncated,
+      };
     } finally {
-      try { await reader.cancel(); } catch { /* Response body is already bounded and discarded. */ }
+      try {
+        await reader.cancel();
+      } catch {
+        /* Response body is already bounded and discarded. */
+      }
     }
   }
-  if (!text) return { origin: "mcp_response", provider: "commerce-mcp", operation, httpStatus: response.status,
-    ...(providerRequestId ? { providerRequestId } : {}), redactionApplied: false, truncated };
+  if (!text)
+    return {
+      origin: "mcp_response",
+      provider: "commerce-mcp",
+      operation,
+      httpStatus: response.status,
+      ...(providerRequestId ? { providerRequestId } : {}),
+      redactionApplied: false,
+      truncated,
+    };
   let document: unknown;
-  try { document = JSON.parse(text); } catch { document = undefined; }
+  try {
+    document = JSON.parse(text);
+  } catch {
+    document = undefined;
+  }
   let redacted = false;
   let providerError: McpSourceFailure["providerError"];
   let providerErrorBody: string | undefined;
-  if (document !== undefined && document !== null && typeof document === "object" && !Array.isArray(document)) {
+  if (
+    document !== undefined &&
+    document !== null &&
+    typeof document === "object" &&
+    !Array.isArray(document)
+  ) {
     const envelope = document as Record<string, unknown>;
     const errorValue = envelope.error;
-    const structured = errorValue && typeof errorValue === "object" && !Array.isArray(errorValue)
-      ? errorValue as Record<string, unknown> : null;
-    const graphqlErrors = Array.isArray(envelope.errors) ? envelope.errors : undefined;
+    const structured =
+      errorValue && typeof errorValue === "object" && !Array.isArray(errorValue)
+        ? (errorValue as Record<string, unknown>)
+        : null;
+    const graphqlErrors = Array.isArray(envelope.errors)
+      ? envelope.errors
+      : undefined;
     if (typeof errorValue === "string") {
       const message = safeCommerceDiagnosticText(errorValue);
       providerError = { message: message.value };
@@ -142,10 +226,23 @@ async function readMcpSourceFailure(
       truncated ||= message.truncated;
     } else if (structured) {
       const codeValue = structured.code;
-      const code = typeof codeValue === "string" || typeof codeValue === "number" ? String(codeValue).slice(0, 96) : undefined;
-      const message = typeof structured.message === "string" ? safeCommerceDiagnosticText(structured.message) : null;
-      const details = structured.details === undefined ? null : safeErrorDetails(structured.details);
-      providerError = { ...(code ? { code } : {}), ...(message ? { message: message.value } : {}), ...(details ? { details: details.value } : {}) };
+      const code =
+        typeof codeValue === "string" || typeof codeValue === "number"
+          ? String(codeValue).slice(0, 96)
+          : undefined;
+      const message =
+        typeof structured.message === "string"
+          ? safeCommerceDiagnosticText(structured.message)
+          : null;
+      const details =
+        structured.details === undefined
+          ? null
+          : safeErrorDetails(structured.details);
+      providerError = {
+        ...(code ? { code } : {}),
+        ...(message ? { message: message.value } : {}),
+        ...(details ? { details: details.value } : {}),
+      };
       redacted ||= message?.redacted === true || details?.redacted === true;
       truncated ||= message?.truncated === true || details?.truncated === true;
     } else if (graphqlErrors) {
@@ -155,12 +252,18 @@ async function readMcpSourceFailure(
       truncated ||= errors.truncated;
     } else {
       const safe = safeErrorDetails(envelope);
-      if (Object.keys(safe.value as Record<string, unknown>).length > 0 || Object.keys(envelope).length === 0) {
+      if (
+        Object.keys(safe.value as Record<string, unknown>).length > 0 ||
+        Object.keys(envelope).length === 0
+      ) {
         providerErrorBody = JSON.stringify(safe.value);
       }
       redacted ||= safe.redacted;
       truncated ||= safe.truncated;
-      if (!providerErrorBody && Object.keys(envelope).length > 0) { providerErrorBody = "[REDACTED]"; redacted = true; }
+      if (!providerErrorBody && Object.keys(envelope).length > 0) {
+        providerErrorBody = "[REDACTED]";
+        redacted = true;
+      }
     }
   } else {
     const safe = safeCommerceDiagnosticText(text, 1024);
@@ -168,9 +271,17 @@ async function readMcpSourceFailure(
     redacted ||= safe.redacted;
     truncated ||= safe.truncated;
   }
-  return { origin: "mcp_response", provider: "commerce-mcp", operation, httpStatus: response.status,
-    ...(providerRequestId ? { providerRequestId } : {}), ...(providerError ? { providerError } : {}),
-    ...(providerErrorBody ? { providerErrorBody } : {}), redactionApplied: redacted, truncated };
+  return {
+    origin: "mcp_response",
+    provider: "commerce-mcp",
+    operation,
+    httpStatus: response.status,
+    ...(providerRequestId ? { providerRequestId } : {}),
+    ...(providerError ? { providerError } : {}),
+    ...(providerErrorBody ? { providerErrorBody } : {}),
+    redactionApplied: redacted,
+    truncated,
+  };
 }
 export type McpConfiguration = {
   endpoint: URL;
@@ -184,11 +295,17 @@ export type CommerceOutreachMcpIdentity = Readonly<{
 export function mcpConfiguration(): McpConfiguration {
   let endpoint: URL;
   try {
-    endpoint = new URL(process.env.COMMERCE_MCP_URL ?? "http://invalid.invalid");
+    endpoint = new URL(
+      process.env.COMMERCE_MCP_URL ?? "http://invalid.invalid",
+    );
   } catch (error) {
     // Invalid URL parsing previously reached the host as UNAVAILABLE/retryable.
-    throw new CommerceHostError("UNAVAILABLE", true,
-      hostDiagnostic("configuration", "CONFIG_URL_INVALID"), error);
+    throw new CommerceHostError(
+      "UNAVAILABLE",
+      true,
+      hostDiagnostic("configuration", "CONFIG_URL_INVALID"),
+      error,
+    );
   }
   if (
     endpoint.pathname !== "/api/mcp" ||
@@ -198,8 +315,11 @@ export function mcpConfiguration(): McpConfiguration {
     endpoint.hash ||
     !["http:", "https:"].includes(endpoint.protocol)
   )
-    throw new CommerceHostError("CONFIGURATION", false,
-      hostDiagnostic("configuration", "CONFIG_ENDPOINT_INVALID"));
+    throw new CommerceHostError(
+      "CONFIGURATION",
+      false,
+      hostDiagnostic("configuration", "CONFIG_ENDPOINT_INVALID"),
+    );
   return { endpoint };
 }
 export function encodeCommerceContext(
@@ -207,18 +327,30 @@ export function encodeCommerceContext(
   grant?: CommerceConversationGrant,
 ): string {
   if ("toolContext" in turn) {
-    if (grant || !/^[A-Za-z0-9_-]{1,128}$/.test(turn.shopId) ||
-        !CommerceOutreachToolContextSchema.safeParse(turn.toolContext).success ||
-        turn.executionPurpose !== undefined && turn.executionPurpose !== "INITIAL_RECOVERY_OUTREACH" ||
-        turn.releaseId !== undefined && !IdSchema.safeParse(turn.releaseId).success) {
-      throw new CommerceHostError("INVALID_INPUT", false,
-        hostDiagnostic("mcp.authorization", "CONTEXT_ASSERTION_INVALID"));
+    if (
+      grant ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(turn.shopId) ||
+      !CommerceOutreachToolContextSchema.safeParse(turn.toolContext).success ||
+      (turn.executionPurpose !== undefined &&
+        turn.executionPurpose !== "INITIAL_RECOVERY_OUTREACH") ||
+      (turn.releaseId !== undefined &&
+        !IdSchema.safeParse(turn.releaseId).success)
+    ) {
+      throw new CommerceHostError(
+        "INVALID_INPUT",
+        false,
+        hostDiagnostic("mcp.authorization", "CONTEXT_ASSERTION_INVALID"),
+      );
     }
-    return Buffer.from(JSON.stringify({ shopId: turn.shopId, toolContext: turn.toolContext,
-      executionPurpose: "INITIAL_RECOVERY_OUTREACH",
-      ...(turn.releaseId ? { releaseId: turn.releaseId } : {}),
-    }), "utf8")
-      .toString("base64url");
+    return Buffer.from(
+      JSON.stringify({
+        shopId: turn.shopId,
+        toolContext: turn.toolContext,
+        executionPurpose: "INITIAL_RECOVERY_OUTREACH",
+        ...(turn.releaseId ? { releaseId: turn.releaseId } : {}),
+      }),
+      "utf8",
+    ).toString("base64url");
   }
   const context = CommerceAssertionSchema.safeParse(
     grant
@@ -230,21 +362,36 @@ export function encodeCommerceContext(
         }
       : { ...turn, purpose: "resolve" },
   );
-  if (!context.success) throw new CommerceHostError("INVALID_INPUT", false,
-    hostDiagnostic("mcp.authorization", "CONTEXT_ASSERTION_INVALID"));
-  return Buffer.from(JSON.stringify({ shopId: context.data.shopId }), "utf8").toString("base64url");
+  if (!context.success)
+    throw new CommerceHostError(
+      "INVALID_INPUT",
+      false,
+      hostDiagnostic("mcp.authorization", "CONTEXT_ASSERTION_INVALID"),
+    );
+  return Buffer.from(
+    JSON.stringify({ shopId: context.data.shopId }),
+    "utf8",
+  ).toString("base64url");
 }
 
 export class CommerceMcpClient {
   private outreachProfile: CommercePurposeProfile | null = null;
   /** Pin one validated immutable release for every subsequent private-context call. */
   pinOutreachProfile(raw: unknown): CommercePurposeProfile {
-    if (!("toolContext" in this.turn)) throw new CommerceHostError("INVALID_INPUT", false);
+    if (!("toolContext" in this.turn))
+      throw new CommerceHostError("INVALID_INPUT", false);
     const profile = CommercePurposeProfileSchema.parse(raw);
-    if (this.outreachProfile && !isDeepStrictEqual(this.outreachProfile, profile))
+    if (
+      this.outreachProfile &&
+      !isDeepStrictEqual(this.outreachProfile, profile)
+    )
       throw new CommerceHostError("INCOMPATIBLE_VERSION", false);
     this.outreachProfile = profile;
-    this.turn = { ...this.turn, executionPurpose: profile.purpose, releaseId: profile.releaseId };
+    this.turn = {
+      ...this.turn,
+      executionPurpose: profile.purpose,
+      releaseId: profile.releaseId,
+    };
     return profile;
   }
   private client = new Client({ name: "moda-background", version: "1.0.0" });
@@ -274,8 +421,14 @@ export class CommerceMcpClient {
     } catch (error) {
       if (error instanceof CommerceHostError) throw error;
       if (this.signal.aborted) throw this.abortedHostError(error);
-      throw new CommerceHostError("UNAVAILABLE", true,
-        this.httpFailure ?? hostDiagnostic(stage, reason, { operation, cause: error }), error, this.httpSourceFailure);
+      throw new CommerceHostError(
+        "UNAVAILABLE",
+        true,
+        this.httpFailure ??
+          hostDiagnostic(stage, reason, { operation, cause: error }),
+        error,
+        this.httpSourceFailure,
+      );
     } finally {
       this.httpFailure = undefined;
       this.httpSourceFailure = undefined;
@@ -295,19 +448,39 @@ export class CommerceMcpClient {
     });
     this.httpFailure = diagnostic;
     this.httpSourceFailure = sourceFailure;
-    return new CommerceHostError(code, retryable, diagnostic, undefined, sourceFailure);
+    return new CommerceHostError(
+      code,
+      retryable,
+      diagnostic,
+      undefined,
+      sourceFailure,
+    );
   }
   private requestStage(): CommerceHostStage {
-    return this.operation === "read_manifest" ? "mcp.manifest"
-      : this.operation === "list_tools" ? "mcp.tool_list"
-      : this.operation === "call_tool" ? "mcp.tool_call" : "mcp.connection";
+    return this.operation === "read_manifest"
+      ? "mcp.manifest"
+      : this.operation === "list_tools"
+        ? "mcp.tool_list"
+        : this.operation === "call_tool"
+          ? "mcp.tool_call"
+          : "mcp.connection";
   }
   private abortedHostError(cause: unknown): CommerceHostError {
-    const deadline = this.signal.reason instanceof Error && this.signal.reason.name === "TimeoutError";
-    return new CommerceHostError(deadline ? "DEADLINE" : "CANCELLED", deadline,
-      hostDiagnostic(this.requestStage(), deadline ? "HOST_DEADLINE_EXCEEDED" : "HOST_CANCELLED", {
-        operation: this.operation,
-      }), cause);
+    const deadline =
+      this.signal.reason instanceof Error &&
+      this.signal.reason.name === "TimeoutError";
+    return new CommerceHostError(
+      deadline ? "DEADLINE" : "CANCELLED",
+      deadline,
+      hostDiagnostic(
+        this.requestStage(),
+        deadline ? "HOST_DEADLINE_EXCEEDED" : "HOST_CANCELLED",
+        {
+          operation: this.operation,
+        },
+      ),
+      cause,
+    );
   }
   async connect() {
     const transport = new StreamableHTTPClientTransport(this.config.endpoint, {
@@ -317,12 +490,22 @@ export class CommerceMcpClient {
           String(url) !== this.config.endpoint.href ||
           (init?.method ?? "GET") !== "POST"
         )
-          throw this.httpError("INVALID_INPUT", false, this.requestStage(), "MCP_REQUEST_DESTINATION_INVALID");
+          throw this.httpError(
+            "INVALID_INPUT",
+            false,
+            this.requestStage(),
+            "MCP_REQUEST_DESTINATION_INVALID",
+          );
         if (
           typeof init?.body === "string" &&
           Buffer.byteLength(init.body) > 128 * 1024
         )
-          throw this.httpError("INVALID_INPUT", false, this.requestStage(), "MCP_REQUEST_TOO_LARGE");
+          throw this.httpError(
+            "INVALID_INPUT",
+            false,
+            this.requestStage(),
+            "MCP_REQUEST_TOO_LARGE",
+          );
         const headers = new Headers(init?.headers);
         headers.set("Content-Type", "application/json");
         headers.set(
@@ -344,30 +527,71 @@ export class CommerceMcpClient {
         } catch (error) {
           // The caller/turn's abort takes priority over an apparent network outage.
           if (this.signal.aborted) throw this.abortedHostError(error);
-          const diagnostic = mcpTransportDiagnostic(this.requestStage(), this.operation, error);
+          const diagnostic = mcpTransportDiagnostic(
+            this.requestStage(),
+            this.operation,
+            error,
+          );
           this.httpFailure = diagnostic;
           throw new CommerceHostError("UNAVAILABLE", true, diagnostic, error);
         }
         if (!response.ok) {
-          const sourceFailure = await readMcpSourceFailure(response, this.operation);
+          const sourceFailure = await readMcpSourceFailure(
+            response,
+            this.operation,
+          );
           if (response.status === 401 || response.status === 403)
-          throw this.httpError("DENIED", false, "mcp.authorization",
-              response.status === 401 ? "MCP_HTTP_UNAUTHENTICATED" : "MCP_HTTP_FORBIDDEN", response.status, sourceFailure);
-          const reason = response.status === 429 ? "MCP_HTTP_RATE_LIMITED"
-            : response.status === 503 ? "MCP_HTTP_SERVICE_UNAVAILABLE"
-            : response.status === 504 ? "MCP_HTTP_GATEWAY_TIMEOUT"
-            : response.status >= 500 ? "MCP_HTTP_SERVER_ERROR"
-            : response.status >= 400 ? "MCP_HTTP_CLIENT_ERROR" : "MCP_HTTP_UNEXPECTED_STATUS";
-          throw this.httpError("UNAVAILABLE", true, this.requestStage(), reason, response.status, sourceFailure);
+            throw this.httpError(
+              "DENIED",
+              false,
+              "mcp.authorization",
+              response.status === 401
+                ? "MCP_HTTP_UNAUTHENTICATED"
+                : "MCP_HTTP_FORBIDDEN",
+              response.status,
+              sourceFailure,
+            );
+          const reason =
+            response.status === 429
+              ? "MCP_HTTP_RATE_LIMITED"
+              : response.status === 503
+                ? "MCP_HTTP_SERVICE_UNAVAILABLE"
+                : response.status === 504
+                  ? "MCP_HTTP_GATEWAY_TIMEOUT"
+                  : response.status >= 500
+                    ? "MCP_HTTP_SERVER_ERROR"
+                    : response.status >= 400
+                      ? "MCP_HTTP_CLIENT_ERROR"
+                      : "MCP_HTTP_UNEXPECTED_STATUS";
+          throw this.httpError(
+            "UNAVAILABLE",
+            true,
+            this.requestStage(),
+            reason,
+            response.status,
+            sourceFailure,
+          );
         }
         if (response.headers.has("mcp-session-id"))
-          throw this.httpError("INCOMPATIBLE_VERSION", false, this.requestStage(), "MCP_SESSION_UNSUPPORTED", response.status);
+          throw this.httpError(
+            "INCOMPATIBLE_VERSION",
+            false,
+            this.requestStage(),
+            "MCP_SESSION_UNSUPPORTED",
+            response.status,
+          );
         if (!response.body) return response;
         if (
           response.status !== 202 &&
           !response.headers.get("content-type")?.includes("application/json")
         )
-          throw this.httpError("INVALID_INPUT", false, this.requestStage(), "MCP_CONTENT_TYPE_INVALID", response.status);
+          throw this.httpError(
+            "INVALID_INPUT",
+            false,
+            this.requestStage(),
+            "MCP_CONTENT_TYPE_INVALID",
+            response.status,
+          );
         const reader = response.body.getReader();
         const chunks: Uint8Array[] = [];
         let size = 0;
@@ -377,7 +601,13 @@ export class CommerceMcpClient {
             if (done) break;
             size += value.byteLength;
             if (size > 256 * 1024)
-              throw this.httpError("INVALID_INPUT", false, this.requestStage(), "MCP_RESPONSE_TOO_LARGE", response.status);
+              throw this.httpError(
+                "INVALID_INPUT",
+                false,
+                this.requestStage(),
+                "MCP_RESPONSE_TOO_LARGE",
+                response.status,
+              );
             chunks.push(value);
           }
         } finally {
@@ -391,44 +621,98 @@ export class CommerceMcpClient {
     });
     // SDK 1.30.0 declares sessionId as string | undefined rather than optional;
     // its runtime Transport implementation is compatible (covered over HTTP).
-    await this.sdkOperation("initialize", "mcp.connection", "MCP_CONNECTION_FAILED", () =>
-      this.client.connect(transport as Transport, this.options()));
+    await this.sdkOperation(
+      "initialize",
+      "mcp.connection",
+      "MCP_CONNECTION_FAILED",
+      () => this.client.connect(transport as Transport, this.options()),
+    );
   }
   async manifest() {
-    const result = await this.sdkOperation("read_manifest", "mcp.manifest", "MCP_MANIFEST_READ_FAILED", () =>
-      this.client.readResource({ uri: "commerce://capabilities" }, this.options()));
+    const result = await this.sdkOperation(
+      "read_manifest",
+      "mcp.manifest",
+      "MCP_MANIFEST_READ_FAILED",
+      () =>
+        this.client.readResource(
+          { uri: "commerce://capabilities" },
+          this.options(),
+        ),
+    );
     if (
       result.contents.length !== 1 ||
       result.contents[0]!.uri !== "commerce://capabilities" ||
       !("text" in result.contents[0]!)
     )
-      throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-        hostDiagnostic("mcp.manifest", "MCP_MANIFEST_RESOURCE_INVALID", { operation: "read_manifest" }));
+      throw new CommerceHostError(
+        "INCOMPATIBLE_VERSION",
+        false,
+        hostDiagnostic("mcp.manifest", "MCP_MANIFEST_RESOURCE_INVALID", {
+          operation: "read_manifest",
+        }),
+      );
     let document: unknown;
-    try { document = JSON.parse(result.contents[0]!.text as string); }
-    catch (error) {
+    try {
+      document = JSON.parse(result.contents[0]!.text as string);
+    } catch (error) {
       // Preserve the old UNAVAILABLE classification for JSON.parse failures.
-      throw new CommerceHostError("UNAVAILABLE", true,
-        hostDiagnostic("mcp.manifest", "MCP_MANIFEST_JSON_INVALID", { operation: "read_manifest" }), error);
+      throw new CommerceHostError(
+        "UNAVAILABLE",
+        true,
+        hostDiagnostic("mcp.manifest", "MCP_MANIFEST_JSON_INVALID", {
+          operation: "read_manifest",
+        }),
+        error,
+      );
     }
     const parsed = CommerceManifestSchema.safeParse(document);
-    if (!parsed.success) throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-      hostDiagnostic("mcp.manifest", "MCP_MANIFEST_SCHEMA_INVALID", { operation: "read_manifest" }));
+    if (!parsed.success)
+      throw new CommerceHostError(
+        "INCOMPATIBLE_VERSION",
+        false,
+        hostDiagnostic("mcp.manifest", "MCP_MANIFEST_SCHEMA_INVALID", {
+          operation: "read_manifest",
+        }),
+      );
     return parsed.data;
   }
   async tools(signal = this.signal) {
-    const result = await this.sdkOperation("list_tools", "mcp.tool_list", "MCP_TOOL_LIST_FAILED", () =>
-      this.client.listTools({}, this.options(signal)));
-    if (result.nextCursor) throw new CommerceHostError("INVALID_INPUT", false,
-      hostDiagnostic("mcp.tool_list", "MCP_TOOL_LIST_PAGINATED", { operation: "list_tools" }));
-    if (result.tools.length > 32) throw new CommerceHostError("INVALID_INPUT", false,
-      hostDiagnostic("mcp.tool_list", "MCP_TOOL_LIST_TOO_LARGE", { operation: "list_tools" }));
-    if (result.tools.some((t) =>
+    const result = await this.sdkOperation(
+      "list_tools",
+      "mcp.tool_list",
+      "MCP_TOOL_LIST_FAILED",
+      () => this.client.listTools({}, this.options(signal)),
+    );
+    if (result.nextCursor)
+      throw new CommerceHostError(
+        "INVALID_INPUT",
+        false,
+        hostDiagnostic("mcp.tool_list", "MCP_TOOL_LIST_PAGINATED", {
+          operation: "list_tools",
+        }),
+      );
+    if (result.tools.length > 32)
+      throw new CommerceHostError(
+        "INVALID_INPUT",
+        false,
+        hostDiagnostic("mcp.tool_list", "MCP_TOOL_LIST_TOO_LARGE", {
+          operation: "list_tools",
+        }),
+      );
+    if (
+      result.tools.some((t) =>
         Object.keys(t).some(
           (k) => !["name", "description", "inputSchema"].includes(k),
         ),
-      )) throw new CommerceHostError("INVALID_INPUT", false,
-        hostDiagnostic("mcp.tool_list", "MCP_TOOL_DESCRIPTOR_INVALID", { operation: "list_tools" }));
+      )
+    )
+      throw new CommerceHostError(
+        "INVALID_INPUT",
+        false,
+        hostDiagnostic("mcp.tool_list", "MCP_TOOL_DESCRIPTOR_INVALID", {
+          operation: "list_tools",
+        }),
+      );
     return result.tools;
   }
   async call(
@@ -436,24 +720,69 @@ export class CommerceMcpClient {
     args: Record<string, unknown>,
     signal = this.signal,
   ) {
-    if ("toolContext" in this.turn && (!this.outreachProfile || !this.outreachProfile.capabilities.some(member => member.name === name)))
-      throw new CommerceHostError("INVALID_INPUT", false, undefined, new Error("OUTREACH_PURPOSE_NOT_PINNED_OR_LISTED"));
+    if (
+      "toolContext" in this.turn &&
+      (!this.outreachProfile ||
+        !this.outreachProfile.capabilities.some(
+          (member) => member.name === name,
+        ))
+    )
+      throw new CommerceHostError(
+        "INVALID_INPUT",
+        false,
+        undefined,
+        new Error("OUTREACH_PURPOSE_NOT_PINNED_OR_LISTED"),
+      );
     return observeCommerceTool(async () => {
-      const result = await this.sdkOperation("call_tool", "mcp.tool_call", "MCP_TOOL_CALL_FAILED", () =>
-        this.client.callTool({ name, arguments: args }, undefined, this.options(signal)));
-      const parsed = CommerceToolResultSchema.safeParse(result.structuredContent);
-      if (!parsed.success) throw new CommerceHostError("UNAVAILABLE", true,
-        hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID", { operation: "call_tool" }));
+      const result = await this.sdkOperation(
+        "call_tool",
+        "mcp.tool_call",
+        "MCP_TOOL_CALL_FAILED",
+        () =>
+          this.client.callTool(
+            { name, arguments: args },
+            undefined,
+            this.options(signal),
+          ),
+      );
+      const parsed = CommerceToolResultSchema.safeParse(
+        result.structuredContent,
+      );
+      if (!parsed.success)
+        throw new CommerceHostError(
+          "UNAVAILABLE",
+          true,
+          hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID", {
+            operation: "call_tool",
+          }),
+        );
       const value = parsed.data;
-      if (value.status === 'ERROR') {
-        try { createLogger({serviceName:'moda-interact-background',environment:process.env.DEPLOYMENT_ENVIRONMENT_NAME ?? 'development'}).warn('commerce.mcp.tool.failed', {
-          shopId:this.turn.shopId, toolName:name, errorCode:value.code, retryable:value.retryable,
-          stage:'mcp.tool_result', operation:'call_tool',
-        }); } catch { /* Diagnostics must not affect delivery. */ }
+      if (value.status === "ERROR") {
+        try {
+          createLogger({
+            serviceName: "moda-interact-background",
+            environment:
+              process.env.DEPLOYMENT_ENVIRONMENT_NAME ?? "development",
+          }).warn("commerce.mcp.tool.failed", {
+            shopId: this.turn.shopId,
+            toolName: name,
+            errorCode: value.code,
+            retryable: value.retryable,
+            stage: "mcp.tool_result",
+            operation: "call_tool",
+          });
+        } catch {
+          /* Diagnostics must not affect delivery. */
+        }
       }
       if ((value.status === "ERROR") !== Boolean(result.isError))
-        throw new CommerceHostError("INVALID_INPUT", false,
-          hostDiagnostic("mcp.tool_result", "MCP_TOOL_ERROR_FLAG_MISMATCH", { operation: "call_tool" }));
+        throw new CommerceHostError(
+          "INVALID_INPUT",
+          false,
+          hostDiagnostic("mcp.tool_result", "MCP_TOOL_ERROR_FLAG_MISMATCH", {
+            operation: "call_tool",
+          }),
+        );
       return value;
     });
   }

@@ -8,18 +8,24 @@ import {
 
 describe("translation batch failure policy", () => {
   it("prefers explicit submission classifications and otherwise uses the fallback", () => {
-    expect(classifyTranslationSubmissionFailure(
-      { classification: "DEFINITE_TERMINAL_NOT_CREATED" },
-      "AMBIGUOUS_CREATE",
-    )).toBe("DEFINITE_TERMINAL_NOT_CREATED");
-    expect(classifyTranslationSubmissionFailure(
-      { submissionClassification: "DEFINITE_RETRYABLE_NOT_CREATED" },
-      "AMBIGUOUS_CREATE",
-    )).toBe("DEFINITE_RETRYABLE_NOT_CREATED");
-    expect(classifyTranslationSubmissionFailure(
-      new Error("provider failure"),
-      "AMBIGUOUS_CREATE",
-    )).toBe("AMBIGUOUS_CREATE");
+    expect(
+      classifyTranslationSubmissionFailure(
+        { classification: "DEFINITE_TERMINAL_NOT_CREATED" },
+        "AMBIGUOUS_CREATE",
+      ),
+    ).toBe("DEFINITE_TERMINAL_NOT_CREATED");
+    expect(
+      classifyTranslationSubmissionFailure(
+        { submissionClassification: "DEFINITE_RETRYABLE_NOT_CREATED" },
+        "AMBIGUOUS_CREATE",
+      ),
+    ).toBe("DEFINITE_RETRYABLE_NOT_CREATED");
+    expect(
+      classifyTranslationSubmissionFailure(
+        new Error("provider failure"),
+        "AMBIGUOUS_CREATE",
+      ),
+    ).toBe("AMBIGUOUS_CREATE");
   });
 
   it("uses the bounded Error.name as the provider submission failure code", () => {
@@ -31,7 +37,9 @@ describe("translation batch failure policy", () => {
     longNamed.name = "x".repeat(121);
     expect(translationSubmissionFailureCode(longNamed)).toBe("x".repeat(120));
 
-    expect(translationSubmissionFailureCode("failed")).toBe("provider-submission-failed");
+    expect(translationSubmissionFailureCode("failed")).toBe(
+      "provider-submission-failed",
+    );
   });
 
   it("classifies HTTP and semantic provider failures consistently", () => {
@@ -41,7 +49,9 @@ describe("translation batch failure policy", () => {
     expect(isTranslationProviderFailureRetryable("rate_limit")).toBe(true);
 
     for (const status of [400, 401, 403, 404, 422]) {
-      expect(isTranslationProviderFailureRetryable(`http-${status}`)).toBe(false);
+      expect(isTranslationProviderFailureRetryable(`http-${status}`)).toBe(
+        false,
+      );
     }
     for (const code of [
       "auth_failed",

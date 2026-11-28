@@ -17,57 +17,108 @@ function usageRow(overrides: Record<string, unknown> = {}) {
     reportAttemptCount: 0,
     nextReportAt: null,
     lastReportAttemptAt: null,
-    shop: { shopifyShopId: "gid://shopify/Shop/1", status: "ACTIVE", uninstalledAt: null },
+    shop: {
+      shopifyShopId: "gid://shopify/Shop/1",
+      status: "ACTIVE",
+      uninstalledAt: null,
+    },
     ...overrides,
   };
 }
 
-function harness(
-  rows = [usageRow()],
-  getNow: () => Date = () => now,
-) {
+function harness(rows = [usageRow()], getNow: () => Date = () => now) {
   const records = rows.map((row) => ({ ...row }));
-  const states = new Map(records.map((row) => [row.id as string, row.shopifyReportState as string]));
+  const states = new Map(
+    records.map((row) => [row.id as string, row.shopifyReportState as string]),
+  );
   const updates: Array<{ where: unknown; data: unknown }> = [];
   const database = {
-      usageEvent: {
-      findMany: vi.fn().mockImplementation(async ({ where, take }: { where?: { shop?: { status?: string | { not: string } } }; take?: number }) =>
-        records.filter((row) =>
-          ["PENDING", "RETRYABLE"].includes(String(row.shopifyReportState)) &&
-          (row.nextReportAt === null || (row.nextReportAt as Date) <= getNow()) &&
-          (!where?.billingPeriodId || where.billingPeriodId === row.billingPeriodId) &&
-          (!where?.shop?.status ||
-            (typeof where.shop.status === "string"
-              ? (row.shop as { status: string }).status === where.shop.status
-              : (row.shop as { status: string }).status !== where.shop.status.not)),
-        ).slice(0, take).map((row) => ({ ...row, shop: { ...(row.shop as object) } })),
-      ),
-      updateMany: vi.fn().mockImplementation(async ({ where, data }: { where: { id: string; shopifyReportState?: { in: string[] } | string }; data: unknown }) => {
-        const update = data as Record<string, unknown>;
-        const matchingRecords = records.filter((candidate) => {
-          const current = states.get(candidate.id as string);
-          if (where.id && where.id !== candidate.id) return false;
-          if (where.billingPeriodId && where.billingPeriodId !== candidate.billingPeriodId) return false;
-          if (typeof where.shopifyReportState === "string") {
-            return where.shopifyReportState === current;
-          }
-          return !where.shopifyReportState || where.shopifyReportState.in.includes(current ?? "");
-        });
-        if (matchingRecords.length === 0) return { count: 0 };
-        for (const record of matchingRecords as Array<Record<string, unknown>>) {
-          if (update.reportAttemptCount && typeof update.reportAttemptCount === "object") {
-            record.reportAttemptCount = Number(record.reportAttemptCount) + Number(
-              (update.reportAttemptCount as { increment: number }).increment,
+    usageEvent: {
+      findMany: vi
+        .fn()
+        .mockImplementation(
+          async ({
+            where,
+            take,
+          }: {
+            where?: { shop?: { status?: string | { not: string } } };
+            take?: number;
+          }) =>
+            records
+              .filter(
+                (row) =>
+                  ["PENDING", "RETRYABLE"].includes(
+                    String(row.shopifyReportState),
+                  ) &&
+                  (row.nextReportAt === null ||
+                    (row.nextReportAt as Date) <= getNow()) &&
+                  (!where?.billingPeriodId ||
+                    where.billingPeriodId === row.billingPeriodId) &&
+                  (!where?.shop?.status ||
+                    (typeof where.shop.status === "string"
+                      ? (row.shop as { status: string }).status ===
+                        where.shop.status
+                      : (row.shop as { status: string }).status !==
+                        where.shop.status.not)),
+              )
+              .slice(0, take)
+              .map((row) => ({ ...row, shop: { ...(row.shop as object) } })),
+        ),
+      updateMany: vi.fn().mockImplementation(
+        async ({
+          where,
+          data,
+        }: {
+          where: {
+            id: string;
+            shopifyReportState?: { in: string[] } | string;
+          };
+          data: unknown;
+        }) => {
+          const update = data as Record<string, unknown>;
+          const matchingRecords = records.filter((candidate) => {
+            const current = states.get(candidate.id as string);
+            if (where.id && where.id !== candidate.id) return false;
+            if (
+              where.billingPeriodId &&
+              where.billingPeriodId !== candidate.billingPeriodId
+            )
+              return false;
+            if (typeof where.shopifyReportState === "string") {
+              return where.shopifyReportState === current;
+            }
+            return (
+              !where.shopifyReportState ||
+              where.shopifyReportState.in.includes(current ?? "")
+            );
+          });
+          if (matchingRecords.length === 0) return { count: 0 };
+          for (const record of matchingRecords as Array<
+            Record<string, unknown>
+          >) {
+            if (
+              update.reportAttemptCount &&
+              typeof update.reportAttemptCount === "object"
+            ) {
+              record.reportAttemptCount =
+                Number(record.reportAttemptCount) +
+                Number(
+                  (update.reportAttemptCount as { increment: number })
+                    .increment,
+                );
+            }
+            for (const [key, value] of Object.entries(update)) {
+              if (key !== "reportAttemptCount") record[key] = value;
+            }
+            states.set(
+              record.id as string,
+              String(record.shopifyReportState ?? ""),
             );
           }
-          for (const [key, value] of Object.entries(update)) {
-            if (key !== "reportAttemptCount") record[key] = value;
-          }
-          states.set(record.id as string, String(record.shopifyReportState ?? ""));
-        }
-        updates.push({ where, data });
-        return { count: matchingRecords.length };
-      }),
+          updates.push({ where, data });
+          return { count: matchingRecords.length };
+        },
+      ),
     },
   };
   const provider = { createBillingEvent: vi.fn().mockResolvedValue(undefined) };
@@ -85,7 +136,11 @@ describe("ShopifyUsageEventPublisherService", () => {
   it("claims and reports positive and negative usage with persisted identity", async () => {
     const test = harness([
       usageRow(),
-      usageRow({ id: "usage-2", quantity: -1, shopifyIdempotencyKey: "shopify:shop-1:usage-2" }),
+      usageRow({
+        id: "usage-2",
+        quantity: -1,
+        shopifyIdempotencyKey: "shopify:shop-1:usage-2",
+      }),
     ]);
 
     await expect(test.service.publishDue()).resolves.toMatchObject({
@@ -93,23 +148,38 @@ describe("ShopifyUsageEventPublisherService", () => {
       claimed: 2,
       reported: 2,
     });
-    expect(test.provider.createBillingEvent).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      value: 1,
-      idempotencyKey: "shopify:shop-1:usage-1",
-    }));
-    expect(test.provider.createBillingEvent).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      value: -1,
-      idempotencyKey: "shopify:shop-1:usage-2",
-    }));
+    expect(test.provider.createBillingEvent).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        value: 1,
+        idempotencyKey: "shopify:shop-1:usage-1",
+      }),
+    );
+    expect(test.provider.createBillingEvent).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        value: -1,
+        idempotencyKey: "shopify:shop-1:usage-2",
+      }),
+    );
     expect(test.states.get("usage-1")).toBe("REPORTED");
     expect(test.states.get("usage-2")).toBe("REPORTED");
-    expect(test.updates.filter((update) =>
-      (update.data as { shopifyReportState?: string }).shopifyReportState === "REPORTED",
-    ).map((update) => (update.data as { providerResponseSummary?: string }).providerResponseSummary))
-      .toEqual([
-        "submitted-to-shopify-app-events",
-        "submitted-to-shopify-app-events",
-      ]);
+    expect(
+      test.updates
+        .filter(
+          (update) =>
+            (update.data as { shopifyReportState?: string })
+              .shopifyReportState === "REPORTED",
+        )
+        .map(
+          (update) =>
+            (update.data as { providerResponseSummary?: string })
+              .providerResponseSummary,
+        ),
+    ).toEqual([
+      "submitted-to-shopify-app-events",
+      "submitted-to-shopify-app-events",
+    ]);
   });
 
   it("never selects Woo usage marked NOT_APPLICABLE for Shopify publication", async () => {
@@ -134,8 +204,12 @@ describe("ShopifyUsageEventPublisherService", () => {
   it("publishes fractional correction quantities without rounding", async () => {
     const test = harness([usageRow({ quantity: -0.25 })]);
 
-    await expect(test.service.publishDue()).resolves.toMatchObject({ reported: 1 });
-    expect(test.provider.createBillingEvent).toHaveBeenCalledWith(expect.objectContaining({ value: "-0.25" }));
+    await expect(test.service.publishDue()).resolves.toMatchObject({
+      reported: 1,
+    });
+    expect(test.provider.createBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ value: "-0.25" }),
+    );
   });
 
   it("fails closed before the provider when reportable mapping is incomplete", async () => {
@@ -150,14 +224,16 @@ describe("ShopifyUsageEventPublisherService", () => {
   });
 
   it("does not publish usage created after the uninstall cutoff", async () => {
-    const test = harness([usageRow({
-      occurredAt: new Date("2026-09-08T10:00:00.000Z"),
-      shop: {
-        shopifyShopId: "gid://shopify/Shop/1",
-        status: "UNINSTALLED",
-        uninstalledAt: new Date("2026-09-08T09:00:00.000Z"),
-      },
-    })]);
+    const test = harness([
+      usageRow({
+        occurredAt: new Date("2026-09-08T10:00:00.000Z"),
+        shop: {
+          shopifyShopId: "gid://shopify/Shop/1",
+          status: "UNINSTALLED",
+          uninstalledAt: new Date("2026-09-08T09:00:00.000Z"),
+        },
+      }),
+    ]);
 
     await expect(test.service.publishDue()).resolves.toMatchObject({
       claimed: 1,
@@ -190,10 +266,12 @@ describe("ShopifyUsageEventPublisherService", () => {
     );
 
     await expect(limited.publishDue()).resolves.toMatchObject({ selected: 2 });
-    expect(test.provider.createBillingEvent).toHaveBeenCalledWith(expect.objectContaining({
-      occurredAt: "2026-09-08T08:30:00.000Z",
-      idempotencyKey: "shopify:shop-1:usage-uninstall-1",
-    }));
+    expect(test.provider.createBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        occurredAt: "2026-09-08T08:30:00.000Z",
+        idempotencyKey: "shopify:shop-1:usage-uninstall-1",
+      }),
+    );
     expect(test.provider.createBillingEvent).toHaveBeenCalledTimes(2);
   });
 
@@ -203,7 +281,9 @@ describe("ShopifyUsageEventPublisherService", () => {
       new ShopifyAppEventsError("throttled", "throttled"),
     );
 
-    await expect(test.service.publishDue()).resolves.toMatchObject({ retryable: 1 });
+    await expect(test.service.publishDue()).resolves.toMatchObject({
+      retryable: 1,
+    });
     expect(test.states.get("usage-1")).toBe("RETRYABLE");
     expect(test.updates.at(-1)?.data).toMatchObject({
       shopifyReportState: "RETRYABLE",
@@ -214,7 +294,9 @@ describe("ShopifyUsageEventPublisherService", () => {
 
   it("creates the default provider once and reuses it across scans", async () => {
     const test = harness();
-    const provider = { createBillingEvent: vi.fn().mockResolvedValue(undefined) };
+    const provider = {
+      createBillingEvent: vi.fn().mockResolvedValue(undefined),
+    };
     const createProvider = vi.fn().mockReturnValue(provider);
     const service = new ShopifyUsageEventPublisherService(
       test.database as never,
@@ -287,18 +369,21 @@ describe("ShopifyUsageEventPublisherService", () => {
     );
 
     await service.publishDue();
-    const firstRetryAt = (test.updates.at(-1)?.data as { nextReportAt: Date }).nextReportAt;
+    const firstRetryAt = (test.updates.at(-1)?.data as { nextReportAt: Date })
+      .nextReportAt;
     expect(firstRetryAt.getTime() - now.getTime()).toBe(60_000);
 
     currentNow = firstRetryAt;
     await service.publishDue();
-    const secondRetryAt = (test.updates.at(-1)?.data as { nextReportAt: Date }).nextReportAt;
+    const secondRetryAt = (test.updates.at(-1)?.data as { nextReportAt: Date })
+      .nextReportAt;
     expect(secondRetryAt.getTime() - firstRetryAt.getTime()).toBe(120_000);
 
     currentNow = secondRetryAt;
     for (let attempt = 3; attempt <= 7; attempt += 1) {
       await service.publishDue();
-      const retryAt = (test.updates.at(-1)?.data as { nextReportAt: Date }).nextReportAt;
+      const retryAt = (test.updates.at(-1)?.data as { nextReportAt: Date })
+        .nextReportAt;
       if (attempt === 7) {
         expect(retryAt.getTime() - currentNow.getTime()).toBe(60 * 60_000);
       }
@@ -306,47 +391,82 @@ describe("ShopifyUsageEventPublisherService", () => {
     }
 
     expect(test.provider.createBillingEvent).toHaveBeenCalledTimes(7);
-    expect(new Set(
-      test.provider.createBillingEvent.mock.calls.map(([event]) => event.idempotencyKey),
-    )).toEqual(new Set(["shopify:shop-1:usage-1"]));
+    expect(
+      new Set(
+        test.provider.createBillingEvent.mock.calls.map(
+          ([event]) => event.idempotencyKey,
+        ),
+      ),
+    ).toEqual(new Set(["shopify:shop-1:usage-1"]));
   });
 
   it("B008-R8 recovers stale in-flight work while preserving its permanent identity", async () => {
     let currentNow = new Date(now);
-    const test = harness([usageRow({
-      shopifyReportState: "IN_FLIGHT",
-      lastReportAttemptAt: new Date(now.getTime() - 16 * 60_000),
-    })], () => currentNow);
-    test.provider.createBillingEvent.mockRejectedValueOnce(
-      new ShopifyAppEventsError("throttled", "throttled"),
-    ).mockResolvedValueOnce(undefined);
+    const test = harness(
+      [
+        usageRow({
+          shopifyReportState: "IN_FLIGHT",
+          lastReportAttemptAt: new Date(now.getTime() - 16 * 60_000),
+        }),
+      ],
+      () => currentNow,
+    );
+    test.provider.createBillingEvent
+      .mockRejectedValueOnce(
+        new ShopifyAppEventsError("throttled", "throttled"),
+      )
+      .mockResolvedValueOnce(undefined);
 
-    await expect(test.service.publishDue()).resolves.toMatchObject({ retryable: 1 });
+    await expect(test.service.publishDue()).resolves.toMatchObject({
+      retryable: 1,
+    });
     currentNow = new Date(now.getTime() + 16 * 60_000);
-    await expect(test.service.publishDue()).resolves.toMatchObject({ reported: 1 });
+    await expect(test.service.publishDue()).resolves.toMatchObject({
+      reported: 1,
+    });
 
     expect(test.provider.createBillingEvent).toHaveBeenCalledTimes(2);
-    expect(test.provider.createBillingEvent.mock.calls[0]?.[0].idempotencyKey)
-      .toBe("shopify:shop-1:usage-1");
-    expect(test.provider.createBillingEvent.mock.calls[1]?.[0].idempotencyKey)
-      .toBe("shopify:shop-1:usage-1");
+    expect(
+      test.provider.createBillingEvent.mock.calls[0]?.[0].idempotencyKey,
+    ).toBe("shopify:shop-1:usage-1");
+    expect(
+      test.provider.createBillingEvent.mock.calls[1]?.[0].idempotencyKey,
+    ).toBe("shopify:shop-1:usage-1");
   });
 
   it("scopes stale in-flight recovery to the requested BillingPeriod", async () => {
     const test = harness([
-      usageRow({ id: "stale-period-1", billingPeriodId: "period-1", shopifyReportState: "IN_FLIGHT", lastReportAttemptAt: new Date(now.getTime() - 16 * 60_000) }),
-      usageRow({ id: "stale-period-2", billingPeriodId: "period-2", shopifyReportState: "IN_FLIGHT", lastReportAttemptAt: new Date(now.getTime() - 16 * 60_000) }),
+      usageRow({
+        id: "stale-period-1",
+        billingPeriodId: "period-1",
+        shopifyReportState: "IN_FLIGHT",
+        lastReportAttemptAt: new Date(now.getTime() - 16 * 60_000),
+      }),
+      usageRow({
+        id: "stale-period-2",
+        billingPeriodId: "period-2",
+        shopifyReportState: "IN_FLIGHT",
+        lastReportAttemptAt: new Date(now.getTime() - 16 * 60_000),
+      }),
     ]);
 
     await test.service.publishDue({ billingPeriodId: "period-1" });
 
-    expect(test.updates.some(({ where }) => (
-      (where as { id?: string; billingPeriodId?: string }).billingPeriodId === "period-1"
-      && (where as { id?: string }).id === undefined
-    ))).toBe(true);
-    expect(test.updates.some(({ where }) => (
-      (where as { billingPeriodId?: string }).billingPeriodId === "period-2"
-    ))).toBe(false);
+    expect(
+      test.updates.some(
+        ({ where }) =>
+          (where as { id?: string; billingPeriodId?: string })
+            .billingPeriodId === "period-1" &&
+          (where as { id?: string }).id === undefined,
+      ),
+    ).toBe(true);
+    expect(
+      test.updates.some(
+        ({ where }) =>
+          (where as { billingPeriodId?: string }).billingPeriodId ===
+          "period-2",
+      ),
+    ).toBe(false);
   });
 
   it("marks permanent provider failures for attention without retrying", async () => {
@@ -355,7 +475,9 @@ describe("ShopifyUsageEventPublisherService", () => {
       new ShopifyAppEventsError("meter", "meter rejected"),
     );
 
-    await expect(test.service.publishDue()).resolves.toMatchObject({ needsAttention: 1 });
+    await expect(test.service.publishDue()).resolves.toMatchObject({
+      needsAttention: 1,
+    });
     expect(test.states.get("usage-1")).toBe("NEEDS_ATTENTION");
     expect(test.updates.at(-1)?.data).toMatchObject({
       shopifyReportState: "NEEDS_ATTENTION",
@@ -386,12 +508,17 @@ describe("ShopifyUsageEventPublisherService", () => {
     const test = harness([usageRow()], () => currentNow);
     let reportUpdateAttempts = 0;
     const originalUpdate = test.database.usageEvent.updateMany;
-    test.database.usageEvent.updateMany = vi.fn().mockImplementation(async (args) => {
-      if (args.data.shopifyReportState === "REPORTED" && reportUpdateAttempts++ === 0) {
-        throw new Error("database connection lost");
-      }
-      return originalUpdate(args);
-    });
+    test.database.usageEvent.updateMany = vi
+      .fn()
+      .mockImplementation(async (args) => {
+        if (
+          args.data.shopifyReportState === "REPORTED" &&
+          reportUpdateAttempts++ === 0
+        ) {
+          throw new Error("database connection lost");
+        }
+        return originalUpdate(args);
+      });
 
     const service = new ShopifyUsageEventPublisherService(
       test.database as never,
@@ -402,8 +529,8 @@ describe("ShopifyUsageEventPublisherService", () => {
     currentNow = new Date(now.getTime() + 16 * 60_000);
     await expect(service.publishDue()).resolves.toMatchObject({ reported: 1 });
     expect(test.provider.createBillingEvent).toHaveBeenCalledTimes(2);
-    expect(test.provider.createBillingEvent.mock.calls[0]?.[0].idempotencyKey)
-      .toBe(test.provider.createBillingEvent.mock.calls[1]?.[0].idempotencyKey);
+    expect(
+      test.provider.createBillingEvent.mock.calls[0]?.[0].idempotencyKey,
+    ).toBe(test.provider.createBillingEvent.mock.calls[1]?.[0].idempotencyKey);
   });
-
 });

@@ -9,18 +9,32 @@ import { connectionRedis } from "../../src/lib/redis.js";
 import { WooCheckoutLeaseGuard } from "../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 import { PendingRecoveryCandidateIndexStore } from "../../src/services/pending-recovery-candidate/candidate-index.store.js";
 import { PENDING_RECOVERY_CANDIDATE_QUEUE } from "../../src/domain/pending-recovery-candidate.js";
-import { WooCheckoutCoordinatorService, WooOrderReconciliationService, WooOrderTerminalEvidenceStore } from "../../src/services/woocommerce-recovery/woo-order-reconciliation.service.js";
-import { WooPendingCandidateQueueService, wooCandidateJobId } from "../../src/services/woocommerce-recovery/woo-candidate-queue.service.js";
+import {
+  WooCheckoutCoordinatorService,
+  WooOrderReconciliationService,
+  WooOrderTerminalEvidenceStore,
+} from "../../src/services/woocommerce-recovery/woo-order-reconciliation.service.js";
+import {
+  WooPendingCandidateQueueService,
+  wooCandidateJobId,
+} from "../../src/services/woocommerce-recovery/woo-candidate-queue.service.js";
 import { WooRecoveryAdmissionService } from "../../src/services/woocommerce-recovery/woo-recovery-admission.service.js";
 import { createWooCheckoutActivityService } from "../../src/services/woocommerce-recovery/woo-checkout-activity.service.js";
 import { createWooRecoveryOutreachService } from "../../src/services/woocommerce-recovery/woo-recovery-outreach.adapters.js";
 import { WooInitialDispatchQueue } from "../../src/services/woocommerce-recovery/woo-initial-dispatch.queue.js";
 import { WooRecoveryOrchestratorService } from "../../src/services/woocommerce-recovery/woo-recovery-orchestrator.service.js";
 import { createPendingRecoveryCandidateWorker } from "../../src/workers/pending-recovery-candidate.worker.js";
-import { createWooOutreachFixture, mockWooOutreachSenderConfiguration, type WooOutreachIntegrationFixture } from "./fixtures/arch048-woo-outreach.fixture.js";
+import {
+  createWooOutreachFixture,
+  mockWooOutreachSenderConfiguration,
+  type WooOutreachIntegrationFixture,
+} from "./fixtures/arch048-woo-outreach.fixture.js";
 import { WOO_TEST_SENDER_WABA } from "./fixtures/woo-approved-initial-template.fixture.js";
-import { mockWooOutreachCatalogue, WOO_COMPOSED_FIRST_PRODUCT_ID,
-  WOO_COMPOSED_SECOND_PRODUCT_ID } from "./fixtures/woo-outreach-catalogue.fixture.js";
+import {
+  mockWooOutreachCatalogue,
+  WOO_COMPOSED_FIRST_PRODUCT_ID,
+  WOO_COMPOSED_SECOND_PRODUCT_ID,
+} from "./fixtures/woo-outreach-catalogue.fixture.js";
 
 vi.mock("../../src/runtime/background-runtime-config.js", () => ({
   backgroundRuntimeConfigService: {
@@ -29,8 +43,12 @@ vi.mock("../../src/runtime/background-runtime-config.js", () => ({
   },
 }));
 
-const integrated = process.env.TEST_DATABASE_URL && process.env.TEST_REDIS_URL &&
-  process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
+const integrated =
+  process.env.TEST_DATABASE_URL &&
+  process.env.TEST_REDIS_URL &&
+  process.env.MODA_DISPOSABLE_INTEGRATION === "1"
+    ? describe
+    : describe.skip;
 
 async function eventually(check: () => Promise<boolean>): Promise<void> {
   for (let i = 0; i < 200; i++) {
@@ -40,167 +58,380 @@ async function eventually(check: () => Promise<boolean>): Promise<void> {
   throw new Error("Woo composed pipeline did not reach durable completion");
 }
 
-integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () => {
-  let fixture: WooOutreachIntegrationFixture | undefined;
-  afterEach(async () => {
-    try { if (fixture) await fixture.cleanup(); }
-    finally { fixture = undefined; vi.restoreAllMocks(); vi.unstubAllEnvs(); }
-  });
-
-  it("composes BG001 checkout → BG003 consent/admission → BG004 attempt and credit → BG002 terminal order", async () => {
-    // Both sides of the approved-template boundary use the same test WABA;
-    // the real repository must select the persisted Moda-authored registration.
-    vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId")
-      .mockResolvedValue(WOO_TEST_SENDER_WABA);
-    vi.spyOn(whatsAppService, "getProviderAccountId")
-      .mockResolvedValue(WOO_TEST_SENDER_WABA);
-    const catalogueReads = mockWooOutreachCatalogue();
-    fixture = await createWooOutreachFixture();
-    mockWooOutreachSenderConfiguration(fixture.senderConfiguration);
-    const f = fixture;
-    await f.db.shop.update({ where: { id: f.shopId }, data: { onboardingCompleted: true } });
-    await f.db.shopSettings.upsert({
-      where: { shopId: f.shopId },
-      create: { shopId: f.shopId, notifyOnInitialRecoveryOutreach: true },
-      update: { notifyOnInitialRecoveryOutreach: true },
-    });
-    const sourceQueue = new Queue(PENDING_RECOVERY_CANDIDATE_QUEUE, { connection: connectionRedis });
-    const initialQueue = new WooInitialDispatchQueue();
-    const index = new PendingRecoveryCandidateIndexStore();
-    const candidates = new WooPendingCandidateQueueService(sourceQueue, index);
-    const coordinator = new WooCheckoutCoordinatorService(new WooCheckoutLeaseGuard());
-    const orders = new WooOrderTerminalEvidenceStore(connectionRedis);
-    const logger = createLogger({ serviceName: "moda-recovery-worker", environment: "test", sink: () => undefined });
-    const outreach = createWooRecoveryOutreachService({
-      coordinator, orders, guardedSender: f.guardedSender, enqueue: initialQueue, logger,
-    });
-    const orchestrator = new WooRecoveryOrchestratorService({
-      checkout: createWooCheckoutActivityService({ coordinator, observedOrders: orders, candidates }),
-      order: new WooOrderReconciliationService(f.db, candidates, coordinator, orders, logger),
-      admission: new WooRecoveryAdmissionService({ coordinator, candidates, orders, database: f.db, logger }),
-      outreach, logger,
-      async assertWooShop(shopId) {
-        const shop = await f.db.shop.findUnique({ where: { id: shopId }, select: { platform: true } });
-        if (shop?.platform !== "WOOCOMMERCE") throw new Error("WOO_RECOVERY_SHOP_PLATFORM_MISMATCH");
-      },
-      async assertInitialAttempt(recoveryId, attemptId) {
-        const attempt = await f.db.recoveryOutreachAttempt.findUnique({ where: { id: attemptId } });
-        if (!attempt || attempt.checkoutRecoveryId !== recoveryId || attempt.sequence !== 1)
-          throw new Error("WOO_INITIAL_DISPATCH_OWNERSHIP_MISMATCH");
-      },
-      async clearMatured(candidate, jobId) {
-        await index.compareAndRemoveCheckout(candidate, jobId);
-      },
-    });
-    const checkoutToken = `new-checkout-${randomUUID()}`;
-    const event = {
-      schemaVersion: "woo.activity.v1" as const, shopId: f.shopId,
-      eventId: `evt-${randomUUID()}`, eventType: "CHECKOUT_UPDATED" as const,
-      checkoutKey: checkoutToken, occurredAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
-      checkout: { currency: "GBP", total: "20.00",
-        items: [{ productId: WOO_COMPOSED_FIRST_PRODUCT_ID, quantity: 1, title: "Test product", unitPrice: "20.00" }],
-        restoration: { schemaVersion: "woo.cart-restore.v1" as const, kind: "supported" as const,
-          appliedCouponCodes: [], lines: [{ productId: Number(WOO_COMPOSED_FIRST_PRODUCT_ID), quantity: 1 }] },
-        contact: { phone: "+447400123456" } },
-    };
-    let worker: ReturnType<typeof createPendingRecoveryCandidateWorker> | undefined;
-    try {
-      expect((await orchestrator.onCheckout(event)).kind).toBe("scheduled");
-      const candidateId = wooCandidateJobId({ shopId: f.shopId, checkoutToken }, 1);
-      expect((await sourceQueue.getJob(candidateId))?.data.source).toBe("woocommerce");
-      worker = createPendingRecoveryCandidateWorker(orchestrator);
-      await worker.waitUntilReady();
-      await eventually(async () => (await f.db.checkoutRecovery.findFirst({
-        where: { shopId: f.shopId, checkoutToken, status: "MESSAGE_SENT" },
-      })) !== null);
-      const first = await f.db.checkoutRecovery.findFirstOrThrow({
-        where: { shopId: f.shopId, checkoutToken, generation: 1 },
-      });
-      const firstAttempts = await f.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: first.id } });
-      expect(firstAttempts).toHaveLength(1);
-      expect(firstAttempts[0]).toMatchObject({ sequence: 1, status: "WAITING_FOR_RESPONSE", followUpDueAt: null });
-      expect(await f.db.merchantSupportMessage.count({
-        where: {
-          checkoutRecoveryId: first.id,
-          systemCode: "RECOVERY_INITIAL_OUTREACH_SENT",
-          sourceKey: `recovery-initial-outreach:v1:${firstAttempts[0]!.id}`,
-        },
-      })).toBe(1);
-      expect(f.providerRequests).toBe(1);
-      expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: first.id, sequence: 2 } })).toBe(0);
-      expect(await f.db.usageEvent.count({ where: {
-        shopId: f.shopId, metric: "RECOVERY_CONVERSATION",
-      } })).toBe(1);
-      // Generation two has an independent initial; provision its own test
-      // credit so this integration verifies the no-cross-generation-cap path.
-      await f.db.shopEntitlementCounter.updateMany({
-        where: { shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" },
-        data: { grantedQuantity: 2 },
-      });
-
-      const resumedEvent = {
-        ...event, eventId: `evt-${randomUUID()}`,
-        occurredAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
-        checkout: { ...event.checkout, total: "35.00",
-          items: [{ productId: WOO_COMPOSED_SECOND_PRODUCT_ID, quantity: 2, title: "Generation two product", unitPrice: "17.50" }],
-          restoration: { ...event.checkout.restoration,
-            lines: [{ productId: Number(WOO_COMPOSED_SECOND_PRODUCT_ID), quantity: 2 }] } },
-      };
-      expect((await orchestrator.onCheckout(resumedEvent)).kind).toBe("resumed");
-      await eventually(async () => (await f.db.checkoutRecovery.findFirst({
-        where: { shopId: f.shopId, checkoutToken, generation: 2, status: "MESSAGE_SENT" },
-      })) !== null);
-      const rows = await f.db.checkoutRecovery.findMany({
-        where: { shopId: f.shopId, checkoutToken }, orderBy: { generation: "asc" },
-      });
-      expect(rows).toHaveLength(2);
-      expect(rows[0]).toMatchObject({ id: first.id, generation: 1, status: "CANCELLED",
-        lineItems: [{ productId: WOO_COMPOSED_FIRST_PRODUCT_ID, title: "Test product", quantity: 1, price: "20.00" }] });
-      expect(rows[1]).toMatchObject({ generation: 2, status: "MESSAGE_SENT",
-        lineItems: [{ productId: WOO_COMPOSED_SECOND_PRODUCT_ID, title: "Generation two product", quantity: 2, price: "17.50" }] });
-      expect(rows[1]!.totalPrice?.toString()).toBe("35");
-      const secondAttempts = await f.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: rows[1]!.id } });
-      expect(secondAttempts).toHaveLength(1);
-      expect(secondAttempts[0]).toMatchObject({ sequence: 1, status: "WAITING_FOR_RESPONSE", followUpDueAt: null });
-      expect(await f.db.merchantSupportMessage.count({
-        where: { checkoutRecoveryId: first.id, systemCode: "RECOVERY_INITIAL_OUTREACH_SENT" },
-      })).toBe(1);
-      expect(f.providerRequests).toBe(2);
-      expect(catalogueReads.mock.calls.map(([name, args]) => ({ name, args }))).toEqual([
-        { name: "commerce_get_product", args: { productId: WOO_COMPOSED_FIRST_PRODUCT_ID, variantId: null } },
-        { name: "commerce_get_product", args: { productId: WOO_COMPOSED_FIRST_PRODUCT_ID, variantId: null } },
-        { name: "commerce_get_product", args: { productId: WOO_COMPOSED_SECOND_PRODUCT_ID, variantId: null } },
-        { name: "commerce_get_product", args: { productId: WOO_COMPOSED_SECOND_PRODUCT_ID, variantId: null } },
-      ]);
-      for (const row of rows) {
-        const link = new URL(row.checkoutUrl!);
-        expect(link.origin).toBe(new URL(f.shopUrl).origin);
-        expect(link.searchParams.get("moda_interact_resume")).toBe("1");
-        expect(link.searchParams.get("r")).toBe(row.id);
-        expect(link.searchParams.get("t")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+integrated(
+  "ARCH-048-BG005 real Woo services through BullMQ and Postgres",
+  () => {
+    let fixture: WooOutreachIntegrationFixture | undefined;
+    afterEach(async () => {
+      try {
+        if (fixture) await fixture.cleanup();
+      } finally {
+        fixture = undefined;
+        vi.restoreAllMocks();
+        vi.unstubAllEnvs();
       }
-      expect(await f.db.usageEvent.count({ where: {
-        shopId: f.shopId, metric: "RECOVERY_CONVERSATION",
-      } })).toBe(2);
-      // A local STOP received after the first send may not create a second send.
-      await f.stop();
-      await expect(orchestrator.onInitialDispatch(rows[1]!.id, secondAttempts[0]!.id))
-        .resolves.toMatchObject({ kind: "already-initialized" });
-      expect(f.providerRequests).toBe(2);
-      expect((await orchestrator.onOrder({
-        schemaVersion: "woo.activity.v1", eventId: `order-${randomUUID()}`,
-        eventType: "ORDER_PAID", shopId: f.shopId, checkoutKey: checkoutToken,
-        occurredAt: new Date().toISOString(),
-        order: { orderId: `woo-order-${randomUUID()}`, checkoutKey: checkoutToken, status: "completed" },
-      })).kind).toBe("paid-terminal");
-      expect((await f.db.checkoutRecovery.findUniqueOrThrow({ where: { id: rows[1]!.id } })).status)
-        .toBe("COMPLETED");
-      expect(f.providerRequests).toBe(2);
-    } finally {
-      if (worker) await worker.close();
-      await Promise.allSettled([candidates.cancelPending({ shopId: f.shopId, checkoutToken })]);
-      await sourceQueue.close();
-      await initialQueue.close();
-    }
-  }, 100_000);
-});
+    });
+
+    it("composes BG001 checkout → BG003 consent/admission → BG004 attempt and credit → BG002 terminal order", async () => {
+      // Both sides of the approved-template boundary use the same test WABA;
+      // the real repository must select the persisted Moda-authored registration.
+      vi.spyOn(
+        outboundWhatsAppAdmissionService,
+        "getProviderAccountId",
+      ).mockResolvedValue(WOO_TEST_SENDER_WABA);
+      vi.spyOn(whatsAppService, "getProviderAccountId").mockResolvedValue(
+        WOO_TEST_SENDER_WABA,
+      );
+      const catalogueReads = mockWooOutreachCatalogue();
+      fixture = await createWooOutreachFixture();
+      mockWooOutreachSenderConfiguration(fixture.senderConfiguration);
+      const f = fixture;
+      await f.db.shop.update({
+        where: { id: f.shopId },
+        data: { onboardingCompleted: true },
+      });
+      await f.db.shopSettings.upsert({
+        where: { shopId: f.shopId },
+        create: { shopId: f.shopId, notifyOnInitialRecoveryOutreach: true },
+        update: { notifyOnInitialRecoveryOutreach: true },
+      });
+      const sourceQueue = new Queue(PENDING_RECOVERY_CANDIDATE_QUEUE, {
+        connection: connectionRedis,
+      });
+      const initialQueue = new WooInitialDispatchQueue();
+      const index = new PendingRecoveryCandidateIndexStore();
+      const candidates = new WooPendingCandidateQueueService(
+        sourceQueue,
+        index,
+      );
+      const coordinator = new WooCheckoutCoordinatorService(
+        new WooCheckoutLeaseGuard(),
+      );
+      const orders = new WooOrderTerminalEvidenceStore(connectionRedis);
+      const logger = createLogger({
+        serviceName: "moda-recovery-worker",
+        environment: "test",
+        sink: () => undefined,
+      });
+      const outreach = createWooRecoveryOutreachService({
+        coordinator,
+        orders,
+        guardedSender: f.guardedSender,
+        enqueue: initialQueue,
+        logger,
+      });
+      const orchestrator = new WooRecoveryOrchestratorService({
+        checkout: createWooCheckoutActivityService({
+          coordinator,
+          observedOrders: orders,
+          candidates,
+        }),
+        order: new WooOrderReconciliationService(
+          f.db,
+          candidates,
+          coordinator,
+          orders,
+          logger,
+        ),
+        admission: new WooRecoveryAdmissionService({
+          coordinator,
+          candidates,
+          orders,
+          database: f.db,
+          logger,
+        }),
+        outreach,
+        logger,
+        async assertWooShop(shopId) {
+          const shop = await f.db.shop.findUnique({
+            where: { id: shopId },
+            select: { platform: true },
+          });
+          if (shop?.platform !== "WOOCOMMERCE")
+            throw new Error("WOO_RECOVERY_SHOP_PLATFORM_MISMATCH");
+        },
+        async assertInitialAttempt(recoveryId, attemptId) {
+          const attempt = await f.db.recoveryOutreachAttempt.findUnique({
+            where: { id: attemptId },
+          });
+          if (
+            !attempt ||
+            attempt.checkoutRecoveryId !== recoveryId ||
+            attempt.sequence !== 1
+          )
+            throw new Error("WOO_INITIAL_DISPATCH_OWNERSHIP_MISMATCH");
+        },
+        async clearMatured(candidate, jobId) {
+          await index.compareAndRemoveCheckout(candidate, jobId);
+        },
+      });
+      const checkoutToken = `new-checkout-${randomUUID()}`;
+      const event = {
+        schemaVersion: "woo.activity.v1" as const,
+        shopId: f.shopId,
+        eventId: `evt-${randomUUID()}`,
+        eventType: "CHECKOUT_UPDATED" as const,
+        checkoutKey: checkoutToken,
+        occurredAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
+        checkout: {
+          currency: "GBP",
+          total: "20.00",
+          items: [
+            {
+              productId: WOO_COMPOSED_FIRST_PRODUCT_ID,
+              quantity: 1,
+              title: "Test product",
+              unitPrice: "20.00",
+            },
+          ],
+          restoration: {
+            schemaVersion: "woo.cart-restore.v1" as const,
+            kind: "supported" as const,
+            appliedCouponCodes: [],
+            lines: [
+              { productId: Number(WOO_COMPOSED_FIRST_PRODUCT_ID), quantity: 1 },
+            ],
+          },
+          contact: { phone: "+447400123456" },
+        },
+      };
+      let worker:
+        ReturnType<typeof createPendingRecoveryCandidateWorker> | undefined;
+      try {
+        expect((await orchestrator.onCheckout(event)).kind).toBe("scheduled");
+        const candidateId = wooCandidateJobId(
+          { shopId: f.shopId, checkoutToken },
+          1,
+        );
+        expect((await sourceQueue.getJob(candidateId))?.data.source).toBe(
+          "woocommerce",
+        );
+        worker = createPendingRecoveryCandidateWorker(orchestrator);
+        await worker.waitUntilReady();
+        await eventually(
+          async () =>
+            (await f.db.checkoutRecovery.findFirst({
+              where: {
+                shopId: f.shopId,
+                checkoutToken,
+                status: "MESSAGE_SENT",
+              },
+            })) !== null,
+        );
+        const first = await f.db.checkoutRecovery.findFirstOrThrow({
+          where: { shopId: f.shopId, checkoutToken, generation: 1 },
+        });
+        const firstAttempts = await f.db.recoveryOutreachAttempt.findMany({
+          where: { checkoutRecoveryId: first.id },
+        });
+        expect(firstAttempts).toHaveLength(1);
+        expect(firstAttempts[0]).toMatchObject({
+          sequence: 1,
+          status: "WAITING_FOR_RESPONSE",
+          followUpDueAt: null,
+        });
+        expect(
+          await f.db.merchantSupportMessage.count({
+            where: {
+              checkoutRecoveryId: first.id,
+              systemCode: "RECOVERY_INITIAL_OUTREACH_SENT",
+              sourceKey: `recovery-initial-outreach:v1:${firstAttempts[0]!.id}`,
+            },
+          }),
+        ).toBe(1);
+        expect(f.providerRequests).toBe(1);
+        expect(
+          await f.db.recoveryOutreachAttempt.count({
+            where: { checkoutRecoveryId: first.id, sequence: 2 },
+          }),
+        ).toBe(0);
+        expect(
+          await f.db.usageEvent.count({
+            where: {
+              shopId: f.shopId,
+              metric: "RECOVERY_CONVERSATION",
+            },
+          }),
+        ).toBe(1);
+        // Generation two has an independent initial; provision its own test
+        // credit so this integration verifies the no-cross-generation-cap path.
+        await f.db.shopEntitlementCounter.updateMany({
+          where: {
+            shopId: f.shopId,
+            counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+          },
+          data: { grantedQuantity: 2 },
+        });
+
+        const resumedEvent = {
+          ...event,
+          eventId: `evt-${randomUUID()}`,
+          occurredAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+          checkout: {
+            ...event.checkout,
+            total: "35.00",
+            items: [
+              {
+                productId: WOO_COMPOSED_SECOND_PRODUCT_ID,
+                quantity: 2,
+                title: "Generation two product",
+                unitPrice: "17.50",
+              },
+            ],
+            restoration: {
+              ...event.checkout.restoration,
+              lines: [
+                {
+                  productId: Number(WOO_COMPOSED_SECOND_PRODUCT_ID),
+                  quantity: 2,
+                },
+              ],
+            },
+          },
+        };
+        expect((await orchestrator.onCheckout(resumedEvent)).kind).toBe(
+          "resumed",
+        );
+        await eventually(
+          async () =>
+            (await f.db.checkoutRecovery.findFirst({
+              where: {
+                shopId: f.shopId,
+                checkoutToken,
+                generation: 2,
+                status: "MESSAGE_SENT",
+              },
+            })) !== null,
+        );
+        const rows = await f.db.checkoutRecovery.findMany({
+          where: { shopId: f.shopId, checkoutToken },
+          orderBy: { generation: "asc" },
+        });
+        expect(rows).toHaveLength(2);
+        expect(rows[0]).toMatchObject({
+          id: first.id,
+          generation: 1,
+          status: "CANCELLED",
+          lineItems: [
+            {
+              productId: WOO_COMPOSED_FIRST_PRODUCT_ID,
+              title: "Test product",
+              quantity: 1,
+              price: "20.00",
+            },
+          ],
+        });
+        expect(rows[1]).toMatchObject({
+          generation: 2,
+          status: "MESSAGE_SENT",
+          lineItems: [
+            {
+              productId: WOO_COMPOSED_SECOND_PRODUCT_ID,
+              title: "Generation two product",
+              quantity: 2,
+              price: "17.50",
+            },
+          ],
+        });
+        expect(rows[1]!.totalPrice?.toString()).toBe("35");
+        const secondAttempts = await f.db.recoveryOutreachAttempt.findMany({
+          where: { checkoutRecoveryId: rows[1]!.id },
+        });
+        expect(secondAttempts).toHaveLength(1);
+        expect(secondAttempts[0]).toMatchObject({
+          sequence: 1,
+          status: "WAITING_FOR_RESPONSE",
+          followUpDueAt: null,
+        });
+        expect(
+          await f.db.merchantSupportMessage.count({
+            where: {
+              checkoutRecoveryId: first.id,
+              systemCode: "RECOVERY_INITIAL_OUTREACH_SENT",
+            },
+          }),
+        ).toBe(1);
+        expect(f.providerRequests).toBe(2);
+        expect(
+          catalogueReads.mock.calls.map(([name, args]) => ({ name, args })),
+        ).toEqual([
+          {
+            name: "commerce_get_product",
+            args: { productId: WOO_COMPOSED_FIRST_PRODUCT_ID, variantId: null },
+          },
+          {
+            name: "commerce_get_product",
+            args: { productId: WOO_COMPOSED_FIRST_PRODUCT_ID, variantId: null },
+          },
+          {
+            name: "commerce_get_product",
+            args: {
+              productId: WOO_COMPOSED_SECOND_PRODUCT_ID,
+              variantId: null,
+            },
+          },
+          {
+            name: "commerce_get_product",
+            args: {
+              productId: WOO_COMPOSED_SECOND_PRODUCT_ID,
+              variantId: null,
+            },
+          },
+        ]);
+        for (const row of rows) {
+          const link = new URL(row.checkoutUrl!);
+          expect(link.origin).toBe(new URL(f.shopUrl).origin);
+          expect(link.searchParams.get("moda_interact_resume")).toBe("1");
+          expect(link.searchParams.get("r")).toBe(row.id);
+          expect(link.searchParams.get("t")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+        }
+        expect(
+          await f.db.usageEvent.count({
+            where: {
+              shopId: f.shopId,
+              metric: "RECOVERY_CONVERSATION",
+            },
+          }),
+        ).toBe(2);
+        // A local STOP received after the first send may not create a second send.
+        await f.stop();
+        await expect(
+          orchestrator.onInitialDispatch(rows[1]!.id, secondAttempts[0]!.id),
+        ).resolves.toMatchObject({ kind: "already-initialized" });
+        expect(f.providerRequests).toBe(2);
+        expect(
+          (
+            await orchestrator.onOrder({
+              schemaVersion: "woo.activity.v1",
+              eventId: `order-${randomUUID()}`,
+              eventType: "ORDER_PAID",
+              shopId: f.shopId,
+              checkoutKey: checkoutToken,
+              occurredAt: new Date().toISOString(),
+              order: {
+                orderId: `woo-order-${randomUUID()}`,
+                checkoutKey: checkoutToken,
+                status: "completed",
+              },
+            })
+          ).kind,
+        ).toBe("paid-terminal");
+        expect(
+          (
+            await f.db.checkoutRecovery.findUniqueOrThrow({
+              where: { id: rows[1]!.id },
+            })
+          ).status,
+        ).toBe("COMPLETED");
+        expect(f.providerRequests).toBe(2);
+      } finally {
+        if (worker) await worker.close();
+        await Promise.allSettled([
+          candidates.cancelPending({ shopId: f.shopId, checkoutToken }),
+        ]);
+        await sourceQueue.close();
+        await initialQueue.close();
+      }
+    }, 100_000);
+  },
+);

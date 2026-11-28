@@ -1,7 +1,10 @@
 import { WooCouponPageTransport } from "../providers/woo-coupon-transport.js";
 import { readAllWooCouponPages } from "../providers/woo-coupon-pages.js";
 import { WooCouponGrantService } from "./woo-coupon-grant.service.js";
-import { defaultWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
+import {
+  defaultWooCouponSyncConfig,
+  type WooCouponSyncConfig,
+} from "./woo-coupon-sync-config.js";
 
 /** Read-only full scan. No catalogue writes or worker activation in Attempt 2. */
 export class WooCouponReaderService {
@@ -13,6 +16,12 @@ export class WooCouponReaderService {
 
   async fetchAll(shopId: string): Promise<Record<string, unknown>[]> {
     return this.grants.withAuthorizedRead(shopId, (site, credentials) =>
-      readAllWooCouponPages((page, perPage) => this.transport.readPage(site, credentials, page, perPage), this.settings.maxPages, this.settings.maxScanDurationMs));
+      readAllWooCouponPages(
+        (page, perPage) =>
+          this.transport.readPage(site, credentials, page, perPage),
+        this.settings.maxPages,
+        this.settings.maxScanDurationMs,
+      ),
+    );
   }
 }

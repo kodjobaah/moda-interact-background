@@ -34,14 +34,15 @@ export function createTranslationProviderCredentialResolver(input: {
         if (!normalizedProvider || normalizedProvider.length > 64) {
           throw new Error(UNAVAILABLE);
         }
-        const row = await input.db.commerceTranslationProviderCredential.findUnique({
-          where: {
-            environment_provider: {
-              environment,
-              provider: normalizedProvider,
+        const row =
+          await input.db.commerceTranslationProviderCredential.findUnique({
+            where: {
+              environment_provider: {
+                environment,
+                provider: normalizedProvider,
+              },
             },
-          },
-        });
+          });
         if (
           signal?.aborted ||
           !row ||
@@ -65,7 +66,8 @@ export function createTranslationProviderCredentialResolver(input: {
             keyId: row.keyId,
           }),
         });
-        if (!isValidProviderCredentialText(credential) || signal?.aborted) throw new Error(UNAVAILABLE);
+        if (!isValidProviderCredentialText(credential) || signal?.aborted)
+          throw new Error(UNAVAILABLE);
         return credential;
       } catch {
         throw new Error(UNAVAILABLE);

@@ -1,17 +1,39 @@
 import type { BrandPreparationReceipt } from "../conversation-delivery-plan.js";
-import { ConversationMediaDeliveryPlanSchema, type ConversationMediaDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
-import { readRecoveryShopHeader, withRecoveryShopHeader } from "../conversation-wrappers/recovery-shop-header.js";
+import {
+  ConversationMediaDeliveryPlanSchema,
+  type ConversationMediaDeliveryPlan,
+} from "@modainteract/moda-interact-shared/commerce/presentation";
+import {
+  readRecoveryShopHeader,
+  withRecoveryShopHeader,
+} from "../conversation-wrappers/recovery-shop-header.js";
 import type { RecoveryShopHeaderReceipt } from "../conversation-wrappers/contracts.js";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
-import type { WrapperRefusal, WrappedResult } from "../conversation-wrappers/contracts.js";
-import { validRecoveryCheckoutFooterUrl, withHumanRecoveryCheckoutFooter } from "../conversation-wrappers/recovery-checkout-footer.js";
+import type {
+  WrapperRefusal,
+  WrappedResult,
+} from "../conversation-wrappers/contracts.js";
+import {
+  validRecoveryCheckoutFooterUrl,
+  withHumanRecoveryCheckoutFooter,
+} from "../conversation-wrappers/recovery-checkout-footer.js";
 import { ConversationWrapperService } from "../conversation-wrappers/service.js";
 
 /** ARCH-047-BG009: deterministic rendering only; SQL freezing owns moderation identity. */
 export type HumanWrapperPreparation =
   | Readonly<{ kind: "not-applicable" }>
-  | Readonly<{ kind: "passthrough"; body: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryShopHeaderReceipt; brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan }>
+  | Readonly<{
+      kind: "passthrough";
+      body: string;
+      recoveryCheckoutUrl?: string;
+      recoveryShopHeader?: RecoveryShopHeaderReceipt;
+      brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef;
+      deliveryPlan?: ConversationMediaDeliveryPlan;
+    }>
   | Readonly<{ kind: "prepared"; body: string; application: WrappedResult }>
   | Readonly<{ kind: "refused"; reason: WrapperRefusal | "CONTENT_MISMATCH" }>;
 
@@ -24,7 +46,10 @@ export type HumanWrapperCommand = Readonly<{
   mediaReceipt?: BrandPreparationReceipt;
 }>;
 
-type WrapperRenderer = Pick<ConversationWrapperService, "renderConversationResponse">;
+type WrapperRenderer = Pick<
+  ConversationWrapperService,
+  "renderConversationResponse"
+>;
 
 const defaultLogger = createLogger({
   serviceName: "moda-messaging-worker",
@@ -39,41 +64,95 @@ const defaultLogger = createLogger({
  */
 export class HumanWrapperPreparationService {
   constructor(
-    private readonly renderer: WrapperRenderer = new ConversationWrapperService({
-      onMissingSlot: "passthrough",
-    }),
+    private readonly renderer: WrapperRenderer = new ConversationWrapperService(
+      {
+        onMissingSlot: "passthrough",
+      },
+    ),
     private readonly logger: StructuredLogger = defaultLogger,
   ) {}
 
-  async prepare(command: HumanWrapperCommand): Promise<HumanWrapperPreparation> {
+  async prepare(
+    command: HumanWrapperCommand,
+  ): Promise<HumanWrapperPreparation> {
     if (command.kind !== "HUMAN_TEXT") return { kind: "not-applicable" };
-    if (!command.textBody?.trim()) return { kind: "refused", reason: "INVALID_INPUT" };
+    if (!command.textBody?.trim())
+      return { kind: "refused", reason: "INVALID_INPUT" };
     try {
       const rendered = await this.renderer.renderConversationResponse({
         conversationId: command.conversationId,
         source: "HUMAN",
         messageIdentity: command.id,
         responseBody: command.textBody,
-        ...(command.mediaDeadlineAt!==undefined?{mediaDeadlineAt:command.mediaDeadlineAt}:{}),
-        ...(command.mediaReceipt ? {allowBrandImage: true} : {}),
+        ...(command.mediaDeadlineAt !== undefined
+          ? { mediaDeadlineAt: command.mediaDeadlineAt }
+          : {}),
+        ...(command.mediaReceipt ? { allowBrandImage: true } : {}),
       });
       if (rendered.kind === "no-wrapper" || rendered.kind === "rendered") {
-        if (rendered.deliveryPlan && (!command.mediaReceipt || !ConversationMediaDeliveryPlanSchema.safeParse(rendered.deliveryPlan).success || rendered.deliveryPlan.body !== rendered.body || rendered.deliveryPlan.kind === "IMAGE")) return {kind: "refused", reason: "CONTENT_MISMATCH"};
+        if (
+          rendered.deliveryPlan &&
+          (!command.mediaReceipt ||
+            !ConversationMediaDeliveryPlanSchema.safeParse(
+              rendered.deliveryPlan,
+            ).success ||
+            rendered.deliveryPlan.body !== rendered.body ||
+            rendered.deliveryPlan.kind === "IMAGE")
+        )
+          return { kind: "refused", reason: "CONTENT_MISMATCH" };
       }
       if (rendered.kind === "no-wrapper") {
-        const header = rendered.recoveryShopHeader === undefined ? null : readRecoveryShopHeader(rendered.recoveryShopHeader);
-        if (rendered.recoveryShopHeader !== undefined && !header) return {kind: "refused", reason: "CONTENT_MISMATCH"};
-        if (rendered.recoveryCheckoutUrl !== undefined && !validRecoveryCheckoutFooterUrl(rendered.recoveryCheckoutUrl)) return {kind: "refused", reason: "CONTENT_MISMATCH"};
-        const footerBody = rendered.recoveryCheckoutUrl ? withHumanRecoveryCheckoutFooter(command.textBody, rendered.recoveryCheckoutUrl) : command.textBody;
-        const expected = header ? withRecoveryShopHeader(footerBody, header) : footerBody;
-        return rendered.body === expected ? {kind: "passthrough", body: rendered.body,
-          ...(rendered.recoveryCheckoutUrl ? {recoveryCheckoutUrl: rendered.recoveryCheckoutUrl} : {}),
-          ...(header ? {recoveryShopHeader: header} : {}), ...(rendered.brandMediaPolicy ? {brandMediaPolicy:rendered.brandMediaPolicy} : {}), ...(rendered.deliveryPlan ? {deliveryPlan: rendered.deliveryPlan} : {})} : {kind: "refused", reason: "CONTENT_MISMATCH"};
+        const header =
+          rendered.recoveryShopHeader === undefined
+            ? null
+            : readRecoveryShopHeader(rendered.recoveryShopHeader);
+        if (rendered.recoveryShopHeader !== undefined && !header)
+          return { kind: "refused", reason: "CONTENT_MISMATCH" };
+        if (
+          rendered.recoveryCheckoutUrl !== undefined &&
+          !validRecoveryCheckoutFooterUrl(rendered.recoveryCheckoutUrl)
+        )
+          return { kind: "refused", reason: "CONTENT_MISMATCH" };
+        const footerBody = rendered.recoveryCheckoutUrl
+          ? withHumanRecoveryCheckoutFooter(
+              command.textBody,
+              rendered.recoveryCheckoutUrl,
+            )
+          : command.textBody;
+        const expected = header
+          ? withRecoveryShopHeader(footerBody, header)
+          : footerBody;
+        return rendered.body === expected
+          ? {
+              kind: "passthrough",
+              body: rendered.body,
+              ...(rendered.recoveryCheckoutUrl
+                ? { recoveryCheckoutUrl: rendered.recoveryCheckoutUrl }
+                : {}),
+              ...(header ? { recoveryShopHeader: header } : {}),
+              ...(rendered.brandMediaPolicy
+                ? { brandMediaPolicy: rendered.brandMediaPolicy }
+                : {}),
+              ...(rendered.deliveryPlan
+                ? { deliveryPlan: rendered.deliveryPlan }
+                : {}),
+            }
+          : { kind: "refused", reason: "CONTENT_MISMATCH" };
       }
       if (rendered.kind === "rendered") {
-        if(rendered.commonLayout && (rendered.audience!=="SHARED"||rendered.commonLayout.boundaries.body!==command.textBody||!rendered.multipartPlan||!command.mediaReceipt))return {kind:"refused",reason:"CONTENT_MISMATCH"};
-        if (rendered.source !== "HUMAN" || rendered.messageIdentity !== command.id ||
-            !rendered.body.includes(command.textBody)) {
+        if (
+          rendered.commonLayout &&
+          (rendered.audience !== "SHARED" ||
+            rendered.commonLayout.boundaries.body !== command.textBody ||
+            !rendered.multipartPlan ||
+            !command.mediaReceipt)
+        )
+          return { kind: "refused", reason: "CONTENT_MISMATCH" };
+        if (
+          rendered.source !== "HUMAN" ||
+          rendered.messageIdentity !== command.id ||
+          !rendered.body.includes(command.textBody)
+        ) {
           return { kind: "refused", reason: "CONTENT_MISMATCH" };
         }
         return { kind: "prepared", body: rendered.body, application: rendered };

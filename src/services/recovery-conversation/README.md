@@ -42,7 +42,7 @@ Background `database/` submodule must be updated to the accepted
   A `durableEligibility(tx, input, context)` checker is **required** and must
   inspect in-database entitlement/recovery credit/capacity before granting the
   permit. The service fails closed without it. BG002 must also run its existing
-  external recipient/provider and RecoveryBillingService checks *before* this
+  external recipient/provider and RecoveryBillingService checks _before_ this
   fence, and must never call provider HTTP more than once for each permit.
 - `HumanSendReconciliationService.recordProviderAccepted`,
   `recordDefinitiveFailure`, `recordProviderUnknown`, `reconcileUnknown` attach

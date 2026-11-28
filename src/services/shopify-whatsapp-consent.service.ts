@@ -1,22 +1,29 @@
 import type { PrismaClient } from "@prisma/client";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import prisma from "../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { ShopifyConsentRecipientResolver } from "./shopify-whatsapp-consent/recipient.js";
 import { ShopifyConsentProjectionWriter } from "./shopify-whatsapp-consent/projection-writer.js";
 import { evaluateShopifyStoredRecipient } from "./shopify-whatsapp-consent/phone-resolution.js";
-import {
-  type ShopifyConsentMaterializationResult,
-} from "./shopify-whatsapp-consent/types.js";
+import { type ShopifyConsentMaterializationResult } from "./shopify-whatsapp-consent/types.js";
 import type {
   ShopifyWhatsAppConsentEligibility,
   ShopifyWhatsAppConsentSyncResult,
 } from "./shopify-whatsapp-consent/types.js";
 
-export type { ShopifyWhatsAppConsentEligibility, ShopifyWhatsAppConsentSyncResult } from "./shopify-whatsapp-consent/types.js";
+export type {
+  ShopifyWhatsAppConsentEligibility,
+  ShopifyWhatsAppConsentSyncResult,
+} from "./shopify-whatsapp-consent/types.js";
 
 export interface ShopifyWhatsAppConsentServicePort {
-  syncCustomer(input: { shopId: string; shopifyCustomerId: string }): Promise<ShopifyWhatsAppConsentSyncResult>;
+  syncCustomer(input: {
+    shopId: string;
+    shopifyCustomerId: string;
+  }): Promise<ShopifyWhatsAppConsentSyncResult>;
   evaluateRecipient(input: {
     shopId: string;
     customerId: string;
@@ -38,7 +45,8 @@ export interface ShopifyWhatsAppConsentServicePort {
 }
 
 const defaultLogger = createLogger({
-  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
 });
 
 /** Reads the current SQL permission and materialises verified checkout receipts. */
@@ -49,10 +57,17 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
   constructor(
     private readonly database: PrismaClient = prisma,
     private readonly now: () => Date = () => new Date(),
-    private readonly logger: Pick<StructuredLogger, "warn" | "info" | "error"> = defaultLogger,
+    private readonly logger: Pick<
+      StructuredLogger,
+      "warn" | "info" | "error"
+    > = defaultLogger,
   ) {
     this.recipients = new ShopifyConsentRecipientResolver(database);
-    this.writes = new ShopifyConsentProjectionWriter(database, this.recipients, logger);
+    this.writes = new ShopifyConsentProjectionWriter(
+      database,
+      this.recipients,
+      logger,
+    );
   }
 
   async syncCustomer(input: {
@@ -72,7 +87,11 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
     shopifyCustomerId: string;
     recipient: string;
   }): Promise<ShopifyWhatsAppConsentEligibility> {
-    const scoped = await this.recipients.resolveCustomer(input.shopId, input.shopifyCustomerId, input.customerId);
+    const scoped = await this.recipients.resolveCustomer(
+      input.shopId,
+      input.shopifyCustomerId,
+      input.customerId,
+    );
     if (!scoped.ok) return scoped.failure;
     return this.evaluateStoredRecipient({
       shopId: input.shopId,
@@ -94,7 +113,10 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
       input.customerId,
     );
     if (!scoped.ok) return { status: "DEFER_IDENTITY_OR_RECIPIENT" };
-    const target = await this.recipients.findRecipient(scoped.value, input.recipient);
+    const target = await this.recipients.findRecipient(
+      scoped.value,
+      input.recipient,
+    );
     if (!target.ok) return { status: "DEFER_IDENTITY_OR_RECIPIENT" };
     if (target.phone.whatsappNoContact && input.decision === "GRANTED") {
       return { status: "BLOCKED_STOP" };
@@ -118,7 +140,9 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
       return {
         status: "MATERIALISATION_FAILURE",
         reason: result.reason,
-        ...("cause" in result && result.cause !== undefined ? { cause: result.cause } : {}),
+        ...("cause" in result && result.cause !== undefined
+          ? { cause: result.cause }
+          : {}),
       };
     }
     return input.decision === "GRANTED"
@@ -131,7 +155,9 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
     customerId: string;
     recipient: string;
   }): Promise<ShopifyWhatsAppConsentEligibility> {
-    return evaluateShopifyStoredRecipient({ ...input, database: this.database });
+    return evaluateShopifyStoredRecipient({
+      ...input,
+      database: this.database,
+    });
   }
-
 }

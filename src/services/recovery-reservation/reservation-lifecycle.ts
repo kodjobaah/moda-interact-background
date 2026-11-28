@@ -49,7 +49,8 @@ export function recoveryReservationReplayKind(
   }
 }
 
-export type RecoveryReservationTransition = "reactivate" | "commit" | "release" | "ambiguous";
+export type RecoveryReservationTransition =
+  "reactivate" | "commit" | "release" | "ambiguous";
 
 export type RecoveryReservationTransitionDecision =
   | { kind: "apply" }
@@ -73,33 +74,52 @@ export function recoveryReservationTransitionDecision(
 ): RecoveryReservationTransitionDecision {
   const { reservation, transition, createError } = input;
 
-  if (transition === "release" && reservation.status === UsageReservationStatus.COMMITTED) {
+  if (
+    transition === "release" &&
+    reservation.status === UsageReservationStatus.COMMITTED
+  ) {
     throw createError("Committed reservations cannot be released");
   }
 
-  const requiredStatus = transition === "reactivate"
-    ? UsageReservationStatus.RELEASED
-    : UsageReservationStatus.RESERVED;
+  const requiredStatus =
+    transition === "reactivate"
+      ? UsageReservationStatus.RELEASED
+      : UsageReservationStatus.RESERVED;
 
   if (reservation.status !== requiredStatus) {
-    return { kind: "replay", replayKind: recoveryReservationReplayKind(reservation.status) };
+    return {
+      kind: "replay",
+      replayKind: recoveryReservationReplayKind(reservation.status),
+    };
   }
 
-  if (transition !== "ambiguous" && reservation.quantity !== input.requestedQuantity) {
-    throw createError("Reservation quantity does not match the requested transition");
+  if (
+    transition !== "ambiguous" &&
+    reservation.quantity !== input.requestedQuantity
+  ) {
+    throw createError(
+      "Reservation quantity does not match the requested transition",
+    );
   }
 
   return { kind: "apply" };
 }
 
 export function isRecoveryReservationUniqueConflict(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2002"
+  );
 }
 
-export function isRecoveryReservationRetryableConflict(error: unknown): boolean {
-  return error instanceof RecoveryReservationConcurrencyConflict ||
+export function isRecoveryReservationRetryableConflict(
+  error: unknown,
+): boolean {
+  return (
+    error instanceof RecoveryReservationConcurrencyConflict ||
     (error instanceof Prisma.PrismaClientKnownRequestError &&
-      (error.code === "P2002" || error.code === "P2034"));
+      (error.code === "P2002" || error.code === "P2034"))
+  );
 }
 
 export async function withRecoveryReservationRetry<T>(input: {
@@ -111,7 +131,10 @@ export async function withRecoveryReservationRetry<T>(input: {
     try {
       return await input.operation();
     } catch (error) {
-      if (!isRecoveryReservationRetryableConflict(error) || attempt === input.maxRetries - 1) {
+      if (
+        !isRecoveryReservationRetryableConflict(error) ||
+        attempt === input.maxRetries - 1
+      ) {
         throw error;
       }
     }

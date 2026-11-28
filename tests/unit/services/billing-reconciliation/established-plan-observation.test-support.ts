@@ -62,15 +62,32 @@ export const provider = {
 export function establishedPlanObservationHarness() {
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
-    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-new" }, { eventHandle: "pack-new" }] }) },
-    billingPeriod: { findUnique: vi.fn().mockResolvedValue({
-      id: "period-old", subscriptionId: existing.id, status: "CLOSED", planKindSnapshot: "PAID_METERED",
-    }), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    merchantPricingPlan: {
+      findUnique: vi.fn().mockResolvedValue({
+        usageEvents: [
+          { eventHandle: "recovery-new" },
+          { eventHandle: "pack-new" },
+        ],
+      }),
+    },
+    billingPeriod: {
+      findUnique: vi.fn().mockResolvedValue({
+        id: "period-old",
+        subscriptionId: existing.id,
+        status: "CLOSED",
+        planKindSnapshot: "PAID_METERED",
+      }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(currentPlan) },
     usageEvent: { updateMany: vi.fn() },
-    usageReservation: { aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }), updateMany: vi.fn() },
+    usageReservation: {
+      aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }),
+      updateMany: vi.fn(),
+    },
     billingPeriodEntitlementCounter: {
-      findUnique: vi.fn().mockResolvedValue(null), updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findUnique: vi.fn().mockResolvedValue(null),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     subscription: {
       findUnique: vi.fn().mockImplementation(async () => existing),
@@ -81,7 +98,10 @@ export function establishedPlanObservationHarness() {
   const database = {
     billingPlan: { findUnique: vi.fn().mockResolvedValue(currentPlan) },
     subscription: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
-    $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)),
+    $transaction: vi.fn(
+      async (callback: (value: typeof transaction) => unknown) =>
+        callback(transaction),
+    ),
   };
   const scheduler = { enqueue: vi.fn().mockResolvedValue(undefined) };
   const logger = { warn: vi.fn(), error: vi.fn() };
@@ -101,19 +121,69 @@ export function establishedPlanObservationHarness() {
     capacityResume,
     transition as never,
   );
-  return { database, transaction, scheduler, logger, capacityResume, transition, service };
+  return {
+    database,
+    transaction,
+    scheduler,
+    logger,
+    capacityResume,
+    transition,
+    service,
+  };
 }
 
 export const paidPrerequisiteCases = [
-  ["null Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { includedRecoveryConversationAllowance: null }],
-  ["negative Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { includedRecoveryConversationAllowance: -1 }],
-  ["non-integer Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { includedRecoveryConversationAllowance: 1.5 }],
-  ["unsafe Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { includedRecoveryConversationAllowance: Number.MAX_SAFE_INTEGER + 1 }],
-  ["enabled Paid pack meter null", "MISSING_USAGE_METER", { recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: null }],
-  ["provider omits Paid pack meter", "MISSING_USAGE_METER", { recoveryCreditPackEnabled: true, providerUsageEventHandles: ["recovery-new"] }],
+  [
+    "null Paid allowance",
+    "INVALID_INCLUDED_ALLOWANCE",
+    { includedRecoveryConversationAllowance: null },
+  ],
+  [
+    "negative Paid allowance",
+    "INVALID_INCLUDED_ALLOWANCE",
+    { includedRecoveryConversationAllowance: -1 },
+  ],
+  [
+    "non-integer Paid allowance",
+    "INVALID_INCLUDED_ALLOWANCE",
+    { includedRecoveryConversationAllowance: 1.5 },
+  ],
+  [
+    "unsafe Paid allowance",
+    "INVALID_INCLUDED_ALLOWANCE",
+    { includedRecoveryConversationAllowance: Number.MAX_SAFE_INTEGER + 1 },
+  ],
+  [
+    "enabled Paid pack meter null",
+    "MISSING_USAGE_METER",
+    {
+      recoveryCreditPackEnabled: true,
+      shopifyRecoveryCreditPackEventHandle: null,
+    },
+  ],
+  [
+    "provider omits Paid pack meter",
+    "MISSING_USAGE_METER",
+    {
+      recoveryCreditPackEnabled: true,
+      providerUsageEventHandles: ["recovery-new"],
+    },
+  ],
 ] as const;
 
 export const freePrerequisiteCases = [
-  ["enabled Free pack meter null", { shopifyRecoveryCreditPackEventHandle: null, providerUsageEventHandles: [] }],
-  ["provider omits Free pack meter", { shopifyRecoveryCreditPackEventHandle: "pack-new", providerUsageEventHandles: [] }],
+  [
+    "enabled Free pack meter null",
+    {
+      shopifyRecoveryCreditPackEventHandle: null,
+      providerUsageEventHandles: [],
+    },
+  ],
+  [
+    "provider omits Free pack meter",
+    {
+      shopifyRecoveryCreditPackEventHandle: "pack-new",
+      providerUsageEventHandles: [],
+    },
+  ],
 ] as const;

@@ -10,9 +10,7 @@ import {
   createLogger,
   type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
-import {
-  resolveDeploymentEnvironmentName,
-} from "@modainteract/moda-interact-shared/observability/node";
+import { resolveDeploymentEnvironmentName } from "@modainteract/moda-interact-shared/observability/node";
 import type { MerchantKnowledgeProcessSourceRevisionJob } from "@modainteract/moda-interact-shared/merchant-knowledge";
 
 import prisma from "../lib/db.js";
@@ -46,7 +44,7 @@ import {
 
 type ProcessingDatabase = Pick<
   PrismaClient,
-  "$transaction"
+  | "$transaction"
   | "merchantKnowledgeSource"
   | "merchantKnowledgeSourceRevision"
   | "merchantKnowledgeChunk"
@@ -64,7 +62,10 @@ export interface MerchantKnowledgeProcessingDependencies {
   embedding?: MerchantKnowledgeEmbeddingService;
   embeddingResolver?: MerchantKnowledgeEmbeddingResolver;
   logger?: StructuredLogger;
-  incidentReporter?: Pick<ReturnType<typeof createOperationalIncidentReporter>, "report">;
+  incidentReporter?: Pick<
+    ReturnType<typeof createOperationalIncidentReporter>,
+    "report"
+  >;
   now?: () => Date;
 }
 
@@ -92,58 +93,68 @@ export class MerchantKnowledgeProcessingService {
   private readonly database: ProcessingDatabase;
   private readonly eligibility: EligibilityResolver;
   private readonly logger: StructuredLogger;
-  private readonly incidentReporter: Pick<ReturnType<typeof createOperationalIncidentReporter>, "report">;
+  private readonly incidentReporter: Pick<
+    ReturnType<typeof createOperationalIncidentReporter>,
+    "report"
+  >;
   private readonly now: () => Date;
 
-  constructor(private readonly dependencies: MerchantKnowledgeProcessingDependencies) {
+  constructor(
+    private readonly dependencies: MerchantKnowledgeProcessingDependencies,
+  ) {
     if (!dependencies.embedding && !dependencies.embeddingResolver) {
       throw new Error("Merchant Knowledge embedding runtime is required");
     }
     this.database = dependencies.database ?? prisma;
-    this.eligibility = dependencies.eligibility ?? merchantKnowledgeEntitlementService;
+    this.eligibility =
+      dependencies.eligibility ?? merchantKnowledgeEntitlementService;
     this.logger = dependencies.logger ?? logger;
-    this.incidentReporter = dependencies.incidentReporter ?? defaultIncidentReporter;
+    this.incidentReporter =
+      dependencies.incidentReporter ?? defaultIncidentReporter;
     this.now = dependencies.now ?? (() => new Date());
   }
 
-  async processJob(job: MerchantKnowledgeProcessSourceRevisionJob): Promise<void> {
-    const revision = await this.database.merchantKnowledgeSourceRevision.findUnique({
-      where: { id: job.sourceRevisionId },
-      select: {
-        id: true,
-        sourceId: true,
-        uploadedAssetId: true,
-        generation: true,
-        status: true,
-        requestedUrl: true,
-        source: {
-          select: {
-            id: true,
-            shopId: true,
-            currentGeneration: true,
-            updatedAt: true,
-            purpose: { select: { key: true } },
-            dataFormat: { select: { key: true, inputKind: true } },
+  async processJob(
+    job: MerchantKnowledgeProcessSourceRevisionJob,
+  ): Promise<void> {
+    const revision =
+      await this.database.merchantKnowledgeSourceRevision.findUnique({
+        where: { id: job.sourceRevisionId },
+        select: {
+          id: true,
+          sourceId: true,
+          uploadedAssetId: true,
+          generation: true,
+          status: true,
+          requestedUrl: true,
+          source: {
+            select: {
+              id: true,
+              shopId: true,
+              currentGeneration: true,
+              updatedAt: true,
+              purpose: { select: { key: true } },
+              dataFormat: { select: { key: true, inputKind: true } },
+            },
+          },
+          uploadedAsset: {
+            select: {
+              id: true,
+              shopId: true,
+              dataFormat: { select: { key: true, inputKind: true } },
+            },
           },
         },
-        uploadedAsset: {
-          select: {
-            id: true,
-            shopId: true,
-            dataFormat: { select: { key: true, inputKind: true } },
-          },
-        },
-      },
-    });
+      });
 
     if (!revision) {
       this.logOutcome(job.sourceRevisionId, "REVISION_NOT_FOUND");
       return;
     }
     if (
-      revision.source.shopId !== job.shopId
-      || revision.generation !== job.generation
-      || revision.generation !== revision.source.currentGeneration
+      revision.source.shopId !== job.shopId ||
+      revision.generation !== job.generation ||
+      revision.generation !== revision.source.currentGeneration
     ) {
       this.logOutcome(revision.id, "STALE_JOB");
       return;
@@ -161,10 +172,7 @@ export class MerchantKnowledgeProcessingService {
       revision.source.id,
     );
     if (!initialEligibility.globallySupported) {
-      await this.markPermanentFailure(
-        job,
-        "SOURCE_TYPE_UNSUPPORTED",
-      );
+      await this.markPermanentFailure(job, "SOURCE_TYPE_UNSUPPORTED");
       return;
     }
     if (!initialEligibility.eligible || !initialEligibility.entitlement) {
@@ -182,7 +190,11 @@ export class MerchantKnowledgeProcessingService {
     };
     let claim = await this.database.merchantKnowledgeSourceRevision.updateMany({
       where: { ...claimWhere, status: "PENDING" },
-      data: { status: "PROCESSING", processingStartedAt: this.now(), failureCode: null },
+      data: {
+        status: "PROCESSING",
+        processingStartedAt: this.now(),
+        failureCode: null,
+      },
     });
     if (claim.count === 0 && revision.status === "PROCESSING") {
       claim = await this.database.merchantKnowledgeSourceRevision.updateMany({
@@ -203,7 +215,8 @@ export class MerchantKnowledgeProcessingService {
     let contentHash: string;
     let chunks: MerchantKnowledgeChunkContent[];
     const chunkVectors: number[][] = [];
-    const maxContentUnits = initialEligibility.entitlement.maxContentUnitsPerSource;
+    const maxContentUnits =
+      initialEligibility.entitlement.maxContentUnitsPerSource;
     const maxCodePoints = maxContentUnits * 4;
     try {
       embedding = await this.resolveEmbedding();
@@ -211,7 +224,9 @@ export class MerchantKnowledgeProcessingService {
       const normalized = normalizeMerchantKnowledgeText(acquired.extractedText);
       const normalizedCodePoints = countMerchantKnowledgeCodePoints(normalized);
       truncated = normalizedCodePoints > maxCodePoints;
-      content = truncated ? [...normalized].slice(0, maxCodePoints).join("") : normalized;
+      content = truncated
+        ? [...normalized].slice(0, maxCodePoints).join("")
+        : normalized;
       contentUnits = merchantKnowledgeContentUnits(content);
       contentHash = createHash("sha256").update(content, "utf8").digest("hex");
       chunks = chunkMerchantKnowledgeText(content);
@@ -223,7 +238,8 @@ export class MerchantKnowledgeProcessingService {
     } catch (error) {
       const processingError = classifyMerchantKnowledgeProcessingError(error);
       this.logger.error("merchant_knowledge.processing.failed", {
-        shopId: job.shopId, sourceRevisionId: job.sourceRevisionId,
+        shopId: job.shopId,
+        sourceRevisionId: job.sourceRevisionId,
         failureCode: processingError.failureCode,
         retryable: processingError.retryable,
         errorMessage: error instanceof Error ? error.message : String(error),
@@ -232,8 +248,10 @@ export class MerchantKnowledgeProcessingService {
       if (processingError.retryable) throw processingError;
       await this.markPermanentFailure(job, processingError.failureCode, {
         formatKey: revision.source.dataFormat.key,
-        detailCode: error instanceof MerchantKnowledgeUploadedAssetAcquisitionError
-          ? error.code : null,
+        detailCode:
+          error instanceof MerchantKnowledgeUploadedAssetAcquisitionError
+            ? error.code
+            : null,
       });
       return;
     }
@@ -242,9 +260,10 @@ export class MerchantKnowledgeProcessingService {
       revision.source.id,
     );
     if (
-      !currentEligibility.eligible
-      || !currentEligibility.entitlement
-      || currentEligibility.entitlement.maxContentUnitsPerSource !== maxContentUnits
+      !currentEligibility.eligible ||
+      !currentEligibility.entitlement ||
+      currentEligibility.entitlement.maxContentUnitsPerSource !==
+        maxContentUnits
     ) {
       await this.resetPending(job);
       this.logOutcome(revision.id, "ELIGIBILITY_CHANGED");
@@ -270,22 +289,31 @@ export class MerchantKnowledgeProcessingService {
     job: MerchantKnowledgeProcessSourceRevisionJob;
     failureCode: string;
   }): Promise<void> {
-    const result = await this.database.merchantKnowledgeSourceRevision.updateMany({
-      where: {
-        id: input.job.sourceRevisionId,
-        generation: input.job.generation,
-        status: "PROCESSING",
-        source: {
-          is: {
-            shopId: input.job.shopId,
-            currentGeneration: input.job.generation,
+    const result =
+      await this.database.merchantKnowledgeSourceRevision.updateMany({
+        where: {
+          id: input.job.sourceRevisionId,
+          generation: input.job.generation,
+          status: "PROCESSING",
+          source: {
+            is: {
+              shopId: input.job.shopId,
+              currentGeneration: input.job.generation,
+            },
           },
         },
-      },
-      data: { status: "FAILED", failureCode: "RETRIES_EXHAUSTED", completedAt: this.now() },
-    });
+        data: {
+          status: "FAILED",
+          failureCode: "RETRIES_EXHAUSTED",
+          completedAt: this.now(),
+        },
+      });
     if (result.count > 0) {
-      this.logOutcome(input.job.sourceRevisionId, "FAILED", "RETRIES_EXHAUSTED");
+      this.logOutcome(
+        input.job.sourceRevisionId,
+        "FAILED",
+        "RETRIES_EXHAUSTED",
+      );
     }
   }
 
@@ -293,14 +321,20 @@ export class MerchantKnowledgeProcessingService {
     revision: {
       requestedUrl: string | null;
       uploadedAssetId: string | null;
-      source: { shopId: string; dataFormat: { key: string; inputKind: string } };
+      source: {
+        shopId: string;
+        dataFormat: { key: string; inputKind: string };
+      };
     },
     job: MerchantKnowledgeProcessSourceRevisionJob,
   ) {
     const { inputKind, key } = revision.source.dataFormat;
     if (inputKind === "REMOTE_URL") {
       if (key !== "WEB_PAGE" || revision.requestedUrl === null) {
-        throw new MerchantKnowledgeProcessingError("LOCATOR_FORMAT_MISMATCH", false);
+        throw new MerchantKnowledgeProcessingError(
+          "LOCATOR_FORMAT_MISMATCH",
+          false,
+        );
       }
       return this.dependencies.webPageAcquirer.acquire({
         requestedUrl: revision.requestedUrl,
@@ -308,10 +342,13 @@ export class MerchantKnowledgeProcessingService {
     }
     if (inputKind === "UPLOAD") {
       if (
-        revision.uploadedAssetId === null
-        || (key !== "CSV" && key !== "XLSX")
+        revision.uploadedAssetId === null ||
+        (key !== "CSV" && key !== "XLSX")
       ) {
-        throw new MerchantKnowledgeProcessingError("LOCATOR_FORMAT_MISMATCH", false);
+        throw new MerchantKnowledgeProcessingError(
+          "LOCATOR_FORMAT_MISMATCH",
+          false,
+        );
       }
       return this.dependencies.uploadedAssetAcquirer.acquire({
         shopId: job.shopId,
@@ -319,7 +356,10 @@ export class MerchantKnowledgeProcessingService {
         dataFormatKey: key,
       });
     }
-    throw new MerchantKnowledgeProcessingError("LOCATOR_FORMAT_MISMATCH", false);
+    throw new MerchantKnowledgeProcessingError(
+      "LOCATOR_FORMAT_MISMATCH",
+      false,
+    );
   }
 
   private async markPermanentFailure(
@@ -327,28 +367,34 @@ export class MerchantKnowledgeProcessingService {
     failureCode: string,
     context?: { formatKey: string; detailCode: string | null },
   ): Promise<void> {
-    const result = await this.database.merchantKnowledgeSourceRevision.updateMany({
-      where: {
-        id: job.sourceRevisionId,
-        generation: job.generation,
-        status: { in: ["PENDING", "PROCESSING"] },
-        source: {
-          is: { shopId: job.shopId, currentGeneration: job.generation },
+    const result =
+      await this.database.merchantKnowledgeSourceRevision.updateMany({
+        where: {
+          id: job.sourceRevisionId,
+          generation: job.generation,
+          status: { in: ["PENDING", "PROCESSING"] },
+          source: {
+            is: { shopId: job.shopId, currentGeneration: job.generation },
+          },
         },
-      },
-      data: {
-        status: "FAILED",
-        failureCode,
-        completedAt: this.now(),
-      },
-    });
+        data: {
+          status: "FAILED",
+          failureCode,
+          completedAt: this.now(),
+        },
+      });
     if (result.count > 0) {
       this.logOutcome(job.sourceRevisionId, "FAILED", failureCode);
       // Report only the persisted XLSX format failure. No incidents for retries,
       // stale jobs, or other merchant-source outcomes.
-      if (context?.formatKey === "XLSX" && failureCode === "UPLOAD_FORMAT_INVALID") {
-        const reasonCode = context.detailCode && xlsxFormatFailureDetails.has(context.detailCode)
-          ? `${failureCode}.${context.detailCode}` : failureCode;
+      if (
+        context?.formatKey === "XLSX" &&
+        failureCode === "UPLOAD_FORMAT_INVALID"
+      ) {
+        const reasonCode =
+          context.detailCode && xlsxFormatFailureDetails.has(context.detailCode)
+            ? `${failureCode}.${context.detailCode}`
+            : failureCode;
         try {
           await this.incidentReporter.report({
             contractVersion: OPERATIONAL_INCIDENT_CONTRACT_VERSION,
@@ -368,7 +414,8 @@ export class MerchantKnowledgeProcessingService {
           this.logger.error("merchant_knowledge.incident.report_failed", {
             shopId: job.shopId,
             sourceRevisionId: job.sourceRevisionId,
-            errorMessage: error instanceof Error ? error.message : String(error),
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
             error,
           });
         }
@@ -380,17 +427,22 @@ export class MerchantKnowledgeProcessingService {
     job: MerchantKnowledgeProcessSourceRevisionJob,
   ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
-      const reset = await transaction.merchantKnowledgeSourceRevision.updateMany({
-        where: {
-          id: job.sourceRevisionId,
-          generation: job.generation,
-          status: { in: ["PENDING", "PROCESSING"] },
-          source: {
-            is: { shopId: job.shopId, currentGeneration: job.generation },
+      const reset =
+        await transaction.merchantKnowledgeSourceRevision.updateMany({
+          where: {
+            id: job.sourceRevisionId,
+            generation: job.generation,
+            status: { in: ["PENDING", "PROCESSING"] },
+            source: {
+              is: { shopId: job.shopId, currentGeneration: job.generation },
+            },
           },
-        },
-        data: { status: "PENDING", processingStartedAt: null, failureCode: null },
-      });
+          data: {
+            status: "PENDING",
+            processingStartedAt: null,
+            failureCode: null,
+          },
+        });
       if (reset.count > 0) {
         await transaction.merchantKnowledgeChunk.deleteMany({
           where: { revisionId: job.sourceRevisionId },
@@ -402,7 +454,11 @@ export class MerchantKnowledgeProcessingService {
   private async promoteRevision(input: {
     job: MerchantKnowledgeProcessSourceRevisionJob;
     sourceId: string;
-    acquired: { contentType: string; resolvedUrl: string | null; fetchedAt: Date | null };
+    acquired: {
+      contentType: string;
+      resolvedUrl: string | null;
+      fetchedAt: Date | null;
+    };
     content: string;
     contentUnits: number;
     contentHash: string;
@@ -417,64 +473,69 @@ export class MerchantKnowledgeProcessingService {
         select: { shopId: true, currentGeneration: true, updatedAt: true },
       });
       if (
-        !source
-        || source.shopId !== input.job.shopId
-        || source.currentGeneration !== input.job.generation
+        !source ||
+        source.shopId !== input.job.shopId ||
+        source.currentGeneration !== input.job.generation
       ) {
         return false;
       }
 
-      const lockedSource = await transaction.merchantKnowledgeSource.updateMany({
-        where: {
-          id: input.sourceId,
-          shopId: input.job.shopId,
-          currentGeneration: input.job.generation,
-          updatedAt: source.updatedAt,
+      const lockedSource = await transaction.merchantKnowledgeSource.updateMany(
+        {
+          where: {
+            id: input.sourceId,
+            shopId: input.job.shopId,
+            currentGeneration: input.job.generation,
+            updatedAt: source.updatedAt,
+          },
+          data: {
+            currentGeneration: input.job.generation,
+            updatedAt: source.updatedAt,
+          },
         },
-        data: {
-          currentGeneration: input.job.generation,
-          updatedAt: source.updatedAt,
-        },
-      });
+      );
       if (lockedSource.count !== 1) return false;
 
-      const candidate = await transaction.merchantKnowledgeSourceRevision.findFirst({
-        where: {
-          id: input.job.sourceRevisionId,
-          sourceId: input.sourceId,
-          generation: input.job.generation,
-          status: "PROCESSING",
-        },
-        select: { id: true },
-      });
+      const candidate =
+        await transaction.merchantKnowledgeSourceRevision.findFirst({
+          where: {
+            id: input.job.sourceRevisionId,
+            sourceId: input.sourceId,
+            generation: input.job.generation,
+            status: "PROCESSING",
+          },
+          select: { id: true },
+        });
       if (!candidate) return false;
 
-      const predecessor = await transaction.merchantKnowledgeSourceRevision.findFirst({
-        where: { sourceId: input.sourceId, status: "ACTIVE" },
-        select: { id: true },
-      });
+      const predecessor =
+        await transaction.merchantKnowledgeSourceRevision.findFirst({
+          where: { sourceId: input.sourceId, status: "ACTIVE" },
+          select: { id: true },
+        });
       await transaction.merchantKnowledgeChunk.deleteMany({
         where: { revisionId: candidate.id },
       });
-      const candidateWrite = await transaction.merchantKnowledgeSourceRevision.updateMany({
-        where: {
-          id: candidate.id,
-          sourceId: input.sourceId,
-          generation: input.job.generation,
-          status: "PROCESSING",
-        },
-        data: {
-          contentType: input.acquired.contentType,
-          resolvedUrl: input.acquired.resolvedUrl,
-          normalizedContent: input.content,
-          contentUnits: input.contentUnits,
-          contentHash: input.contentHash,
-          truncated: input.truncated,
-          fetchedAt: input.acquired.fetchedAt,
-          completedAt: this.now(),
-          failureCode: null,
-        },
-      });
+      const candidateWrite =
+        await transaction.merchantKnowledgeSourceRevision.updateMany({
+          where: {
+            id: candidate.id,
+            sourceId: input.sourceId,
+            generation: input.job.generation,
+            status: "PROCESSING",
+          },
+          data: {
+            contentType: input.acquired.contentType,
+            resolvedUrl: input.acquired.resolvedUrl,
+            normalizedContent: input.content,
+            contentUnits: input.contentUnits,
+            contentHash: input.contentHash,
+            truncated: input.truncated,
+            fetchedAt: input.acquired.fetchedAt,
+            completedAt: this.now(),
+            failureCode: null,
+          },
+        });
       if (candidateWrite.count !== 1) return false;
 
       for (let index = 0; index < input.chunks.length; index += 1) {
@@ -501,15 +562,16 @@ export class MerchantKnowledgeProcessingService {
           data: { status: "SUPERSEDED" },
         });
       }
-      const activated = await transaction.merchantKnowledgeSourceRevision.updateMany({
-        where: {
-          id: candidate.id,
-          sourceId: input.sourceId,
-          generation: input.job.generation,
-          status: "PROCESSING",
-        },
-        data: { status: "ACTIVE", completedAt: this.now() },
-      });
+      const activated =
+        await transaction.merchantKnowledgeSourceRevision.updateMany({
+          where: {
+            id: candidate.id,
+            sourceId: input.sourceId,
+            generation: input.job.generation,
+            status: "PROCESSING",
+          },
+          data: { status: "ACTIVE", completedAt: this.now() },
+        });
       if (activated.count !== 1) {
         throw new Error("Merchant Knowledge promotion state changed");
       }
@@ -529,10 +591,13 @@ export class MerchantKnowledgeProcessingService {
 
   private validateVector(vector: number[], expectedDimensions: number): void {
     if (
-      vector.length !== expectedDimensions
-      || !vector.every((value) => Number.isFinite(value))
+      vector.length !== expectedDimensions ||
+      !vector.every((value) => Number.isFinite(value))
     ) {
-      throw new MerchantKnowledgeProcessingError("EMBEDDING_VECTOR_INVALID", false);
+      throw new MerchantKnowledgeProcessingError(
+        "EMBEDDING_VECTOR_INVALID",
+        false,
+      );
     }
   }
 

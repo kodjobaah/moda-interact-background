@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  InboundWhatsAppAbuseAdmissionService,
-} from "../../../src/services/inbound-whatsapp-abuse-admission.service.js";
+import { InboundWhatsAppAbuseAdmissionService } from "../../../src/services/inbound-whatsapp-abuse-admission.service.js";
 import { backgroundRuntimeConfig } from "../../helpers/background-runtime-config.js";
 
 const runtimeConfig = { current: () => backgroundRuntimeConfig() };
@@ -68,12 +66,16 @@ class RedisLikeAdmissionHarness {
   }
 
   count(keyPart: string): number {
-    const entry = [...this.sets.entries()].find(([key]) => key.includes(keyPart));
+    const entry = [...this.sets.entries()].find(([key]) =>
+      key.includes(keyPart),
+    );
     return entry?.[1].size ?? 0;
   }
 
   score(keyPart: string, member: string): number | undefined {
-    const entry = [...this.sets.entries()].find(([key]) => key.includes(keyPart));
+    const entry = [...this.sets.entries()].find(([key]) =>
+      key.includes(keyPart),
+    );
     return entry?.[1].get(member);
   }
 
@@ -142,10 +144,18 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
         rawGlobalLimitPerMinute: 2,
       }),
     };
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig as any,
+    );
 
-    await expect(service.admitRaw(rawInput(1))).resolves.toEqual({ kind: "allowed" });
-    await expect(service.admitRaw(rawInput(2))).resolves.toMatchObject({ reason: "RAW_SENDER" });
+    await expect(service.admitRaw(rawInput(1))).resolves.toEqual({
+      kind: "allowed",
+    });
+    await expect(service.admitRaw(rawInput(2))).resolves.toMatchObject({
+      reason: "RAW_SENDER",
+    });
     const args = redis.eval.mock.calls[0] as unknown[];
     expect(args.slice(-4)).toEqual(["60000", "1", "60000", "2"]);
   });
@@ -166,13 +176,28 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
         discoveryConversationLimitPerTenMinutes: 10,
       }),
     };
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig as any,
+    );
 
     await service.admitSettledTurn(turnInput(1));
 
     const args = redis.eval.mock.calls[0] as unknown[];
     expect(args.slice(-12)).toEqual([
-      "60000", "11", "600000", "22", "60000", "33", "600000", "44", "60000", "55", "60000", "66",
+      "60000",
+      "11",
+      "600000",
+      "22",
+      "60000",
+      "33",
+      "600000",
+      "44",
+      "60000",
+      "55",
+      "60000",
+      "66",
     ]);
     expect(args.filter((value) => value === "60000")).toHaveLength(4);
     expect(args.filter((value) => value === "600000")).toHaveLength(2);
@@ -194,28 +219,68 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
         discoveryConversationLimitPerTenMinutes: 4,
       }),
     };
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig as any,
+    );
 
-    await service.admitSettledTurn(turnInput(1, { conversationType: "PRODUCT_DISCOVERY" }));
+    await service.admitSettledTurn(
+      turnInput(1, { conversationType: "PRODUCT_DISCOVERY" }),
+    );
 
     const args = redis.eval.mock.calls[0] as unknown[];
-    expect(args.slice(-12)).toEqual(["60000", "1", "600000", "2", "60000", "3", "600000", "4", "60000", "55", "60000", "66"]);
+    expect(args.slice(-12)).toEqual([
+      "60000",
+      "1",
+      "600000",
+      "2",
+      "60000",
+      "3",
+      "600000",
+      "4",
+      "60000",
+      "55",
+      "60000",
+      "66",
+    ]);
     expect(args).not.toContain("11");
   });
 
   it("enforces the same committed limits across service instances sharing Redis", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const runtimeConfig = { current: () => ({ rawSenderLimitPerMinute: 1, rawGlobalLimitPerMinute: 2 }) };
-    const firstService = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
-    const secondService = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
+    const runtimeConfig = {
+      current: () => ({
+        rawSenderLimitPerMinute: 1,
+        rawGlobalLimitPerMinute: 2,
+      }),
+    };
+    const firstService = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig as any,
+    );
+    const secondService = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig as any,
+    );
 
-    await expect(firstService.admitRaw(rawInput(1))).resolves.toEqual({ kind: "allowed" });
-    await expect(secondService.admitRaw(rawInput(2))).resolves.toMatchObject({ reason: "RAW_SENDER" });
+    await expect(firstService.admitRaw(rawInput(1))).resolves.toEqual({
+      kind: "allowed",
+    });
+    await expect(secondService.admitRaw(rawInput(2))).resolves.toMatchObject({
+      reason: "RAW_SENDER",
+    });
   });
 
   it("uses one atomic Redis operation and hashes sender keys", async () => {
     const redis = { eval: vi.fn().mockResolvedValue(0) };
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
 
     await expect(
       service.admitRaw({
@@ -236,7 +301,11 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
 
   it("maps the atomic scope result to a bounded denial reason", async () => {
     const redis = { eval: vi.fn().mockResolvedValue(3) };
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
 
     await expect(
       service.admitSettledTurn({
@@ -257,7 +326,11 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
 
   it("B011-06 fails closed when Redis cannot make a decision", async () => {
     const redis = { eval: vi.fn().mockRejectedValue(new Error("redis down")) };
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
 
     await expect(
       service.admitRaw({
@@ -273,7 +346,11 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
 
   it("uses discovery limits only without reply context", async () => {
     const redis = { eval: vi.fn().mockResolvedValue(0) };
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
 
     await service.admitSettledTurn({
       conversationId: "conversation-1",
@@ -292,9 +369,15 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
 
   it("B011-01 allows 60 raw sender members and denies the 61st", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     for (let index = 0; index < 60; index += 1) {
-      await expect(service.admitRaw(rawInput(index))).resolves.toEqual({ kind: "allowed" });
+      await expect(service.admitRaw(rawInput(index))).resolves.toEqual({
+        kind: "allowed",
+      });
     }
     await expect(service.admitRaw(rawInput(60))).resolves.toMatchObject({
       kind: "denied",
@@ -304,7 +387,11 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
 
   it("B011-02 replays a raw member without consuming or refreshing its slot", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     await service.admitRaw(rawInput(1));
     const before = redis.score("raw:sender", "wamid-1");
     redis.advanceTime(30_000);
@@ -316,7 +403,11 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
   it("B011-04 denies at the raw global limit while a candidate sender is below its limit", async () => {
     const redis = new RedisLikeAdmissionHarness();
     redis.seed("arch007:wa-abuse:v1:raw:global:60s", 20_000);
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     await expect(service.admitRaw(rawInput(1))).resolves.toMatchObject({
       kind: "denied",
       reason: "RAW_GLOBAL",
@@ -327,35 +418,62 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
   it("B011-07 keeps raw phone data out of Redis keys and structured logs", async () => {
     const redis = { eval: vi.fn().mockResolvedValue(0) };
     const logs = logger();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logs, runtimeConfig);
-    await service.admitRaw({ providerMessageId: "wamid-private", customerPhone: "+447700900000" });
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logs,
+      runtimeConfig,
+    );
+    await service.admitRaw({
+      providerMessageId: "wamid-private",
+      customerPhone: "+447700900000",
+    });
     expect(JSON.stringify(redis.eval.mock.calls)).not.toContain("447700900000");
     expect(JSON.stringify(logs.info.mock.calls)).not.toContain("447700900000");
   });
 
   it("B011-08 independently enforces sender-short and conversation-short limits", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     for (let index = 0; index < 12; index += 1) {
-      await expect(service.admitSettledTurn(turnInput(index))).resolves.toEqual({ kind: "allowed" });
+      await expect(service.admitSettledTurn(turnInput(index))).resolves.toEqual(
+        { kind: "allowed" },
+      );
     }
-    await expect(service.admitSettledTurn(turnInput(12))).resolves.toMatchObject({
+    await expect(
+      service.admitSettledTurn(turnInput(12)),
+    ).resolves.toMatchObject({
       kind: "denied",
       reason: "TURN_SENDER_SHORT",
     });
 
     const conversationRedis = new RedisLikeAdmissionHarness();
-    const conversationService = new InboundWhatsAppAbuseAdmissionService(conversationRedis, logger(), runtimeConfig);
+    const conversationService = new InboundWhatsAppAbuseAdmissionService(
+      conversationRedis,
+      logger(),
+      runtimeConfig,
+    );
     for (let index = 0; index < 12; index += 1) {
-      await expect(conversationService.admitSettledTurn(turnInput(index, {
-        conversationId: "conversation-shared",
-        customerPhone: `+447700900${String(index).padStart(3, "0")}`,
-      }))).resolves.toEqual({ kind: "allowed" });
+      await expect(
+        conversationService.admitSettledTurn(
+          turnInput(index, {
+            conversationId: "conversation-shared",
+            customerPhone: `+447700900${String(index).padStart(3, "0")}`,
+          }),
+        ),
+      ).resolves.toEqual({ kind: "allowed" });
     }
-    await expect(conversationService.admitSettledTurn(turnInput(12, {
-      conversationId: "conversation-shared",
-      customerPhone: "+447700901012",
-    }))).resolves.toMatchObject({
+    await expect(
+      conversationService.admitSettledTurn(
+        turnInput(12, {
+          conversationId: "conversation-shared",
+          customerPhone: "+447700901012",
+        }),
+      ),
+    ).resolves.toMatchObject({
       kind: "denied",
       reason: "TURN_CONVERSATION_SHORT",
     });
@@ -363,33 +481,49 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
 
   it("B011-09 independently enforces sender-long and conversation-long limits", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     for (let batch = 0; batch < 5; batch += 1) {
       for (let index = 0; index < 12; index += 1) {
         await service.admitSettledTurn(turnInput(batch * 12 + index));
       }
       redis.advanceTime(60_001);
     }
-    await expect(service.admitSettledTurn(turnInput(61))).resolves.toMatchObject({
+    await expect(
+      service.admitSettledTurn(turnInput(61)),
+    ).resolves.toMatchObject({
       kind: "denied",
       reason: "TURN_SENDER_LONG",
     });
 
     const conversationRedis = new RedisLikeAdmissionHarness();
-    const conversationService = new InboundWhatsAppAbuseAdmissionService(conversationRedis, logger(), runtimeConfig);
+    const conversationService = new InboundWhatsAppAbuseAdmissionService(
+      conversationRedis,
+      logger(),
+      runtimeConfig,
+    );
     for (let batch = 0; batch < 5; batch += 1) {
       for (let index = 0; index < 12; index += 1) {
-        await conversationService.admitSettledTurn(turnInput(batch * 12 + index, {
-          conversationId: "conversation-long",
-          customerPhone: `+447701${String(batch * 12 + index).padStart(4, "0")}`,
-        }));
+        await conversationService.admitSettledTurn(
+          turnInput(batch * 12 + index, {
+            conversationId: "conversation-long",
+            customerPhone: `+447701${String(batch * 12 + index).padStart(4, "0")}`,
+          }),
+        );
       }
       conversationRedis.advanceTime(60_001);
     }
-    await expect(conversationService.admitSettledTurn(turnInput(61, {
-      conversationId: "conversation-long",
-      customerPhone: "+447799999999",
-    }))).resolves.toMatchObject({
+    await expect(
+      conversationService.admitSettledTurn(
+        turnInput(61, {
+          conversationId: "conversation-long",
+          customerPhone: "+447799999999",
+        }),
+      ),
+    ).resolves.toMatchObject({
       kind: "denied",
       reason: "TURN_CONVERSATION_LONG",
     });
@@ -397,83 +531,158 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
 
   it("B011-10 independently enforces discovery sender and conversation limits", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
-    for (let index = 0; index < 4; index += 1) await service.admitSettledTurn(turnInput(index, { conversationType: "PRODUCT_DISCOVERY" }));
-    await expect(service.admitSettledTurn(turnInput(4, { conversationType: "PRODUCT_DISCOVERY" }))).resolves.toMatchObject({ reason: "TURN_SENDER_SHORT" });
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
+    for (let index = 0; index < 4; index += 1)
+      await service.admitSettledTurn(
+        turnInput(index, { conversationType: "PRODUCT_DISCOVERY" }),
+      );
+    await expect(
+      service.admitSettledTurn(
+        turnInput(4, { conversationType: "PRODUCT_DISCOVERY" }),
+      ),
+    ).resolves.toMatchObject({ reason: "TURN_SENDER_SHORT" });
     redis.advanceTime(60_001);
     for (let batch = 0; batch < 2; batch += 1) {
       for (let index = 0; index < 4; index += 1) {
-        await service.admitSettledTurn(turnInput(batch * 4 + index + 4, { conversationType: "PRODUCT_DISCOVERY" }));
+        await service.admitSettledTurn(
+          turnInput(batch * 4 + index + 4, {
+            conversationType: "PRODUCT_DISCOVERY",
+          }),
+        );
       }
       redis.advanceTime(60_001);
     }
-    await expect(service.admitSettledTurn(turnInput(12, { conversationType: "PRODUCT_DISCOVERY" }))).resolves.toMatchObject({ reason: "TURN_SENDER_LONG" });
+    await expect(
+      service.admitSettledTurn(
+        turnInput(12, { conversationType: "PRODUCT_DISCOVERY" }),
+      ),
+    ).resolves.toMatchObject({ reason: "TURN_SENDER_LONG" });
 
     const conversationRedis = new RedisLikeAdmissionHarness();
-    const conversationService = new InboundWhatsAppAbuseAdmissionService(conversationRedis, logger(), runtimeConfig);
+    const conversationService = new InboundWhatsAppAbuseAdmissionService(
+      conversationRedis,
+      logger(),
+      runtimeConfig,
+    );
     for (let index = 0; index < 4; index += 1) {
-      await conversationService.admitSettledTurn(turnInput(index, {
-        conversationId: "discovery-conversation",
-        customerPhone: `+447702900${String(index).padStart(3, "0")}`,
-        conversationType: "PRODUCT_DISCOVERY",
-      }));
+      await conversationService.admitSettledTurn(
+        turnInput(index, {
+          conversationId: "discovery-conversation",
+          customerPhone: `+447702900${String(index).padStart(3, "0")}`,
+          conversationType: "PRODUCT_DISCOVERY",
+        }),
+      );
     }
-    await expect(conversationService.admitSettledTurn(turnInput(4, {
-      conversationId: "discovery-conversation",
-      customerPhone: "+447702901004",
-      conversationType: "PRODUCT_DISCOVERY",
-    }))).resolves.toMatchObject({ reason: "TURN_CONVERSATION_SHORT" });
+    await expect(
+      conversationService.admitSettledTurn(
+        turnInput(4, {
+          conversationId: "discovery-conversation",
+          customerPhone: "+447702901004",
+          conversationType: "PRODUCT_DISCOVERY",
+        }),
+      ),
+    ).resolves.toMatchObject({ reason: "TURN_CONVERSATION_SHORT" });
     conversationRedis.advanceTime(60_001);
     for (let batch = 0; batch < 2; batch += 1) {
       for (let index = 0; index < 4; index += 1) {
         const member = batch * 4 + index + 4;
-        await conversationService.admitSettledTurn(turnInput(member, {
-          conversationId: "discovery-conversation",
-          customerPhone: `+447703900${String(member).padStart(3, "0")}`,
-          conversationType: "PRODUCT_DISCOVERY",
-        }));
+        await conversationService.admitSettledTurn(
+          turnInput(member, {
+            conversationId: "discovery-conversation",
+            customerPhone: `+447703900${String(member).padStart(3, "0")}`,
+            conversationType: "PRODUCT_DISCOVERY",
+          }),
+        );
       }
       conversationRedis.advanceTime(60_001);
     }
-    await expect(conversationService.admitSettledTurn(turnInput(12, {
-      conversationId: "discovery-conversation",
-      customerPhone: "+447703901012",
-      conversationType: "PRODUCT_DISCOVERY",
-    }))).resolves.toMatchObject({ reason: "TURN_CONVERSATION_LONG" });
+    await expect(
+      conversationService.admitSettledTurn(
+        turnInput(12, {
+          conversationId: "discovery-conversation",
+          customerPhone: "+447703901012",
+          conversationType: "PRODUCT_DISCOVERY",
+        }),
+      ),
+    ).resolves.toMatchObject({ reason: "TURN_CONVERSATION_LONG" });
   });
 
   it("B011-11 uses standard limits when discovery contains reply context", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     for (let index = 0; index < 5; index += 1) {
-      await expect(service.admitSettledTurn(turnInput(index, { conversationType: "PRODUCT_DISCOVERY", hasReplyContext: true }))).resolves.toEqual({ kind: "allowed" });
+      await expect(
+        service.admitSettledTurn(
+          turnInput(index, {
+            conversationType: "PRODUCT_DISCOVERY",
+            hasReplyContext: true,
+          }),
+        ),
+      ).resolves.toEqual({ kind: "allowed" });
     }
   });
 
   it("B011-12 enforces the shop settled-turn limit", async () => {
     const redis = new RedisLikeAdmissionHarness();
     redis.seed("arch007:wa-abuse:v1:turn:shop:shop-1:60s", 600);
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
-    await expect(service.admitSettledTurn(turnInput(1, { customerPhone: "+447700900001" }))).resolves.toMatchObject({ reason: "TURN_SHOP" });
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
+    await expect(
+      service.admitSettledTurn(
+        turnInput(1, { customerPhone: "+447700900001" }),
+      ),
+    ).resolves.toMatchObject({ reason: "TURN_SHOP" });
   });
 
   it("B011-13 enforces the global settled-turn limit", async () => {
     const redis = new RedisLikeAdmissionHarness();
     redis.seed("arch007:wa-abuse:v1:turn:global:60s", 5_000);
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
-    await expect(service.admitSettledTurn(turnInput(1, { customerPhone: "+447700900001" }))).resolves.toMatchObject({ reason: "TURN_GLOBAL" });
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
+    await expect(
+      service.admitSettledTurn(
+        turnInput(1, { customerPhone: "+447700900001" }),
+      ),
+    ).resolves.toMatchObject({ reason: "TURN_GLOBAL" });
   });
 
   it("B011-14 bounds one sender across multiple conversations", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
-    for (let index = 0; index < 12; index += 1) await service.admitSettledTurn(turnInput(index));
-    await expect(service.admitSettledTurn(turnInput(12, { conversationId: "other-conversation" }))).resolves.toMatchObject({ reason: "TURN_SENDER_SHORT" });
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
+    for (let index = 0; index < 12; index += 1)
+      await service.admitSettledTurn(turnInput(index));
+    await expect(
+      service.admitSettledTurn(
+        turnInput(12, { conversationId: "other-conversation" }),
+      ),
+    ).resolves.toMatchObject({ reason: "TURN_SENDER_SHORT" });
   });
 
   it("B011-15 replays a settled member without refreshing scores", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     await service.admitSettledTurn(turnInput(1));
     const before = redis.score("turn:sender", "conversation-1:1");
     redis.advanceTime(30_000);
@@ -483,28 +692,57 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
 
   it("B011-17 admits a new settled observedVersion after the short window expires", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
-    for (let index = 0; index < 12; index += 1) await service.admitSettledTurn(turnInput(index));
-    await expect(service.admitSettledTurn(turnInput(12))).resolves.toMatchObject({
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
+    for (let index = 0; index < 12; index += 1)
+      await service.admitSettledTurn(turnInput(index));
+    await expect(
+      service.admitSettledTurn(turnInput(12)),
+    ).resolves.toMatchObject({
       kind: "denied",
       reason: "TURN_SENDER_SHORT",
     });
     redis.advanceTime(60_001);
-    await expect(service.admitSettledTurn(turnInput(13, { conversationId: "conversation-new" }))).resolves.toEqual({ kind: "allowed" });
+    await expect(
+      service.admitSettledTurn(
+        turnInput(13, { conversationId: "conversation-new" }),
+      ),
+    ).resolves.toEqual({ kind: "allowed" });
   });
 
   it("B011-19 serializes a final-slot race", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    redis.seed("arch007:wa-abuse:v1:raw:sender:" + phoneHash("+447700900000") + ":60s", 59);
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
-    const results = await Promise.all([service.admitRaw(rawInput(1)), service.admitRaw(rawInput(2))]);
-    expect(results.filter((result) => result.kind === "allowed")).toHaveLength(1);
-    expect(results.filter((result) => result.kind === "denied")).toHaveLength(1);
+    redis.seed(
+      "arch007:wa-abuse:v1:raw:sender:" + phoneHash("+447700900000") + ":60s",
+      59,
+    );
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
+    const results = await Promise.all([
+      service.admitRaw(rawInput(1)),
+      service.admitRaw(rawInput(2)),
+    ]);
+    expect(results.filter((result) => result.kind === "allowed")).toHaveLength(
+      1,
+    );
+    expect(results.filter((result) => result.kind === "denied")).toHaveLength(
+      1,
+    );
   });
 
   it("B011-20 mutates none of the scopes when one scope rejects", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     const input = turnInput(12, { customerPhone: "+447700900001" });
     const keys = settledScopeKeys(input);
     redis.seed(keys[2]!, 12);
@@ -514,12 +752,17 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
       reason: "TURN_CONVERSATION_SHORT",
     });
     expect(redis.snapshot(keys)).toEqual(before);
-    for (const key of keys) expect(redis.has(key, "conversation-12:12")).toBe(false);
+    for (const key of keys)
+      expect(redis.has(key, "conversation-12:12")).toBe(false);
   });
 
   it("B011-21a keeps immediate replay state-idempotent across all six scopes", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     const input = turnInput(1);
     const keys = settledScopeKeys(input);
     await service.admitSettledTurn(input);
@@ -530,16 +773,26 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
 
   it("B011-21b does not re-add a mixed-window replay to expired short scopes", async () => {
     const redis = new RedisLikeAdmissionHarness();
-    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig);
+    const service = new InboundWhatsAppAbuseAdmissionService(
+      redis,
+      logger(),
+      runtimeConfig,
+    );
     const input = turnInput(1);
     const keys = settledScopeKeys(input);
     const member = "conversation-1:1";
     await service.admitSettledTurn(input);
     const before = redis.snapshot(keys);
-    const senderLongScore = before[keys[1]!]!.find(([value]) => value === member)?.[1];
-    const conversationLongScore = before[keys[3]!]!.find(([value]) => value === member)?.[1];
+    const senderLongScore = before[keys[1]!]!.find(
+      ([value]) => value === member,
+    )?.[1];
+    const conversationLongScore = before[keys[3]!]!.find(
+      ([value]) => value === member,
+    )?.[1];
     redis.advanceTime(60_001);
-    await expect(service.admitSettledTurn(input)).resolves.toEqual({ kind: "allowed" });
+    await expect(service.admitSettledTurn(input)).resolves.toEqual({
+      kind: "allowed",
+    });
     expect(redis.has(keys[0]!, member)).toBe(false);
     expect(redis.has(keys[2]!, member)).toBe(false);
     expect(redis.has(keys[4]!, member)).toBe(false);

@@ -42,12 +42,7 @@
       "type": "BODY",
       "text": "Hello {{1}}, your checkout at {{2}} is waiting for you.",
       "example": {
-        "body_text": [
-          [
-            "Alex",
-            "Example Shop"
-          ]
-        ]
+        "body_text": [["Alex", "Example Shop"]]
       }
     }
   ],

@@ -1,7 +1,10 @@
 import { routingRuntime } from "../recovery-sender-pool/routing-runtime.js";
 import { recoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import type { Queue } from "bullmq";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import prisma from "../../lib/db.js";
 import { backgroundRuntimeConfigService } from "../../runtime/background-runtime-config.js";
@@ -18,7 +21,10 @@ const logger = createLogger({
 export type PendingTurnRepairPollerOptions = {
   runPass: () => Promise<unknown>;
   log: Pick<StructuredLogger, "error">;
-  delay?: (run: () => void, milliseconds: number) => ReturnType<typeof setTimeout>;
+  delay?: (
+    run: () => void,
+    milliseconds: number,
+  ) => ReturnType<typeof setTimeout>;
   cancel?: (timer: ReturnType<typeof setTimeout>) => void;
 };
 
@@ -80,5 +86,12 @@ export function startProductionPendingTurnRepair(
     queue,
     backgroundRuntimeConfigService,
   );
-  return startPendingTurnRepairPoller({ runPass: async () => { await recoveryAllowanceService.repairPass(); await routingRuntime.repairPass(async()=>undefined); return service.runPass(); }, log: logger });
+  return startPendingTurnRepairPoller({
+    runPass: async () => {
+      await recoveryAllowanceService.repairPass();
+      await routingRuntime.repairPass(async () => undefined);
+      return service.runPass();
+    },
+    log: logger,
+  });
 }

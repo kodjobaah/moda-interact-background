@@ -2,7 +2,9 @@
 export const SHOPIFY_BRAND_SYNC_INTERVAL_MS = 24 * 60 * 60_000;
 export const SHOPIFY_BRAND_SYNC_SCAN_INTERVAL_MS = 5 * 60_000;
 export const SHOPIFY_BRAND_SYNC_LEASE_MS = 2 * 60_000;
-export const SHOPIFY_BRAND_SYNC_RETRY_MS = [60_000, 300_000, 1_800_000, 7_200_000, 86_400_000] as const;
+export const SHOPIFY_BRAND_SYNC_RETRY_MS = [
+  60_000, 300_000, 1_800_000, 7_200_000, 86_400_000,
+] as const;
 
 export interface ShopifyBrandImage {
   url: string;
@@ -28,10 +30,18 @@ export interface ShopifyBrandSyncClaim {
 }
 
 export type ShopifyBrandFailureCode =
-  | "CHANNEL_LOCKED" | "ACCESS_DENIED"
-  | "SHOP_INACTIVE" | "SHOP_FROZEN" | "SHOP_FORBIDDEN" | "SHOP_LOCKED" | "SHOP_NOT_FOUND"
-  | "SHOPIFY_THROTTLED" | "SHOPIFY_TIMEOUT" | "SHOPIFY_UNAVAILABLE"
-  | "SHOPIFY_GRAPHQL_FAILURE" | "SHOPIFY_INVALID_RESPONSE";
+  | "CHANNEL_LOCKED"
+  | "ACCESS_DENIED"
+  | "SHOP_INACTIVE"
+  | "SHOP_FROZEN"
+  | "SHOP_FORBIDDEN"
+  | "SHOP_LOCKED"
+  | "SHOP_NOT_FOUND"
+  | "SHOPIFY_THROTTLED"
+  | "SHOPIFY_TIMEOUT"
+  | "SHOPIFY_UNAVAILABLE"
+  | "SHOPIFY_GRAPHQL_FAILURE"
+  | "SHOPIFY_INVALID_RESPONSE";
 
 /** Explicit bounded categories; no raw provider messages or response bodies in logs. */
 export class ShopifyBrandSyncError extends Error {

@@ -16,54 +16,81 @@ import {
 
 describe("GenericSubscriptionProjectionService", () => {
   it.each([
-    ["Free", freePlan, { ...provider, planHandle: "free-2026", usageEventHandles: [] }],
+    [
+      "Free",
+      freePlan,
+      { ...provider, planHandle: "free-2026", usageEventHandles: [] },
+    ],
     ["Paid", paidPlan, provider],
-  ] as const)("materialises a missing local %s projection in one transaction", async (_label, plan, observedProvider) => {
+  ] as const)(
+    "materialises a missing local %s projection in one transaction",
+    async (_label, plan, observedProvider) => {
+      const transaction = transactionHarness();
+      const test = serviceHarness(transaction);
+      if (plan.kind === "FREE") {
+        transaction.shopEntitlementCounter.findUnique.mockResolvedValue(null);
+      }
+      const service = new GenericSubscriptionProjectionService(
+        test.database as never,
+        test.scheduler,
+        test.logger as never,
+      );
+
+      const result = await service.reconcile({
+        shopId: "shop-1",
+        provider: observedProvider,
+        plan,
+        existing: null,
+        projection: classifyObservedPlanProjection(observedProvider, plan),
+        now,
+      });
+
+      expect(result.billingPeriodId).toBe("period-1");
+      expect(transaction.subscription.upsert).toHaveBeenCalledWith({
+        where: { shopId: "shop-1" },
+        update: {},
+        create: { shopId: "shop-1", status: "NO_CONTRACT" },
+      });
+      expect(transaction.billingPeriod.create).toHaveBeenCalledOnce();
+      expect(transaction.subscription.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            planId: plan.id,
+            status: "ACTIVE",
+            billingPeriodId: "period-1",
+          }),
+        }),
+      );
+      if (plan.kind === "FREE") {
+        expect(transaction.shopEntitlementCounter.upsert).toHaveBeenCalledWith(
+          expect.objectContaining({
+            create: expect.objectContaining({ grantedQuantity: 5 }),
+          }),
+        );
+        expect(
+          transaction.billingPeriodEntitlementCounter.create,
+        ).not.toHaveBeenCalled();
+      } else {
+        expect(
+          transaction.billingPeriodEntitlementCounter.create,
+        ).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it("fails closed and schedules another observation when a mapped provider has no billing cycle", async () => {
     const transaction = transactionHarness();
     const test = serviceHarness(transaction);
-    if (plan.kind === "FREE") {
-      transaction.shopEntitlementCounter.findUnique.mockResolvedValue(null);
-    }
+    const observedProvider = {
+      ...provider,
+      currentPeriodStart: null,
+      currentPeriodEnd: null,
+    };
     const service = new GenericSubscriptionProjectionService(
       test.database as never,
       test.scheduler,
       test.logger as never,
     );
-
-    const result = await service.reconcile({
-      shopId: "shop-1",
-      provider: observedProvider,
-      plan,
-      existing: null,
-      projection: classifyObservedPlanProjection(observedProvider, plan),
-      now,
-    });
-
-    expect(result.billingPeriodId).toBe("period-1");
-    expect(transaction.subscription.upsert).toHaveBeenCalledWith({
-      where: { shopId: "shop-1" },
-      update: {},
-      create: { shopId: "shop-1", status: "NO_CONTRACT" },
-    });
-    expect(transaction.billingPeriod.create).toHaveBeenCalledOnce();
-    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ planId: plan.id, status: "ACTIVE", billingPeriodId: "period-1" }),
-    }));
-    if (plan.kind === "FREE") {
-      expect(transaction.shopEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({
-        create: expect.objectContaining({ grantedQuantity: 5 }),
-      }));
-      expect(transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
-    } else {
-      expect(transaction.billingPeriodEntitlementCounter.create).toHaveBeenCalledOnce();
-    }
-  });
-
-  it("fails closed and schedules another observation when a mapped provider has no billing cycle", async () => {
-    const transaction = transactionHarness();
-    const test = serviceHarness(transaction);
-    const observedProvider = { ...provider, currentPeriodStart: null, currentPeriodEnd: null };
-    const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
 
     const result = await service.reconcile({
       shopId: "shop-1",
@@ -75,94 +102,135 @@ describe("GenericSubscriptionProjectionService", () => {
     });
 
     expect(result).toEqual({ billingPeriodId: null, packMeterHandle: null });
-    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status: "SYNC_ERROR",
-        lastSyncErrorCode: "MISSING_BILLING_CYCLE",
-        nextReconcileAt: new Date("2026-09-12T12:01:00.000Z"),
+    expect(transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SYNC_ERROR",
+          lastSyncErrorCode: "MISSING_BILLING_CYCLE",
+          nextReconcileAt: new Date("2026-09-12T12:01:00.000Z"),
+        }),
       }),
-    }));
+    );
     expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
     expect(test.scheduler.enqueue).toHaveBeenCalledOnce();
   });
 
   it("persists an unmapped provider plan without creating a billing period", async () => {
     const test = serviceHarness();
-    const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
+    const service = new GenericSubscriptionProjectionService(
+      test.database as never,
+      test.scheduler,
+      test.logger as never,
+    );
 
     const result = await service.reconcile({
       shopId: "shop-1",
       provider: { ...provider, planHandle: "unknown-plan" },
       plan: null,
       existing: null,
-      projection: classifyObservedPlanProjection({ ...provider, planHandle: "unknown-plan" }, null),
+      projection: classifyObservedPlanProjection(
+        { ...provider, planHandle: "unknown-plan" },
+        null,
+      ),
       now,
     });
 
     expect(result).toEqual({ billingPeriodId: null, packMeterHandle: null });
     expect(test.database.$transaction).toHaveBeenCalledOnce();
     expect(test.scheduler.enqueue).not.toHaveBeenCalled();
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        planId: null,
-        status: "UNMAPPED",
-        observedShopifyPlanHandle: "unknown-plan",
-        lastSyncErrorCode: null,
-        lastSyncErrorAt: null,
-        nextReconcileAt: null,
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          planId: null,
+          status: "UNMAPPED",
+          observedShopifyPlanHandle: "unknown-plan",
+          lastSyncErrorCode: null,
+          lastSyncErrorAt: null,
+          nextReconcileAt: null,
+        }),
       }),
-    }));
+    );
   });
 
   it("keeps a valid Paid projection when the optional reporting handle is absent and records unmapped provider handles", async () => {
     const test = serviceHarness();
-    const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
-    const observedProvider = { ...provider, usageEventHandles: ["unmapped-provider-handle"] };
-    const planWithoutReportingHandle = { ...paidPlan, shopifyUsageEventHandle: null };
+    const service = new GenericSubscriptionProjectionService(
+      test.database as never,
+      test.scheduler,
+      test.logger as never,
+    );
+    const observedProvider = {
+      ...provider,
+      usageEventHandles: ["unmapped-provider-handle"],
+    };
+    const planWithoutReportingHandle = {
+      ...paidPlan,
+      shopifyUsageEventHandle: null,
+    };
 
     const result = await service.reconcile({
       shopId: "shop-1",
       provider: observedProvider,
       plan: planWithoutReportingHandle,
       existing: null,
-      projection: classifyObservedPlanProjection(observedProvider, planWithoutReportingHandle),
+      projection: classifyObservedPlanProjection(
+        observedProvider,
+        planWithoutReportingHandle,
+      ),
       now,
     });
 
-    expect(result).toEqual({ billingPeriodId: "period-1", packMeterHandle: "pack-meter" });
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        planId: "plan-paid",
-        status: "ACTIVE",
-        lastSyncErrorCode: null,
-        unmappedShopifyUsageEventHandles: ["unmapped-provider-handle"],
+    expect(result).toEqual({
+      billingPeriodId: "period-1",
+      packMeterHandle: "pack-meter",
+    });
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          planId: "plan-paid",
+          status: "ACTIVE",
+          lastSyncErrorCode: null,
+          unmappedShopifyUsageEventHandles: ["unmapped-provider-handle"],
+        }),
       }),
-    }));
+    );
   });
-
 
   it("keeps a Trialing subscription Trialing when provider usage events are not yet mapped", async () => {
     const test = serviceHarness();
-    const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
-    const trialingProvider = { ...provider, status: "TRIALING" as const, usageEventHandles: ["trial-only-event"] };
+    const service = new GenericSubscriptionProjectionService(
+      test.database as never,
+      test.scheduler,
+      test.logger as never,
+    );
+    const trialingProvider = {
+      ...provider,
+      status: "TRIALING" as const,
+      usageEventHandles: ["trial-only-event"],
+    };
 
     await service.reconcile({
       shopId: "shop-1",
       provider: trialingProvider,
-      plan: { ...paidPlan, shopifyUsageEventHandle: "arbitrary-reporting-handle" },
+      plan: {
+        ...paidPlan,
+        shopifyUsageEventHandle: "arbitrary-reporting-handle",
+      },
       existing: null,
       projection: classifyObservedPlanProjection(trialingProvider, paidPlan),
       now,
     });
 
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status: "TRIALING",
-        lastSyncErrorCode: null,
-        lastSyncErrorAt: null,
-        unmappedShopifyUsageEventHandles: ["trial-only-event"],
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "TRIALING",
+          lastSyncErrorCode: null,
+          lastSyncErrorAt: null,
+          unmappedShopifyUsageEventHandles: ["trial-only-event"],
+        }),
       }),
-    }));
+    );
   });
 
   it("does not recreate lifetime Free capacity after historical recovery usage", async () => {
@@ -170,7 +238,11 @@ describe("GenericSubscriptionProjectionService", () => {
     transaction.shopEntitlementCounter.findUnique.mockResolvedValue(null);
     transaction.usageEvent.count.mockResolvedValue(1);
     const test = serviceHarness(transaction);
-    const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
+    const service = new GenericSubscriptionProjectionService(
+      test.database as never,
+      test.scheduler,
+      test.logger as never,
+    );
 
     const result = await service.reconcile({
       shopId: "shop-1",
@@ -183,13 +255,15 @@ describe("GenericSubscriptionProjectionService", () => {
 
     expect(result).toEqual({ billingPeriodId: null, packMeterHandle: null });
     expect(transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
-    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status: "SYNC_ERROR",
-        lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
-        nextReconcileAt: null,
+    expect(transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SYNC_ERROR",
+          lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
+          nextReconcileAt: null,
+        }),
       }),
-    }));
+    );
     expect(test.logger.warn).toHaveBeenCalledWith(
       "billing.subscription_reconciliation.lifetime_free_counter_history_conflict",
       { shopId: "shop-1" },
@@ -219,7 +293,11 @@ describe("GenericSubscriptionProjectionService", () => {
       includedRecoveryCreditsGranted: 100,
     });
     const test = serviceHarness(transaction);
-    const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
+    const service = new GenericSubscriptionProjectionService(
+      test.database as never,
+      test.scheduler,
+      test.logger as never,
+    );
 
     const result = await service.reconcile({
       shopId: "shop-1",
@@ -231,50 +309,106 @@ describe("GenericSubscriptionProjectionService", () => {
     });
 
     expect(result).toEqual({ billingPeriodId: null, packMeterHandle: null });
-    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status: "SYNC_ERROR",
-        lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
-        nextReconcileAt: new Date("2026-09-12T12:01:00.000Z"),
+    expect(transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SYNC_ERROR",
+          lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
+          nextReconcileAt: new Date("2026-09-12T12:01:00.000Z"),
+        }),
       }),
-    }));
+    );
     expect(test.scheduler.enqueue).toHaveBeenCalledOnce();
   });
   it("closes an open paid cycle and releases reservations before an unmapped projection detaches it", async () => {
     const existing = emptySubscription({
-      status: "ACTIVE", planId: "plan-paid", billingPeriodId: "old-period",
-      currentPeriodStart: cycleStart, currentPeriodEnd: cycleEnd,
+      status: "ACTIVE",
+      planId: "plan-paid",
+      billingPeriodId: "old-period",
+      currentPeriodStart: cycleStart,
+      currentPeriodEnd: cycleEnd,
     });
     const transaction = transactionHarness(existing);
     transaction.billingPeriod.findUnique.mockResolvedValue({
-      id: "old-period", subscriptionId: existing.id, status: "OPEN",
-      planKindSnapshot: "PAID_METERED", planId: "plan-paid",
+      id: "old-period",
+      subscriptionId: existing.id,
+      status: "OPEN",
+      planKindSnapshot: "PAID_METERED",
+      planId: "plan-paid",
     });
     transaction.billingPeriodEntitlementCounter.findUnique
-      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 10, committedQuantity: 3, reservedQuantity: 2, forfeitedQuantity: 0, version: 1 })
-      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 10, committedQuantity: 3, reservedQuantity: 0, forfeitedQuantity: 7, version: 2 });
-    transaction.usageReservation.aggregate.mockResolvedValue({ _sum: { quantity: 2 } });
+      .mockResolvedValueOnce({
+        id: "counter-1",
+        grantedQuantity: 10,
+        committedQuantity: 3,
+        reservedQuantity: 2,
+        forfeitedQuantity: 0,
+        version: 1,
+      })
+      .mockResolvedValueOnce({
+        id: "counter-1",
+        grantedQuantity: 10,
+        committedQuantity: 3,
+        reservedQuantity: 0,
+        forfeitedQuantity: 7,
+        version: 2,
+      });
+    transaction.usageReservation.aggregate.mockResolvedValue({
+      _sum: { quantity: 2 },
+    });
     const test = serviceHarness(transaction);
-    const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
-    const unknownProvider = { ...provider, planHandle: "unknown-plan", usageEventHandles: [] };
+    const service = new GenericSubscriptionProjectionService(
+      test.database as never,
+      test.scheduler,
+      test.logger as never,
+    );
+    const unknownProvider = {
+      ...provider,
+      planHandle: "unknown-plan",
+      usageEventHandles: [],
+    };
     const result = await service.reconcile({
-      shopId: "shop-1", provider: unknownProvider, plan: null, existing,
-      projection: classifyObservedPlanProjection(unknownProvider, null), now,
+      shopId: "shop-1",
+      provider: unknownProvider,
+      plan: null,
+      existing,
+      projection: classifyObservedPlanProjection(unknownProvider, null),
+      now,
     });
     expect(result.billingPeriodId).toBeNull();
-    expect(transaction.usageReservation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "RELEASED", releaseReason: "PERIOD_CLOSED" }),
-    }));
-    expect(transaction.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ reservedQuantity: 2, version: 1 }),
-    }));
-    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "CLOSED", closeReason: "PLAN_CHANGED" }),
-    }));
-    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "UNMAPPED", billingPeriodId: null, planId: null,
-        currentPeriodStart: null, currentPeriodEnd: null }),
-    }));
+    expect(transaction.usageReservation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "RELEASED",
+          releaseReason: "PERIOD_CLOSED",
+        }),
+      }),
+    );
+    expect(
+      transaction.billingPeriodEntitlementCounter.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ reservedQuantity: 2, version: 1 }),
+      }),
+    );
+    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "CLOSED",
+          closeReason: "PLAN_CHANGED",
+        }),
+      }),
+    );
+    expect(transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "UNMAPPED",
+          billingPeriodId: null,
+          planId: null,
+          currentPeriodStart: null,
+          currentPeriodEnd: null,
+        }),
+      }),
+    );
   });
-
 });

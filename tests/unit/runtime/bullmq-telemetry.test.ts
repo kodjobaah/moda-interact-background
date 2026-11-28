@@ -43,7 +43,9 @@ describe("background BullMQ telemetry wiring", () => {
       expect(source).toContain("telemetry: bullMQTelemetry");
       if (worker) {
         expect(source).toContain("enableMetrics: false");
-        expect(source).toContain("observeWorkerJob(workerMetricDefinition, job");
+        expect(source).toContain(
+          "observeWorkerJob(workerMetricDefinition, job",
+        );
       } else {
         expect(source).not.toContain("enableMetrics: false");
         expect(source).not.toContain("observeWorkerJob");
@@ -57,7 +59,8 @@ describe("background BullMQ telemetry wiring", () => {
 
     expect(
       sources.reduce(
-        (count, source) => count + (source.match(/telemetry: bullMQTelemetry/g)?.length ?? 0),
+        (count, source) =>
+          count + (source.match(/telemetry: bullMQTelemetry/g)?.length ?? 0),
         0,
       ),
     ).toBe(5);

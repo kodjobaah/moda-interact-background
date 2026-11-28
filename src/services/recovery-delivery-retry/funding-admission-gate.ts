@@ -7,12 +7,15 @@
 const pendingByShop = new Map<string, Promise<void>>();
 
 export async function serializeRetryFunding<T>(
-  shopId: string, operation: (queueWaitMs: number) => Promise<T>,
+  shopId: string,
+  operation: (queueWaitMs: number) => Promise<T>,
 ): Promise<T> {
   const queuedAt = performance.now();
   const previous = pendingByShop.get(shopId);
   let release!: () => void;
-  const current = new Promise<void>(resolve => { release = resolve; });
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   pendingByShop.set(shopId, current);
   try {
     if (previous) await previous;

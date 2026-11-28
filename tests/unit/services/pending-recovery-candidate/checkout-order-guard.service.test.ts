@@ -29,12 +29,10 @@ vi.mock("../../../../src/lib/redis.js", () => ({
   connectionRedis: redisMock,
 }));
 
-const { CheckoutOrderGuardService } = await import(
-  "../../../../src/services/pending-recovery-candidate/checkout-order-guard.service.js"
-);
-const domain = await import(
-  "../../../../src/domain/pending-recovery-candidate.js"
-);
+const { CheckoutOrderGuardService } =
+  await import("../../../../src/services/pending-recovery-candidate/checkout-order-guard.service.js");
+const domain =
+  await import("../../../../src/domain/pending-recovery-candidate.js");
 
 describe("CheckoutOrderGuardService", () => {
   beforeEach(() => {
@@ -48,14 +46,15 @@ describe("CheckoutOrderGuardService", () => {
   it("runs the callback under the checkout lock and releases its own lock", async () => {
     const service = new CheckoutOrderGuardService();
 
-    await expect(service.withCheckoutLock(
-      "shop-1",
-      "checkout-1",
-      async () => "done",
-    )).resolves.toBe("done");
+    await expect(
+      service.withCheckoutLock("shop-1", "checkout-1", async () => "done"),
+    ).resolves.toBe("done");
 
     expect(redisMock.set).toHaveBeenCalledWith(
-      domain.checkoutOrderLockKey({ shopId: "shop-1", checkoutToken: "checkout-1" }),
+      domain.checkoutOrderLockKey({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+      }),
       expect.any(String),
       "PX",
       10_000,
@@ -79,12 +78,18 @@ describe("CheckoutOrderGuardService", () => {
     const service = new CheckoutOrderGuardService();
     redisMock.get.mockRejectedValueOnce(new Error("Redis GET unavailable"));
 
-    const result = service.withCheckoutLock("shop-1", "checkout-1", async () => {
-      throw new Error("RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED");
-    });
+    const result = service.withCheckoutLock(
+      "shop-1",
+      "checkout-1",
+      async () => {
+        throw new Error("RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED");
+      },
+    );
 
     await expect(result).rejects.toMatchObject({
-      message: expect.stringMatching(/^RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED: checkout lock cleanup failed:/),
+      message: expect.stringMatching(
+        /^RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED: checkout lock cleanup failed:/,
+      ),
       cause: expect.objectContaining({ name: "AggregateError" }),
     });
   });
@@ -95,12 +100,19 @@ describe("CheckoutOrderGuardService", () => {
     await service.markOrderProcessed("shop-1", "checkout-1");
 
     expect(redisMock.set).toHaveBeenCalledWith(
-      domain.checkoutOrderCompletedKey({ shopId: "shop-1", checkoutToken: "checkout-1" }),
+      domain.checkoutOrderCompletedKey({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+      }),
       "1",
       "PX",
       60 * 60 * 1000,
     );
-    await expect(service.hasOrderProcessed("shop-1", "checkout-1")).resolves.toBe(true);
-    await expect(service.hasOrderProcessed("shop-1", "checkout-2")).resolves.toBe(false);
+    await expect(
+      service.hasOrderProcessed("shop-1", "checkout-1"),
+    ).resolves.toBe(true);
+    await expect(
+      service.hasOrderProcessed("shop-1", "checkout-2"),
+    ).resolves.toBe(false);
   });
 });

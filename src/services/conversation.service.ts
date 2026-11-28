@@ -1,5 +1,9 @@
 import { persistVerifiedInbound } from "./recovery-sender-pool/inbound-writer.js";
-import { lockInboundProviderIdentity, assertNoRoutingTurn, type InboundOwnerEvidence } from "./recovery-sender-pool/inbound-authority.js";
+import {
+  lockInboundProviderIdentity,
+  assertNoRoutingTurn,
+  type InboundOwnerEvidence,
+} from "./recovery-sender-pool/inbound-authority.js";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import prisma from "../lib/db.js";
 import { allowedHistoryCandidates } from "./conversation-moderation/moderation-history.js";
@@ -10,7 +14,11 @@ import type {
 } from "../agents/types.js";
 
 import { commerceHistoryVisible } from "../commerce/history-selection.js";
-import { historyDelivery, historyDeliverySelect, projectDeliveryHistoryMessage } from "../commerce/history-delivery.js";
+import {
+  historyDelivery,
+  historyDeliverySelect,
+  projectDeliveryHistoryMessage,
+} from "../commerce/history-delivery.js";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 import {
   createLogger,
@@ -41,7 +49,10 @@ function projectInboundError(error: unknown) {
   };
 
   redact(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]");
-  redact(/\b((?:api[_-]?key|token|password|secret|authorization)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+  redact(
+    /\b((?:api[_-]?key|token|password|secret|authorization)\s*[=:]\s*)[^\s,;]+/gi,
+    "$1[REDACTED]",
+  );
   redact(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED]");
   redact(/\+?\d[\d\s().-]{7,}\d/g, "[REDACTED]");
 
@@ -56,7 +67,10 @@ function projectInboundError(error: unknown) {
   };
 }
 
-function safeErrorCode(error: Error, key: "code" | "clientVersion"): string | null {
+function safeErrorCode(
+  error: Error,
+  key: "code" | "clientVersion",
+): string | null {
   const value = (error as Error & Record<string, unknown>)[key];
   return typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value)
     ? value
@@ -79,7 +93,7 @@ export interface ResolvedIncomingMessage {
 
   explicitLanguageTag?: string | null;
   senderEvidence?: InboundOwnerEvidence;
-  routeMode?: "active"|"historical";
+  routeMode?: "active" | "historical";
 }
 
 export interface ConversationTurnState {
@@ -108,9 +122,7 @@ export class ConversationService {
    * At this point the WhatsApp layer has already resolved
    * which Conversation this message belongs to.
    */
-  async receiveMessage(
-    message: ResolvedIncomingMessage,
-  ): Promise<{
+  async receiveMessage(message: ResolvedIncomingMessage): Promise<{
     conversationId: string;
     version: number;
     duplicate: boolean;
@@ -145,11 +157,30 @@ export class ConversationService {
     version: number;
     duplicate: boolean;
   }> {
-    if(message.senderEvidence){
-      const e=message.senderEvidence;
-      const event:WhatsAppInboundEvent={schemaVersion:1,provider:'whatsapp',providerAccountId:e.providerAccountId,providerPhoneNumberId:e.providerPhoneNumberId,providerMessageId:message.providerMessageId,customerPhone:e.canonicalRecipient,contextMessageId:message.inReplyToProviderId,occurredAt:message.occurredAt.toISOString(),content:{type:'text',text:message.content}};
-      const saved=await persistVerifiedInbound(prisma,event,e,message.routeMode??'active');
-      return {conversationId:message.conversationId,version:saved.version,duplicate:saved.duplicate};
+    if (message.senderEvidence) {
+      const e = message.senderEvidence;
+      const event: WhatsAppInboundEvent = {
+        schemaVersion: 1,
+        provider: "whatsapp",
+        providerAccountId: e.providerAccountId,
+        providerPhoneNumberId: e.providerPhoneNumberId,
+        providerMessageId: message.providerMessageId,
+        customerPhone: e.canonicalRecipient,
+        contextMessageId: message.inReplyToProviderId,
+        occurredAt: message.occurredAt.toISOString(),
+        content: { type: "text", text: message.content },
+      };
+      const saved = await persistVerifiedInbound(
+        prisma,
+        event,
+        e,
+        message.routeMode ?? "active",
+      );
+      return {
+        conversationId: message.conversationId,
+        version: saved.version,
+        duplicate: saved.duplicate,
+      };
     }
     const receivedAt = new Date();
     const occurredAt = message.occurredAt ?? receivedAt;
@@ -174,7 +205,8 @@ export class ConversationService {
     });
 
     if (existing) {
-      if (existing.conversationId !== message.conversationId) throw new Error("Inbound message ownership mismatch");
+      if (existing.conversationId !== message.conversationId)
+        throw new Error("Inbound message ownership mismatch");
       failure.stage = "post-commit-engagement";
       await recoveryOutreachAttemptService.markEngagedForConversation(
         existing.conversationId,
@@ -206,7 +238,8 @@ export class ConversationService {
       currentLanguageSource: fromPrismaLanguageSource(
         currentConversation.languageSource,
       ),
-      ...(!currentConversation.checkoutRecoveryId && message.explicitLanguageTag !== undefined
+      ...(!currentConversation.checkoutRecoveryId &&
+      message.explicitLanguageTag !== undefined
         ? { explicitLanguageTag: message.explicitLanguageTag }
         : {}),
       shopifyLanguageTag: null,
@@ -219,43 +252,43 @@ export class ConversationService {
      * conversation version together.
      */
     const result = await prisma.$transaction(async (tx) => {
-        await lockInboundProviderIdentity(tx,message.providerMessageId);
-        await assertNoRoutingTurn(tx,message.providerMessageId);
-        const recorded = await recordProcessableInbound(
-          tx,
-          message.conversationId,
-          receivedAt,
-        );
-        await tx.conversationMessage.create({
-          data: {
-            conversationId: message.conversationId,
-            providerMessageId: message.providerMessageId,
-            inReplyToProviderId: message.inReplyToProviderId,
-            direction: "INBOUND",
-            senderType: "CUSTOMER",
-            status: "DELIVERED",
-            content: message.content,
-            createdAt: receivedAt,
-          },
-        });
+      await lockInboundProviderIdentity(tx, message.providerMessageId);
+      await assertNoRoutingTurn(tx, message.providerMessageId);
+      const recorded = await recordProcessableInbound(
+        tx,
+        message.conversationId,
+        receivedAt,
+      );
+      await tx.conversationMessage.create({
+        data: {
+          conversationId: message.conversationId,
+          providerMessageId: message.providerMessageId,
+          inReplyToProviderId: message.inReplyToProviderId,
+          direction: "INBOUND",
+          senderType: "CUSTOMER",
+          status: "DELIVERED",
+          content: message.content,
+          createdAt: receivedAt,
+        },
+      });
 
-        await tx.conversation.update({
-          where: { id: message.conversationId },
-          data: {
-            languageTag: language.languageTag,
-            languageSource: toPrismaLanguageSource(language.languageSource),
-          },
-          select: { id: true, inboundVersion: true },
-        });
+      await tx.conversation.update({
+        where: { id: message.conversationId },
+        data: {
+          languageTag: language.languageTag,
+          languageSource: toPrismaLanguageSource(language.languageSource),
+        },
+        select: { id: true, inboundVersion: true },
+      });
 
-        // A delayed verified webhook must never move either clock backwards.
-        await tx.$executeRaw`
+      // A delayed verified webhook must never move either clock backwards.
+      await tx.$executeRaw`
           UPDATE "whatsapp"."Conversation"
           SET "lastInboundAt" = GREATEST("lastInboundAt", ${receivedAt}),
             "lastMessageAt" = GREATEST("lastMessageAt", ${receivedAt})
           WHERE "id" = ${message.conversationId}`;
-        return { id: message.conversationId, inboundVersion: recorded.version };
-      });
+      return { id: message.conversationId, inboundVersion: recorded.version };
+    });
 
     failure.stage = "post-commit-engagement";
     await recoveryOutreachAttemptService.markEngagedForConversation(
@@ -302,11 +335,13 @@ export class ConversationService {
         inboundVersion: observedVersion,
         lastProcessedVersion: { lt: observedVersion },
         pendingTurnStartedAt: { not: null },
-        ...(expectedControlRevision === undefined ? {} : {
-          controlMode: "AI",
-          controlRevision: expectedControlRevision,
-          pendingAiControlRevision: expectedControlRevision,
-        }),
+        ...(expectedControlRevision === undefined
+          ? {}
+          : {
+              controlMode: "AI",
+              controlRevision: expectedControlRevision,
+              pendingAiControlRevision: expectedControlRevision,
+            }),
         OR: [
           { processingInboundVersion: null },
           { processingStartedAt: { lt: staleBefore } },
@@ -330,11 +365,13 @@ export class ConversationService {
         id: conversationId,
         inboundVersion: observedVersion,
         processingInboundVersion: observedVersion,
-        ...(expectedControlRevision === undefined ? {} : {
-          controlMode: "AI",
-          controlRevision: expectedControlRevision,
-          pendingAiControlRevision: expectedControlRevision,
-        }),
+        ...(expectedControlRevision === undefined
+          ? {}
+          : {
+              controlMode: "AI",
+              controlRevision: expectedControlRevision,
+              pendingAiControlRevision: expectedControlRevision,
+            }),
       },
       data: {
         lastProcessedVersion: observedVersion,
@@ -436,14 +473,17 @@ export class ConversationService {
 
     const messages = await prisma.conversationMessage.findMany({
       where: {
-        AND: [commerceHistoryVisible, pendingTurnStartedAt
-          ? {
-              conversationId,
-              createdAt: { gte: pendingTurnStartedAt },
-              direction: "INBOUND",
-              senderType: "CUSTOMER",
-            }
-          : { conversationId }],
+        AND: [
+          commerceHistoryVisible,
+          pendingTurnStartedAt
+            ? {
+                conversationId,
+                createdAt: { gte: pendingTurnStartedAt },
+                direction: "INBOUND",
+                senderType: "CUSTOMER",
+              }
+            : { conversationId },
+        ],
       },
 
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -460,11 +500,15 @@ export class ConversationService {
       },
     });
 
-    const witnesses = messages.filter(row => row.conversationId === conversationId);
-    const safeMessages = await allowedHistoryCandidates(messages.filter(row => historyDelivery(row, witnesses) !== "excluded"));
+    const witnesses = messages.filter(
+      (row) => row.conversationId === conversationId,
+    );
+    const safeMessages = await allowedHistoryCandidates(
+      messages.filter((row) => historyDelivery(row, witnesses) !== "excluded"),
+    );
     const normalizedMessages: AgentMessage[] = safeMessages
       .reverse()
-      .flatMap(message => {
+      .flatMap((message) => {
         const projected = projectDeliveryHistoryMessage(message, witnesses);
         return projected ? [projected] : [];
       });
@@ -512,10 +556,12 @@ export class ConversationService {
       },
     });
 
-    return conversation.inboundVersion !== version ||
+    return (
+      conversation.inboundVersion !== version ||
       conversation.processingInboundVersion !== version ||
       !conversation.processingStartedAt ||
-      Date.now() - conversation.processingStartedAt.getTime() >= 120_000;
+      Date.now() - conversation.processingStartedAt.getTime() >= 120_000
+    );
   }
 
   async applyDetectedLanguage({
@@ -636,7 +682,8 @@ export class ConversationService {
       select: { shop: { select: { id: true, defaultLanguageTag: true } } },
     });
     const language = this.languageService.resolveInitialLanguage({
-      currentLanguageTag: null, currentLanguageSource: null,
+      currentLanguageTag: null,
+      currentLanguageSource: null,
       merchantLanguageTag: recovery.shop.defaultLanguageTag ?? null,
     });
     return prisma.conversation.upsert({
@@ -650,7 +697,6 @@ export class ConversationService {
         languageSource: toPrismaLanguageSource(language.languageSource),
         ...(internationalContext
           ? {
-
               countryCode: internationalContext.countryCode,
               currencyCode: internationalContext.currencyCode,
               timeZone: internationalContext.timeZone,

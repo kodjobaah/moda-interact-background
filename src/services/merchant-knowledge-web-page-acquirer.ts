@@ -4,11 +4,7 @@ import { isIP } from "node:net";
 import type { Readable } from "node:stream";
 import { Transform, Writable, type WritableOptions } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import {
-  createBrotliDecompress,
-  createGunzip,
-  createInflate,
-} from "node:zlib";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 
 import type {
   AcquiredMerchantKnowledgeDocument,
@@ -95,11 +91,13 @@ function acquisitionError(
     TOO_MANY_REDIRECTS: "The response exceeded the redirect limit.",
     INVALID_REDIRECT: "The response contained an invalid redirect.",
     REQUEST_DEADLINE: "The acquisition exceeded its time limit.",
-    CONNECTION_PEER_MISMATCH: "The connected peer differed from the validated address.",
+    CONNECTION_PEER_MISMATCH:
+      "The connected peer differed from the validated address.",
     HTTP_STATUS_TRANSIENT: "The source returned a transient HTTP status.",
     HTTP_STATUS_PERMANENT: "The source returned an unsuccessful HTTP status.",
     UNSUPPORTED_MEDIA_TYPE: "The source media type is not supported.",
-    UNSUPPORTED_CONTENT_ENCODING: "The source content encoding is not supported.",
+    UNSUPPORTED_CONTENT_ENCODING:
+      "The source content encoding is not supported.",
     BODY_TOO_LARGE: "The decompressed source exceeds the size limit.",
     RESPONSE_READ_FAILED: "The source response could not be read.",
   };
@@ -162,7 +160,10 @@ function defaultHttpsRequest(
 
     const request = https.request(requestOptions, (response) => {
       const peerAddress = response.socket.remoteAddress;
-      if (!peerAddress || !addressesMatch(peerAddress, options.address.address)) {
+      if (
+        !peerAddress ||
+        !addressesMatch(peerAddress, options.address.address)
+      ) {
         response.destroy();
         fail(acquisitionError("CONNECTION_PEER_MISMATCH"));
         request.destroy();
@@ -184,7 +185,10 @@ function defaultHttpsRequest(
     request.once("socket", (socket) => {
       socket.once("secureConnect", () => {
         const peerAddress = socket.remoteAddress;
-        if (!peerAddress || !addressesMatch(peerAddress, options.address.address)) {
+        if (
+          !peerAddress ||
+          !addressesMatch(peerAddress, options.address.address)
+        ) {
           fail(acquisitionError("CONNECTION_PEER_MISMATCH"));
           request.destroy();
         }
@@ -236,7 +240,8 @@ function contentType(headers: IncomingHttpHeaders): "text/html" | "text/plain" {
 
 function decoderFor(headers: IncomingHttpHeaders): Transform | undefined {
   const raw = responseHeader(headers, "content-encoding");
-  if (raw === undefined || raw.trim().toLowerCase() === "identity") return undefined;
+  if (raw === undefined || raw.trim().toLowerCase() === "identity")
+    return undefined;
   if (raw.includes(",")) throw acquisitionError("UNSUPPORTED_CONTENT_ENCODING");
   switch (raw.trim().toLowerCase()) {
     case "gzip":
@@ -288,11 +293,15 @@ async function readBoundedBody(
   return Buffer.concat(chunks, length);
 }
 
-function transientRequestError(error: unknown): MerchantKnowledgeAcquisitionError {
+function transientRequestError(
+  error: unknown,
+): MerchantKnowledgeAcquisitionError {
   if (signalIsDeadline(error)) return acquisitionError("REQUEST_DEADLINE");
   if (TRANSIENT_NETWORK_CODES.has(errorCode(error) ?? "")) {
     return acquisitionError(
-      errorCode(error) === "EAI_AGAIN" ? "DNS_TEMPORARY_FAILURE" : "RESPONSE_READ_FAILED",
+      errorCode(error) === "EAI_AGAIN"
+        ? "DNS_TEMPORARY_FAILURE"
+        : "RESPONSE_READ_FAILED",
       true,
     );
   }
@@ -301,12 +310,13 @@ function transientRequestError(error: unknown): MerchantKnowledgeAcquisitionErro
 }
 
 function signalIsDeadline(error: unknown): boolean {
-  return error instanceof MerchantKnowledgeAcquisitionError && error.code === "REQUEST_DEADLINE";
+  return (
+    error instanceof MerchantKnowledgeAcquisitionError &&
+    error.code === "REQUEST_DEADLINE"
+  );
 }
 
-export class MerchantKnowledgeWebPageAcquirer
-  implements MerchantKnowledgeWebPageAcquirerContract
-{
+export class MerchantKnowledgeWebPageAcquirer implements MerchantKnowledgeWebPageAcquirerContract {
   private readonly resolver: MerchantKnowledgeResolver;
   private readonly request: MerchantKnowledgeHttpsRequest;
 
@@ -353,9 +363,7 @@ export class MerchantKnowledgeWebPageAcquirer
           path: requestPath(currentUrl),
           address,
           headers: REQUEST_HEADERS,
-          ...(isIP(hostname) === 0
-            ? { servername: hostname }
-            : {}),
+          ...(isIP(hostname) === 0 ? { servername: hostname } : {}),
         };
 
         let response: MerchantKnowledgeHttpResponse;
@@ -385,7 +393,9 @@ export class MerchantKnowledgeWebPageAcquirer
           } catch {
             throw acquisitionError("INVALID_REDIRECT");
           }
-          if (currentUrl.toString().length > MERCHANT_KNOWLEDGE_MAX_URL_LENGTH) {
+          if (
+            currentUrl.toString().length > MERCHANT_KNOWLEDGE_MAX_URL_LENGTH
+          ) {
             throw acquisitionError("INVALID_REDIRECT");
           }
           redirects += 1;
@@ -403,7 +413,11 @@ export class MerchantKnowledgeWebPageAcquirer
 
         const type = contentType(response.headers);
         const decoder = decoderFor(response.headers);
-        const bytes = await readBoundedBody(response.body, decoder, controller.signal);
+        const bytes = await readBoundedBody(
+          response.body,
+          decoder,
+          controller.signal,
+        );
         const bodyText = decodeMerchantKnowledgeUtf8(bytes);
         return {
           contentType: type,

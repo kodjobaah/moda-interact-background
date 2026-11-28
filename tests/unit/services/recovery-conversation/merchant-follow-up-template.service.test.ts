@@ -5,41 +5,76 @@ import type { PreparedWrapper } from "@modainteract/moda-interact-shared/commerc
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
 
-import { MerchantFollowUpTemplateService } from
-  "../../../../src/services/recovery-conversation/merchant-follow-up-template.service.js";
-import type { HumanCommand } from
-  "../../../../src/services/recovery-conversation/merchant-send-command.service.js";
+import { MerchantFollowUpTemplateService } from "../../../../src/services/recovery-conversation/merchant-follow-up-template.service.js";
+import type { HumanCommand } from "../../../../src/services/recovery-conversation/merchant-send-command.service.js";
 
 const identity = {
-  shopId: "shop-1", senderWabaId: "waba-1", purpose: "FOLLOW_UP_NO_OFFER" as const,
-  variantId: "v1", registrationId: "r1", definitionId: "d1",
-  providerTemplateId: "123", providerTemplateName: "moda_follow_up",
-  providerLanguageCode: "en_GB", submittedContentHash: "a".repeat(64),
+  shopId: "shop-1",
+  senderWabaId: "waba-1",
+  purpose: "FOLLOW_UP_NO_OFFER" as const,
+  variantId: "v1",
+  registrationId: "r1",
+  definitionId: "d1",
+  providerTemplateId: "123",
+  providerTemplateName: "moda_follow_up",
+  providerLanguageCode: "en_GB",
+  submittedContentHash: "a".repeat(64),
   bindingFingerprint: "a".repeat(64),
 };
 const command: HumanCommand = {
-  id: "cmd1", idempotencyKey: "merchant:cmd1", followUpClaimKey: "merchant:cmd1",
-  shopId: "shop-1", conversationId: "conv1",
-  kind: "RECOVERY_FOLLOW_UP_TEMPLATE", state: "CLAIMED", leaseToken: "lease1",
-  leaseExpiresAt: new Date(Date.now() + 60_000), expectedControlRevision: 1,
-  recipientSnapshot: "447700900001", textBody: null, templateName: "moda_follow_up",
-  templateLanguageCode: "en_GB", templateParameters: [],
-  recoveryOutreachAttemptId: "a1", outboundMessageId: null, providerDispatchKey: null,
+  id: "cmd1",
+  idempotencyKey: "merchant:cmd1",
+  followUpClaimKey: "merchant:cmd1",
+  shopId: "shop-1",
+  conversationId: "conv1",
+  kind: "RECOVERY_FOLLOW_UP_TEMPLATE",
+  state: "CLAIMED",
+  leaseToken: "lease1",
+  leaseExpiresAt: new Date(Date.now() + 60_000),
+  expectedControlRevision: 1,
+  recipientSnapshot: "447700900001",
+  textBody: null,
+  templateName: "moda_follow_up",
+  templateLanguageCode: "en_GB",
+  templateParameters: [],
+  recoveryOutreachAttemptId: "a1",
+  outboundMessageId: null,
+  providerDispatchKey: null,
 };
 
 function fixture() {
-  const conversation = { shopId: "shop-1", checkoutRecoveryId: "recovery1", languageTag: "fr" };
-  const database = { conversation: { findUnique: vi.fn(async () => conversation) } };
-  const policy = { resolve: vi.fn(async () => ({ recoveryOfferMode: "NONE" })) };
+  const conversation = {
+    shopId: "shop-1",
+    checkoutRecoveryId: "recovery1",
+    languageTag: "fr",
+  };
+  const database = {
+    conversation: { findUnique: vi.fn(async () => conversation) },
+  };
+  const policy = {
+    resolve: vi.fn(async () => ({ recoveryOfferMode: "NONE" })),
+  };
   const prepared = {
     kind: "prepared" as const,
-    prepared: { purpose: "FOLLOW_UP_NO_OFFER", shopId: "shop-1",
-      senderWabaId: "waba-1", variantId: "v1", registrationId: "r1",
-      definitionId: "d1", providerTemplateId: "123", submittedContentHash: "a".repeat(64),
+    prepared: {
+      purpose: "FOLLOW_UP_NO_OFFER",
+      shopId: "shop-1",
+      senderWabaId: "waba-1",
+      variantId: "v1",
+      registrationId: "r1",
+      definitionId: "d1",
+      providerTemplateId: "123",
+      submittedContentHash: "a".repeat(64),
       bindingFingerprint: "a".repeat(64),
-      providerTemplateName: "moda_follow_up", providerLanguageCode: "en_GB" },
-    send: { templateName: "moda_follow_up", languageCode: "en_GB", templateRegistration: identity,
-      recoveryPromise: { kind: "NO_OFFER" }, bodyParameters: ["customer-first-name"],
+      providerTemplateName: "moda_follow_up",
+      providerLanguageCode: "en_GB",
+    },
+    send: {
+      templateName: "moda_follow_up",
+      languageCode: "en_GB",
+      templateRegistration: identity,
+      recoveryPromise: { kind: "NO_OFFER" },
+      bodyParameters: ["customer-first-name"],
       dynamicUrlButton: { index: 0, text: "trusted-checkout-token" },
       imageHeader: { link: "https://cdn.example.test/ready-r2.jpg" },
     },
@@ -47,7 +82,10 @@ function fixture() {
   const templates = { prepare: vi.fn(async () => prepared) };
   const log = { warn: vi.fn(), error: vi.fn() };
   const resolver = new MerchantFollowUpTemplateService(
-    database as never, policy as never, templates as never, log,
+    database as never,
+    policy as never,
+    templates as never,
+    log,
   );
   return { resolver, templates, policy, database, conversation, prepared, log };
 }
@@ -57,11 +95,18 @@ describe("ARCH-047 BG007 merchant post-window template selection", () => {
     const f = fixture();
     const resolved = await f.resolver.resolve(command, "recovery1");
     expect(resolved).toEqual(f.prepared);
-    expect(f.templates.prepare).toHaveBeenCalledWith(expect.objectContaining({
-      shopId: "shop-1", recoveryId: "recovery1", stage: "FOLLOW_UP",
-      conversationLanguageTag: "fr",
-      requestedTemplate: { templateName: command.templateName, languageCode: command.templateLanguageCode },
-    }));
+    expect(f.templates.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shopId: "shop-1",
+        recoveryId: "recovery1",
+        stage: "FOLLOW_UP",
+        conversationLanguageTag: "fr",
+        requestedTemplate: {
+          templateName: command.templateName,
+          languageCode: command.templateLanguageCode,
+        },
+      }),
+    );
     expect(f.database.conversation.findUnique).toHaveBeenCalledWith({
       where: { id: "conv1" },
       select: { shopId: true, checkoutRecoveryId: true, languageTag: true },
@@ -69,80 +114,122 @@ describe("ARCH-047 BG007 merchant post-window template selection", () => {
   });
 
   it.each([
-    { templateName: "outside-meta-template" }, { templateLanguageCode: "de_DE" },
+    { templateName: "outside-meta-template" },
+    { templateLanguageCode: "de_DE" },
     { templateParameters: ["20% discount"] },
     { templateParameters: { header: "attacker-image" } },
-  ])("rejects a merchant-selected untrusted template/parameter override %j", async (override) => {
-    const f = fixture();
-    expect(await f.resolver.resolve({ ...command, ...override }, "recovery1"))
-      .toEqual({ kind: "unavailable", reason: "template_not_allowed" });
-    if ("templateParameters" in override) expect(f.templates.prepare).not.toHaveBeenCalled();
-  });
+  ])(
+    "rejects a merchant-selected untrusted template/parameter override %j",
+    async (override) => {
+      const f = fixture();
+      expect(
+        await f.resolver.resolve({ ...command, ...override }, "recovery1"),
+      ).toEqual({ kind: "unavailable", reason: "template_not_allowed" });
+      if ("templateParameters" in override)
+        expect(f.templates.prepare).not.toHaveBeenCalled();
+    },
+  );
 
-  it.each([
-    { shopId: "other-shop" }, { checkoutRecoveryId: "other-recovery" },
-  ])("rejects wrong tenant/recovery association %j", async (override) => {
-    const f = fixture();
-    f.database.conversation.findUnique.mockResolvedValue({ ...f.conversation, ...override });
-    const resolved = await f.resolver.resolve(command, "recovery1");
-    expect(resolved).toEqual({ kind: "unavailable", reason: "template_not_allowed" });
-    expect(f.templates.prepare).not.toHaveBeenCalled();
-  });
+  it.each([{ shopId: "other-shop" }, { checkoutRecoveryId: "other-recovery" }])(
+    "rejects wrong tenant/recovery association %j",
+    async (override) => {
+      const f = fixture();
+      f.database.conversation.findUnique.mockResolvedValue({
+        ...f.conversation,
+        ...override,
+      });
+      const resolved = await f.resolver.resolve(command, "recovery1");
+      expect(resolved).toEqual({
+        kind: "unavailable",
+        reason: "template_not_allowed",
+      });
+      expect(f.templates.prepare).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects stale or unavailable assignments (including READY media and CTA failures)", async () => {
     const f = fixture();
-    f.templates.prepare.mockResolvedValue({ kind: "unavailable", reason: "MEDIA_NOT_READY" } as never);
-    expect(await f.resolver.resolve(command, "recovery1"))
-      .toEqual({ kind: "unavailable", reason: "follow_up_unavailable" });
-    expect(f.log.warn).toHaveBeenCalledWith(expect.any(String),
-      expect.objectContaining({ reason: "MEDIA_NOT_READY" }));
+    f.templates.prepare.mockResolvedValue({
+      kind: "unavailable",
+      reason: "MEDIA_NOT_READY",
+    } as never);
+    expect(await f.resolver.resolve(command, "recovery1")).toEqual({
+      kind: "unavailable",
+      reason: "follow_up_unavailable",
+    });
+    expect(f.log.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ reason: "MEDIA_NOT_READY" }),
+    );
   });
 
   it("refuses unverified positive offers when FIXED/AI offer evidence is unavailable", async () => {
     const f = fixture();
     f.policy.resolve.mockResolvedValue({ recoveryOfferMode: "FIXED" } as never);
-    expect(await f.resolver.resolve(command, "recovery1"))
-      .toEqual({ kind: "unavailable", reason: "follow_up_unavailable" });
+    expect(await f.resolver.resolve(command, "recovery1")).toEqual({
+      kind: "unavailable",
+      reason: "follow_up_unavailable",
+    });
   });
 
   it("rejects an initial-purpose registration returned by a faulty injected preparer", async () => {
     const f = fixture();
-    f.templates.prepare.mockResolvedValue({ ...f.prepared,
+    f.templates.prepare.mockResolvedValue({
+      ...f.prepared,
       prepared: { ...f.prepared.prepared, purpose: "INITIAL_NO_OFFER" },
     } as never);
-    expect(await f.resolver.resolve(command, "recovery1"))
-      .toEqual({ kind: "unavailable", reason: "template_not_allowed" });
+    expect(await f.resolver.resolve(command, "recovery1")).toEqual({
+      kind: "unavailable",
+      reason: "template_not_allowed",
+    });
   });
 
   it.each([
     { textBody: "merchant-injected-text" },
     { recoveryOutreachAttemptId: null },
-    { templateParameters: [{ type: "image", link: "https://attacker.invalid/image" }] },
+    {
+      templateParameters: [
+        { type: "image", link: "https://attacker.invalid/image" },
+      ],
+    },
     { templateParameters: { button: "https://attacker.invalid/checkout" } },
-  ])("rejects unsupported command content before any policy/provider read %j", async (override) => {
-    const f = fixture();
-    expect(await f.resolver.resolve({ ...command, ...override }, "recovery1"))
-      .toEqual({ kind: "unavailable", reason: "template_not_allowed" });
-    expect(f.database.conversation.findUnique).not.toHaveBeenCalled();
-    expect(f.policy.resolve).not.toHaveBeenCalled();
-    expect(f.templates.prepare).not.toHaveBeenCalled();
-  });
+  ])(
+    "rejects unsupported command content before any policy/provider read %j",
+    async (override) => {
+      const f = fixture();
+      expect(
+        await f.resolver.resolve({ ...command, ...override }, "recovery1"),
+      ).toEqual({ kind: "unavailable", reason: "template_not_allowed" });
+      expect(f.database.conversation.findUnique).not.toHaveBeenCalled();
+      expect(f.policy.resolve).not.toHaveBeenCalled();
+      expect(f.templates.prepare).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     { dynamicUrlButton: undefined },
     { dynamicUrlButton: { index: 0, text: "" } },
     { dynamicUrlButton: { index: 1, text: "checkout-suffix" } },
-    { dynamicUrlButton: { index: 0, text: "checkout-suffix" }, textHeader: "untrusted header" },
+    {
+      dynamicUrlButton: { index: 0, text: "checkout-suffix" },
+      textHeader: "untrusted header",
+    },
     { imageHeader: null },
     { imageHeader: undefined, textHeader: "" },
-  ])("refuses a missing or inconsistent frozen checkout CTA/header %j", async (override) => {
-    const f = fixture();
-    f.templates.prepare.mockResolvedValue({ ...f.prepared,
-      send: { ...f.prepared.send, ...override },
-    } as never);
-    expect(await f.resolver.resolve(command, "recovery1"))
-      .toEqual({ kind: "unavailable", reason: "follow_up_unavailable" });
-  });
+  ])(
+    "refuses a missing or inconsistent frozen checkout CTA/header %j",
+    async (override) => {
+      const f = fixture();
+      f.templates.prepare.mockResolvedValue({
+        ...f.prepared,
+        send: { ...f.prepared.send, ...override },
+      } as never);
+      expect(await f.resolver.resolve(command, "recovery1")).toEqual({
+        kind: "unavailable",
+        reason: "follow_up_unavailable",
+      });
+    },
+  );
 
   it.each([
     { senderWabaId: "wrong-waba" },
@@ -152,77 +239,179 @@ describe("ARCH-047 BG007 merchant post-window template selection", () => {
     { submittedContentHash: "b".repeat(64) },
   ])("refuses a forged/faulty registration identity %j", async (override) => {
     const f = fixture();
-    f.templates.prepare.mockResolvedValue({ ...f.prepared,
-      send: { ...f.prepared.send,
-        templateRegistration: { ...f.prepared.send.templateRegistration, ...override },
+    f.templates.prepare.mockResolvedValue({
+      ...f.prepared,
+      send: {
+        ...f.prepared.send,
+        templateRegistration: {
+          ...f.prepared.send.templateRegistration,
+          ...override,
+        },
       },
     } as never);
-    expect(await f.resolver.resolve(command, "recovery1"))
-      .toEqual({ kind: "unavailable", reason: "template_not_allowed" });
+    expect(await f.resolver.resolve(command, "recovery1")).toEqual({
+      kind: "unavailable",
+      reason: "template_not_allowed",
+    });
   });
 
   it("forwards the exact prepared image/body/checkout components without recomposition", async () => {
     const f = fixture();
     const chosen = await f.resolver.resolve(command, "recovery1");
     expect(chosen.kind).toBe("prepared");
-    if (chosen.kind !== "prepared") throw new Error("expected frozen prepared payload");
+    if (chosen.kind !== "prepared")
+      throw new Error("expected frozen prepared payload");
     expect(chosen.send).toBe(f.prepared.send);
-    expect(chosen.send.imageHeader).toEqual({ link: "https://cdn.example.test/ready-r2.jpg" });
+    expect(chosen.send.imageHeader).toEqual({
+      link: "https://cdn.example.test/ready-r2.jpg",
+    });
     expect(chosen.send.bodyParameters).toEqual(["customer-first-name"]);
-    expect(chosen.send.dynamicUrlButton).toEqual({ index: 0, text: "trusted-checkout-token" });
+    expect(chosen.send.dynamicUrlButton).toEqual({
+      index: 0,
+      text: "trusted-checkout-token",
+    });
   });
 
-  it.each(["TEXT", "IMAGE"] as const)("accepts a verified %s common-layout checkout link without a separate button", async format => {
-    const f = fixture();
-    const projection: PreparedWrapper = { schemaVersion: 1, family: "MODA_CONVERSATION_WRAPPER", responseSlot: "response.body",
-      header: [{ kind: "text", value: "Shop: " }, { kind: "variable", name: "shop.name" }],
-      body: [{ kind: "responseSlot", name: "response.body" }], footer: [],
-      conditionals: [{ when: "checkout.available", tokens: [{ kind: "variable", name: "shop.websiteUrl" },
-        { kind: "text", value: "\nReturn to checkout:\n" }, { kind: "variable", name: "checkout.url" }] }] };
-    const commonLayout = { reference: { schemaVersion: 1, definitionId: "shared-layout", sourceHash: "a".repeat(64),
-      localeId: "shared-en", languageTag: "en", contentHash: createHash("sha256").update(canonicalJson(projection)).digest("hex"), prepared: projection },
-      variables: { "shop.name": "Merchant", "shop.websiteUrl": "https://shop.example", "checkout.url": "https://shop.example/checkout/one" },
-      parameters: { header: [], body: ["Merchant", "https://shop.example", "https://shop.example/checkout/one"] } };
-    const selected = { ...f.prepared, prepared: { ...f.prepared.prepared, commonLayout }, send: { ...f.prepared.send,
-      templateRegistration: { ...identity, commonLayout }, dynamicUrlButton: undefined,
-      imageHeader: format === "IMAGE" ? f.prepared.send.imageHeader : undefined, bodyParameters: commonLayout.parameters.body } };
-    f.templates.prepare.mockResolvedValue(selected as never);
-    expect(await f.resolver.resolve(command, "recovery1")).toEqual(selected);
-    f.templates.prepare.mockResolvedValue({ ...selected, send: { ...selected.send, bodyParameters: ["Merchant"] } } as never);
-    expect(await f.resolver.resolve(command, "recovery1")).toEqual({ kind: "unavailable", reason: "follow_up_unavailable" });
-  });
+  it.each(["TEXT", "IMAGE"] as const)(
+    "accepts a verified %s common-layout checkout link without a separate button",
+    async (format) => {
+      const f = fixture();
+      const projection: PreparedWrapper = {
+        schemaVersion: 1,
+        family: "MODA_CONVERSATION_WRAPPER",
+        responseSlot: "response.body",
+        header: [
+          { kind: "text", value: "Shop: " },
+          { kind: "variable", name: "shop.name" },
+        ],
+        body: [{ kind: "responseSlot", name: "response.body" }],
+        footer: [],
+        conditionals: [
+          {
+            when: "checkout.available",
+            tokens: [
+              { kind: "variable", name: "shop.websiteUrl" },
+              { kind: "text", value: "\nReturn to checkout:\n" },
+              { kind: "variable", name: "checkout.url" },
+            ],
+          },
+        ],
+      };
+      const commonLayout = {
+        reference: {
+          schemaVersion: 1,
+          definitionId: "shared-layout",
+          sourceHash: "a".repeat(64),
+          localeId: "shared-en",
+          languageTag: "en",
+          contentHash: createHash("sha256")
+            .update(canonicalJson(projection))
+            .digest("hex"),
+          prepared: projection,
+        },
+        variables: {
+          "shop.name": "Merchant",
+          "shop.websiteUrl": "https://shop.example",
+          "checkout.url": "https://shop.example/checkout/one",
+        },
+        parameters: {
+          header: [],
+          body: [
+            "Merchant",
+            "https://shop.example",
+            "https://shop.example/checkout/one",
+          ],
+        },
+      };
+      const selected = {
+        ...f.prepared,
+        prepared: { ...f.prepared.prepared, commonLayout },
+        send: {
+          ...f.prepared.send,
+          templateRegistration: { ...identity, commonLayout },
+          dynamicUrlButton: undefined,
+          imageHeader:
+            format === "IMAGE" ? f.prepared.send.imageHeader : undefined,
+          bodyParameters: commonLayout.parameters.body,
+        },
+      };
+      f.templates.prepare.mockResolvedValue(selected as never);
+      expect(await f.resolver.resolve(command, "recovery1")).toEqual(selected);
+      f.templates.prepare.mockResolvedValue({
+        ...selected,
+        send: { ...selected.send, bodyParameters: ["Merchant"] },
+      } as never);
+      expect(await f.resolver.resolve(command, "recovery1")).toEqual({
+        kind: "unavailable",
+        reason: "follow_up_unavailable",
+      });
+    },
+  );
 
   it("emits bounded shared-logger refusals without merchant-provided parameter contents", async () => {
     const f = fixture();
-    const attackerData = { header: "https://secret.invalid/customer-raw-image" };
-    const result = await f.resolver.resolve({ ...command, templateParameters: attackerData }, "recovery1");
-    expect(result).toEqual({ kind: "unavailable", reason: "template_not_allowed" });
-    expect(f.log.warn).toHaveBeenCalledWith("arch047.merchant_follow_up.refused", {
-      commandId: command.id, shopId: command.shopId, reason: "template_not_allowed",
+    const attackerData = {
+      header: "https://secret.invalid/customer-raw-image",
+    };
+    const result = await f.resolver.resolve(
+      { ...command, templateParameters: attackerData },
+      "recovery1",
+    );
+    expect(result).toEqual({
+      kind: "unavailable",
+      reason: "template_not_allowed",
     });
-    expect(JSON.stringify(f.log.warn.mock.calls)).not.toContain(attackerData.header);
+    expect(f.log.warn).toHaveBeenCalledWith(
+      "arch047.merchant_follow_up.refused",
+      {
+        commandId: command.id,
+        shopId: command.shopId,
+        reason: "template_not_allowed",
+      },
+    );
+    expect(JSON.stringify(f.log.warn.mock.calls)).not.toContain(
+      attackerData.header,
+    );
   });
 
   it("does not swallow database exceptions or convert them into a silent no-send decision", async () => {
     const f = fixture();
-    const failure = new Error("raw database connection string must not be logged");
+    const failure = new Error(
+      "raw database connection string must not be logged",
+    );
     f.database.conversation.findUnique.mockRejectedValue(failure);
-    await expect(f.resolver.resolve(command, "recovery1")).rejects.toBe(failure);
+    await expect(f.resolver.resolve(command, "recovery1")).rejects.toBe(
+      failure,
+    );
     expect(f.templates.prepare).not.toHaveBeenCalled();
-    expect(f.log.error).toHaveBeenCalledWith("arch047.merchant_follow_up.prepare_failed", {
-      commandId: command.id, shopId: command.shopId, errorType: "Error",
-      errorMessage: failure.message, error: failure,
-    });
+    expect(f.log.error).toHaveBeenCalledWith(
+      "arch047.merchant_follow_up.prepare_failed",
+      {
+        commandId: command.id,
+        shopId: command.shopId,
+        errorType: "Error",
+        errorMessage: failure.message,
+        error: failure,
+      },
+    );
   });
 
   it("preserves a frozen text header with its original checkout suffix", async () => {
     const f = fixture();
-    const preparedSend = { ...f.prepared.send, imageHeader: undefined,
-      textHeader: "Resolved shop name", dynamicUrlButton: { index: 0, text: "bound-checkout-suffix" } };
-    f.templates.prepare.mockResolvedValue({ ...f.prepared, send: preparedSend } as never);
+    const preparedSend = {
+      ...f.prepared.send,
+      imageHeader: undefined,
+      textHeader: "Resolved shop name",
+      dynamicUrlButton: { index: 0, text: "bound-checkout-suffix" },
+    };
+    f.templates.prepare.mockResolvedValue({
+      ...f.prepared,
+      send: preparedSend,
+    } as never);
     const selected = await f.resolver.resolve(command, "recovery1");
     expect(selected.kind).toBe("prepared");
-    if (selected.kind !== "prepared") throw new Error("expected frozen prepared template");
+    if (selected.kind !== "prepared")
+      throw new Error("expected frozen prepared template");
     expect(selected.send).toBe(preparedSend);
     expect(selected.send.textHeader).toBe("Resolved shop name");
     expect(selected.send.dynamicUrlButton?.text).toBe("bound-checkout-suffix");
@@ -232,10 +421,18 @@ describe("ARCH-047 BG007 merchant post-window template selection", () => {
     const f = fixture();
     const failure = new Error("secret provider body");
     f.templates.prepare.mockRejectedValue(failure);
-    await expect(f.resolver.resolve(command, "recovery1")).rejects.toBe(failure);
-    expect(f.log.error).toHaveBeenCalledWith("arch047.merchant_follow_up.prepare_failed", {
-      commandId: "cmd1", shopId: "shop-1", errorType: "Error",
-      errorMessage: failure.message, error: failure,
-    });
+    await expect(f.resolver.resolve(command, "recovery1")).rejects.toBe(
+      failure,
+    );
+    expect(f.log.error).toHaveBeenCalledWith(
+      "arch047.merchant_follow_up.prepare_failed",
+      {
+        commandId: "cmd1",
+        shopId: "shop-1",
+        errorType: "Error",
+        errorMessage: failure.message,
+        error: failure,
+      },
+    );
   });
 });

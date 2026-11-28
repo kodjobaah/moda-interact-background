@@ -20,16 +20,41 @@ describe("Shopify abandoned-checkout verification timing", () => {
     }
     expect(nextShopifyVerificationRetry(state, at)).toBeNull();
     for (const merchantDelay of [0, 1, 5, 30, 120, 1440]) {
-      const ttl = shopifyCandidateIndexTtlMs(merchantDelay, 1000, first, first + merchantDelay * 60_000);
+      const ttl = shopifyCandidateIndexTtlMs(
+        merchantDelay,
+        1000,
+        first,
+        first + merchantDelay * 60_000,
+      );
       expect(ttl).toBeGreaterThanOrEqual(merchantDelay * 60_000 + 70 * 60_000);
     }
   });
 
   it("does not restart an elapsed window or accept corrupt persisted state", () => {
     const first = 10_000_000;
-    expect(nextShopifyVerificationRetry({firstAttemptAtMs:first, deferrals:0}, first + 60 * 60_000)).toBeNull();
-    expect(nextShopifyVerificationRetry({firstAttemptAtMs:first, deferrals:99}, first + 10)).toBeNull();
-    expect(nextShopifyVerificationRetry({firstAttemptAtMs:first, deferrals:-1}, first + 10)).toBeNull();
-    expect(nextShopifyVerificationRetry({firstAttemptAtMs:first + 100, deferrals:1}, first)).toBeNull();
+    expect(
+      nextShopifyVerificationRetry(
+        { firstAttemptAtMs: first, deferrals: 0 },
+        first + 60 * 60_000,
+      ),
+    ).toBeNull();
+    expect(
+      nextShopifyVerificationRetry(
+        { firstAttemptAtMs: first, deferrals: 99 },
+        first + 10,
+      ),
+    ).toBeNull();
+    expect(
+      nextShopifyVerificationRetry(
+        { firstAttemptAtMs: first, deferrals: -1 },
+        first + 10,
+      ),
+    ).toBeNull();
+    expect(
+      nextShopifyVerificationRetry(
+        { firstAttemptAtMs: first + 100, deferrals: 1 },
+        first,
+      ),
+    ).toBeNull();
   });
 });

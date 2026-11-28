@@ -1,38 +1,90 @@
 import { persistVerifiedInbound } from "./recovery-sender-pool/inbound-writer.js";
-import { lockInboundProviderIdentity, canProcessConversation, resolveSenderInbound } from "./recovery-sender-pool/inbound-authority.js";
+import {
+  lockInboundProviderIdentity,
+  canProcessConversation,
+  resolveSenderInbound,
+} from "./recovery-sender-pool/inbound-authority.js";
 import { Prisma } from "@prisma/client";
 import { parseBuffer } from "music-metadata";
 import type { NormalizedWhatsAppInboundMessage } from "@modainteract/moda-interact-shared/whatsapp";
 import prisma from "../lib/db.js";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
-import { whatsappMediaService, WhatsAppMediaError } from "./whatsapp-media.service.js";
-import { speechTranscriptionService, SpeechTranscriptionError, validateTranscriptionMedia, type SpeechTranscriptionService } from "./speech-transcription.service.js";
+import {
+  whatsappMediaService,
+  WhatsAppMediaError,
+} from "./whatsapp-media.service.js";
+import {
+  speechTranscriptionService,
+  SpeechTranscriptionError,
+  validateTranscriptionMedia,
+  type SpeechTranscriptionService,
+} from "./speech-transcription.service.js";
 import { recordProcessableInbound } from "./conversation-ai-delay/pending-turn-repository.js";
 
 export const MAX_DURATION_MS = 120_000;
 const TOO_LONG = "Please send a voice note that is 2 minutes or shorter.";
-const UNREADABLE = "I couldn't understand that voice note. Please try again or send your message as text.";
+const UNREADABLE =
+  "I couldn't understand that voice note. Please try again or send your message as text.";
 
 export class InboundWhatsAppAudioService {
   constructor(
     private readonly media = whatsappMediaService,
     private readonly transcription: SpeechTranscriptionService = speechTranscriptionService,
-    private readonly logger: StructuredLogger = createLogger({ serviceName: "moda-messaging-worker", environment: resolveDeploymentEnvironmentName() }),
+    private readonly logger: StructuredLogger = createLogger({
+      serviceName: "moda-messaging-worker",
+      environment: resolveDeploymentEnvironmentName(),
+    }),
   ) {}
 
-  async reserve(event: NormalizedWhatsAppInboundMessage, conversationId: string) {
-    const existing = await prisma.conversationMessage.findUnique({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, dispatchProviderAccountId:true, dispatchProviderPhoneNumberId:true, transcriptionStatus: true, transcriptionFailureCode: true, transcriptionCompletedAt: true, createdAt: true } });
-    if (existing) {if(existing.conversationId!==conversationId||(existing.dispatchProviderAccountId!==event.providerAccountId||existing.dispatchProviderPhoneNumberId!==event.providerPhoneNumberId))throw new Error("Inbound message ownership mismatch");return existing;}
-    const owner=await resolveSenderInbound(prisma,event);
-    if(owner.kind==='owned'){
-      if(owner.evidence.conversationId!==conversationId)throw new Error('Inbound message ownership mismatch');
-      return (await persistVerifiedInbound(prisma,event,owner.evidence,owner.mode)).message;
+  async reserve(
+    event: NormalizedWhatsAppInboundMessage,
+    conversationId: string,
+  ) {
+    const existing = await prisma.conversationMessage.findUnique({
+      where: { providerMessageId: event.providerMessageId },
+      select: {
+        id: true,
+        conversationId: true,
+        dispatchProviderAccountId: true,
+        dispatchProviderPhoneNumberId: true,
+        transcriptionStatus: true,
+        transcriptionFailureCode: true,
+        transcriptionCompletedAt: true,
+        createdAt: true,
+      },
+    });
+    if (existing) {
+      if (
+        existing.conversationId !== conversationId ||
+        existing.dispatchProviderAccountId !== event.providerAccountId ||
+        existing.dispatchProviderPhoneNumberId !== event.providerPhoneNumberId
+      )
+        throw new Error("Inbound message ownership mismatch");
+      return existing;
     }
-    throw new Error('Inbound audio routing unresolved');
+    const owner = await resolveSenderInbound(prisma, event);
+    if (owner.kind === "owned") {
+      if (owner.evidence.conversationId !== conversationId)
+        throw new Error("Inbound message ownership mismatch");
+      return (
+        await persistVerifiedInbound(prisma, event, owner.evidence, owner.mode)
+      ).message;
+    }
+    throw new Error("Inbound audio routing unresolved");
   }
 
-  async process(event: NormalizedWhatsAppInboundMessage, conversationId: string, options: { finalAttempt?: boolean } = {}): Promise<{ kind: "completed" | "rejected" | "failed" | "ignored"; fallback?: string }> {
+  async process(
+    event: NormalizedWhatsAppInboundMessage,
+    conversationId: string,
+    options: { finalAttempt?: boolean } = {},
+  ): Promise<{
+    kind: "completed" | "rejected" | "failed" | "ignored";
+    fallback?: string;
+  }> {
     try {
       return await this.processInternal(event, conversationId, options);
     } catch (error) {
@@ -41,107 +93,238 @@ export class InboundWhatsAppAudioService {
     }
   }
 
-  private async processInternal(event: NormalizedWhatsAppInboundMessage, conversationId: string, options: { finalAttempt?: boolean }): Promise<{ kind: "completed" | "rejected" | "failed" | "ignored"; fallback?: string }> {
-    let reservation: Awaited<ReturnType<InboundWhatsAppAudioService["reserve"]>>;
+  private async processInternal(
+    event: NormalizedWhatsAppInboundMessage,
+    conversationId: string,
+    options: { finalAttempt?: boolean },
+  ): Promise<{
+    kind: "completed" | "rejected" | "failed" | "ignored";
+    fallback?: string;
+  }> {
+    let reservation: Awaited<
+      ReturnType<InboundWhatsAppAudioService["reserve"]>
+    >;
     try {
-      reservation = await this.persist(conversationId, event.providerMessageId, () =>
-        this.reserve(event, conversationId));
+      reservation = await this.persist(
+        conversationId,
+        event.providerMessageId,
+        () => this.reserve(event, conversationId),
+      );
     } catch (error) {
       if (error instanceof InboundAudioPersistenceError) throw error.cause;
       throw error;
     }
-    if (reservation.conversationId !== conversationId) throw new Error("Inbound message ownership mismatch");
-    if (reservation.transcriptionFailureCode === "STALE_TRANSCRIPTION") return { kind: "ignored" };
+    if (reservation.conversationId !== conversationId)
+      throw new Error("Inbound message ownership mismatch");
+    if (reservation.transcriptionFailureCode === "STALE_TRANSCRIPTION")
+      return { kind: "ignored" };
     if (reservation.transcriptionStatus === "COMPLETED") {
-      const state = await this.persist(conversationId, event.providerMessageId, () =>
-        prisma.conversation.findUniqueOrThrow({ where: { id: conversationId }, select: { inboundVersion: true, lastProcessedVersion: true, lastInboundAt: true } }));
+      const state = await this.persist(
+        conversationId,
+        event.providerMessageId,
+        () =>
+          prisma.conversation.findUniqueOrThrow({
+            where: { id: conversationId },
+            select: {
+              inboundVersion: true,
+              lastProcessedVersion: true,
+              lastInboundAt: true,
+            },
+          }),
+      );
       // Recover an interrupted enqueue only while this remains the pending turn.
-      return { kind: state.inboundVersion > state.lastProcessedVersion && state.lastInboundAt?.getTime() === reservation.createdAt?.getTime() ? "completed" : "ignored" };
+      return {
+        kind:
+          state.inboundVersion > state.lastProcessedVersion &&
+          state.lastInboundAt?.getTime() === reservation.createdAt?.getTime()
+            ? "completed"
+            : "ignored",
+      };
     }
     // Compare provider-event order with persisted inbound rows. The service-window
     // clock is the verified provider event time, not transcription completion.
     const eventTime = reservation.createdAt ?? new Date(event.occurredAt);
-    if (await this.persist(conversationId, event.providerMessageId, () => this.isStale(conversationId, reservation.id, eventTime))) {
-      await this.persist(conversationId, event.providerMessageId, () => this.reject(reservation.id, "STALE_TRANSCRIPTION", 0));
+    if (
+      await this.persist(conversationId, event.providerMessageId, () =>
+        this.isStale(conversationId, reservation.id, eventTime),
+      )
+    ) {
+      await this.persist(conversationId, event.providerMessageId, () =>
+        this.reject(reservation.id, "STALE_TRANSCRIPTION", 0),
+      );
       return { kind: "ignored" };
     }
-    if (reservation.transcriptionStatus === "REJECTED" || reservation.transcriptionStatus === "FAILED") return { kind: "failed", fallback: UNREADABLE };
+    if (
+      reservation.transcriptionStatus === "REJECTED" ||
+      reservation.transcriptionStatus === "FAILED"
+    )
+      return { kind: "failed", fallback: UNREADABLE };
     try {
-      if (event.content.type !== "audio") throw new Error("audio-event-required");
-      const downloaded = await this.media.downloadAudio(event.content.mediaId, event.content.mimeType);
+      if (event.content.type !== "audio")
+        throw new Error("audio-event-required");
+      const downloaded = await this.media.downloadAudio(
+        event.content.mediaId,
+        event.content.mimeType,
+      );
       validateTranscriptionMedia(downloaded);
       let metadata;
       try {
-        metadata = await parseBuffer(downloaded.bytes, { mimeType: downloaded.mimeType });
+        metadata = await parseBuffer(downloaded.bytes, {
+          mimeType: downloaded.mimeType,
+        });
       } catch (error) {
         this.logger.warn("whatsapp.inbound.media_parse_failed", {
           providerMessageId: event.providerMessageId,
-          errorMessage: error instanceof Error ? error.message : String(error), error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
         });
-        if (await this.persist(conversationId, event.providerMessageId, () => this.isStale(conversationId, reservation.id, eventTime))) {
-          await this.persist(conversationId, event.providerMessageId, () => this.reject(reservation.id, "STALE_TRANSCRIPTION", 0));
+        if (
+          await this.persist(conversationId, event.providerMessageId, () =>
+            this.isStale(conversationId, reservation.id, eventTime),
+          )
+        ) {
+          await this.persist(conversationId, event.providerMessageId, () =>
+            this.reject(reservation.id, "STALE_TRANSCRIPTION", 0),
+          );
           return { kind: "ignored" };
         }
-        await this.persist(conversationId, event.providerMessageId, () => this.fail(reservation.id, "MEDIA_UNREADABLE"));
-        this.logger.warn("whatsapp.inbound.transcription-terminal-failure", { providerMessageId: event.providerMessageId, reason: "media-parse-failed" });
+        await this.persist(conversationId, event.providerMessageId, () =>
+          this.fail(reservation.id, "MEDIA_UNREADABLE"),
+        );
+        this.logger.warn("whatsapp.inbound.transcription-terminal-failure", {
+          providerMessageId: event.providerMessageId,
+          reason: "media-parse-failed",
+        });
         return { kind: "failed", fallback: UNREADABLE };
       }
-      if (await this.persist(conversationId, event.providerMessageId, () => this.isStale(conversationId, reservation.id, eventTime))) {
-        await this.persist(conversationId, event.providerMessageId, () => this.reject(reservation.id, "STALE_TRANSCRIPTION", 0));
+      if (
+        await this.persist(conversationId, event.providerMessageId, () =>
+          this.isStale(conversationId, reservation.id, eventTime),
+        )
+      ) {
+        await this.persist(conversationId, event.providerMessageId, () =>
+          this.reject(reservation.id, "STALE_TRANSCRIPTION", 0),
+        );
         return { kind: "ignored" };
       }
       const durationMs = Math.round((metadata.format.duration ?? 0) * 1000);
-      if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > MAX_DURATION_MS) {
-        await this.persist(conversationId, event.providerMessageId, () => this.reject(reservation.id, durationMs > MAX_DURATION_MS ? "VOICE_TOO_LONG" : "VOICE_UNREADABLE", durationMs));
-        this.logger.info("whatsapp.inbound.rejected-too-long", { providerMessageId: event.providerMessageId });
-        return { kind: "rejected", fallback: durationMs > MAX_DURATION_MS ? TOO_LONG : UNREADABLE };
+      if (
+        !Number.isFinite(durationMs) ||
+        durationMs <= 0 ||
+        durationMs > MAX_DURATION_MS
+      ) {
+        await this.persist(conversationId, event.providerMessageId, () =>
+          this.reject(
+            reservation.id,
+            durationMs > MAX_DURATION_MS
+              ? "VOICE_TOO_LONG"
+              : "VOICE_UNREADABLE",
+            durationMs,
+          ),
+        );
+        this.logger.info("whatsapp.inbound.rejected-too-long", {
+          providerMessageId: event.providerMessageId,
+        });
+        return {
+          kind: "rejected",
+          fallback: durationMs > MAX_DURATION_MS ? TOO_LONG : UNREADABLE,
+        };
       }
       const transcript = await this.transcription.transcribe(downloaded);
-      if (await this.persist(conversationId, event.providerMessageId, () => this.isStale(conversationId, reservation.id, eventTime))) {
-        await this.persist(conversationId, event.providerMessageId, () => this.reject(reservation.id, "STALE_TRANSCRIPTION", 0));
+      if (
+        await this.persist(conversationId, event.providerMessageId, () =>
+          this.isStale(conversationId, reservation.id, eventTime),
+        )
+      ) {
+        await this.persist(conversationId, event.providerMessageId, () =>
+          this.reject(reservation.id, "STALE_TRANSCRIPTION", 0),
+        );
         return { kind: "ignored" };
       }
       if (!transcript.text.trim()) {
-        await this.persist(conversationId, event.providerMessageId, () => this.reject(reservation.id, "VOICE_UNREADABLE", durationMs));
+        await this.persist(conversationId, event.providerMessageId, () =>
+          this.reject(reservation.id, "VOICE_UNREADABLE", durationMs),
+        );
         return { kind: "rejected", fallback: UNREADABLE };
       }
-      const completed = await this.complete(reservation.id, reservation.conversationId, transcript.text, transcript.provider, transcript.model, durationMs, reservation.id, eventTime, event.providerMessageId);
+      const completed = await this.complete(
+        reservation.id,
+        reservation.conversationId,
+        transcript.text,
+        transcript.provider,
+        transcript.model,
+        durationMs,
+        reservation.id,
+        eventTime,
+        event.providerMessageId,
+      );
       if (!completed) return { kind: "ignored" };
-      this.logger.info("whatsapp.inbound.transcription-completed", { providerMessageId: event.providerMessageId });
+      this.logger.info("whatsapp.inbound.transcription-completed", {
+        providerMessageId: event.providerMessageId,
+      });
       return { kind: "completed" };
     } catch (error) {
       if (error instanceof InboundAudioPersistenceError) throw error.cause;
       if (isTerminalAudioError(error) || options.finalAttempt !== false) {
-        if (await this.persist(conversationId, event.providerMessageId, () => this.isStale(conversationId, reservation.id, eventTime))) {
-          await this.persist(conversationId, event.providerMessageId, () => this.reject(reservation.id, "STALE_TRANSCRIPTION", 0));
+        if (
+          await this.persist(conversationId, event.providerMessageId, () =>
+            this.isStale(conversationId, reservation.id, eventTime),
+          )
+        ) {
+          await this.persist(conversationId, event.providerMessageId, () =>
+            this.reject(reservation.id, "STALE_TRANSCRIPTION", 0),
+          );
           return { kind: "ignored" };
         }
-        await this.persist(conversationId, event.providerMessageId, () => this.fail(reservation.id, "MEDIA_UNREADABLE"));
+        await this.persist(conversationId, event.providerMessageId, () =>
+          this.fail(reservation.id, "MEDIA_UNREADABLE"),
+        );
         this.logger.warn("whatsapp.inbound.transcription-terminal-failure", {
-          providerMessageId: event.providerMessageId, reason: "typed-terminal-error",
-          errorMessage: error instanceof Error ? error.message : String(error), error,
+          providerMessageId: event.providerMessageId,
+          reason: "typed-terminal-error",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
         });
         return { kind: "failed", fallback: UNREADABLE };
       }
       this.logger.warn("whatsapp.inbound.transcription-retryable-failure", {
         providerMessageId: event.providerMessageId,
-        errorMessage: error instanceof Error ? error.message : String(error), error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
       });
-      throw error instanceof WhatsAppMediaError || error instanceof SpeechTranscriptionError
-        ? error : new SpeechTranscriptionError("network", true);
+      throw error instanceof WhatsAppMediaError ||
+        error instanceof SpeechTranscriptionError
+        ? error
+        : new SpeechTranscriptionError("network", true);
     }
   }
 
-  private async isStale(conversationId: string, messageId: string, eventTime: Date, database: Pick<Prisma.TransactionClient, "conversationMessage"> = prisma) {
-    return (await database.conversationMessage.findFirst({
-      where: {
-        conversationId, direction: "INBOUND", senderType: "CUSTOMER",
-        OR: [{ createdAt: { gt: eventTime } }, { createdAt: eventTime, id: { gt: messageId } }],
-      },
-      select: { id: true },
-    })) !== null;
+  private async isStale(
+    conversationId: string,
+    messageId: string,
+    eventTime: Date,
+    database: Pick<Prisma.TransactionClient, "conversationMessage"> = prisma,
+  ) {
+    return (
+      (await database.conversationMessage.findFirst({
+        where: {
+          conversationId,
+          direction: "INBOUND",
+          senderType: "CUSTOMER",
+          OR: [
+            { createdAt: { gt: eventTime } },
+            { createdAt: eventTime, id: { gt: messageId } },
+          ],
+        },
+        select: { id: true },
+      })) !== null
+    );
   }
-  private async persist<T>(conversationId: string, providerMessageId: string, operation: () => Promise<T>): Promise<T> {
+  private async persist<T>(
+    conversationId: string,
+    providerMessageId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
     try {
       return await operation();
     } catch (error) {
@@ -153,21 +336,49 @@ export class InboundWhatsAppAudioService {
       throw new InboundAudioPersistenceError(error);
     }
   }
-  private async complete(id: string, conversationId: string, text: string, provider: string, model: string, durationMs: number, messageId: string, eventTime: Date, providerMessageId:string) {
+  private async complete(
+    id: string,
+    conversationId: string,
+    text: string,
+    provider: string,
+    model: string,
+    durationMs: number,
+    messageId: string,
+    eventTime: Date,
+    providerMessageId: string,
+  ) {
     const duplicate = new Error("transcription-already-completed");
     try {
       return await prisma.$transaction(async (tx) => {
-        await lockInboundProviderIdentity(tx,providerMessageId);
-        if(!await canProcessConversation(tx,conversationId))return false;
+        await lockInboundProviderIdentity(tx, providerMessageId);
+        if (!(await canProcessConversation(tx, conversationId))) return false;
         const now = new Date();
         // Serialize completion against inbound and prior-turn state writes, then
         // recheck durable event order. Finishing a reply is not a newer message.
-        await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "whatsapp"."Conversation" WHERE "id" = ${conversationId} FOR UPDATE`);
+        await tx.$queryRaw(
+          Prisma.sql`SELECT "id" FROM "whatsapp"."Conversation" WHERE "id" = ${conversationId} FOR UPDATE`,
+        );
         if (await this.isStale(conversationId, messageId, eventTime, tx)) {
-          await tx.conversationMessage.updateMany({ where: { id, transcriptionStatus: "PENDING" }, data: { transcriptionStatus: "REJECTED", transcriptionFailureCode: "STALE_TRANSCRIPTION" } });
+          await tx.conversationMessage.updateMany({
+            where: { id, transcriptionStatus: "PENDING" },
+            data: {
+              transcriptionStatus: "REJECTED",
+              transcriptionFailureCode: "STALE_TRANSCRIPTION",
+            },
+          });
           return false;
         }
-        const updated = await tx.conversationMessage.updateMany({ where: { id, transcriptionStatus: "PENDING" }, data: { content: text, mediaDurationMs: durationMs, transcriptionProvider: provider, transcriptionModel: model, transcriptionStatus: "COMPLETED", transcriptionCompletedAt: now } });
+        const updated = await tx.conversationMessage.updateMany({
+          where: { id, transcriptionStatus: "PENDING" },
+          data: {
+            content: text,
+            mediaDurationMs: durationMs,
+            transcriptionProvider: provider,
+            transcriptionModel: model,
+            transcriptionStatus: "COMPLETED",
+            transcriptionCompletedAt: now,
+          },
+        });
         if (updated.count !== 1) throw duplicate;
         await recordProcessableInbound(tx, conversationId, now, {
           conversationAlreadyLocked: true,
@@ -191,8 +402,23 @@ export class InboundWhatsAppAudioService {
       throw new InboundAudioPersistenceError(error);
     }
   }
-  private reject(id: string, code: string, durationMs: number) { return prisma.conversationMessage.updateMany({ where: { id, transcriptionStatus: "PENDING" }, data: { transcriptionStatus: "REJECTED", transcriptionFailureCode: code, mediaDurationMs: Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : null } }); }
-  private fail(id: string, code: string) { return prisma.conversationMessage.updateMany({ where: { id, transcriptionStatus: "PENDING" }, data: { transcriptionStatus: "FAILED", transcriptionFailureCode: code } }); }
+  private reject(id: string, code: string, durationMs: number) {
+    return prisma.conversationMessage.updateMany({
+      where: { id, transcriptionStatus: "PENDING" },
+      data: {
+        transcriptionStatus: "REJECTED",
+        transcriptionFailureCode: code,
+        mediaDurationMs:
+          Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : null,
+      },
+    });
+  }
+  private fail(id: string, code: string) {
+    return prisma.conversationMessage.updateMany({
+      where: { id, transcriptionStatus: "PENDING" },
+      data: { transcriptionStatus: "FAILED", transcriptionFailureCode: code },
+    });
+  }
 }
 
 class InboundAudioPersistenceError extends Error {

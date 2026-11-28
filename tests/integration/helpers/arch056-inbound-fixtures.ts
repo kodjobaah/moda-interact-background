@@ -45,9 +45,8 @@ export async function createArch056RecoveryFixture(
         type: "RECOVERY",
         checkoutRecoveryId: recoveryId,
         controlRevision,
-        controlChangedAt: controlRevision === 0
-          ? null
-          : new Date("2026-10-31T00:00:00.000Z"),
+        controlChangedAt:
+          controlRevision === 0 ? null : new Date("2026-10-31T00:00:00.000Z"),
       },
     });
   } catch (error) {

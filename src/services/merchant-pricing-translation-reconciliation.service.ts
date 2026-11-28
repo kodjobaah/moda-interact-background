@@ -1,6 +1,9 @@
 import { Prisma } from "@prisma/client";
 import { Queue } from "bullmq";
-import { CommerceEnvironmentSchema, type CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
+import {
+  CommerceEnvironmentSchema,
+  type CommerceEnvironment,
+} from "@modainteract/moda-interact-shared/commerce/model";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import {
@@ -41,9 +44,18 @@ const logger = createLogger({
   environment: resolveDeploymentEnvironmentName(),
 });
 
-type ReconciliationQueue = Pick<Queue, "add" | "getJob"> & { close?: () => Promise<void> };
-type ReconciliationDatabase = Pick<typeof prisma, "$queryRaw" | "$executeRaw" | "$transaction">;
-type ProviderFactory = (options: { provider: string; model: string; apiKey: string }) => TranslationProvider;
+type ReconciliationQueue = Pick<Queue, "add" | "getJob"> & {
+  close?: () => Promise<void>;
+};
+type ReconciliationDatabase = Pick<
+  typeof prisma,
+  "$queryRaw" | "$executeRaw" | "$transaction"
+>;
+type ProviderFactory = (options: {
+  provider: string;
+  model: string;
+  apiKey: string;
+}) => TranslationProvider;
 
 type BatchRecoveryRow = {
   id: string;
@@ -81,29 +93,44 @@ export class MerchantPricingTranslationReconciliationService {
   private readonly database: ReconciliationDatabase;
   private readonly providerFactory: ProviderFactory;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
-  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
+  private readonly credentialResolverFactory: () =>
+    | TranslationProviderCredentialResolver
+    | Promise<TranslationProviderCredentialResolver>;
   private readonly runStateService: MerchantPricingTranslationRunStateService;
   private readonly batchAssemblyService: MerchantPricingTranslationBatchAssemblyService;
 
-  constructor(options: {
-    queue?: ReconciliationQueue;
-    database?: ReconciliationDatabase;
-    providerFactory?: ProviderFactory;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-    credentialResolverFactory?: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
-    runStateService?: MerchantPricingTranslationRunStateService;
-    batchAssemblyService?: MerchantPricingTranslationBatchAssemblyService;
-  } = {}) {
-    this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
-      connection: connectionRedis,
-    });
+  constructor(
+    options: {
+      queue?: ReconciliationQueue;
+      database?: ReconciliationDatabase;
+      providerFactory?: ProviderFactory;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+      credentialResolverFactory?: () =>
+        | TranslationProviderCredentialResolver
+        | Promise<TranslationProviderCredentialResolver>;
+      runStateService?: MerchantPricingTranslationRunStateService;
+      batchAssemblyService?: MerchantPricingTranslationBatchAssemblyService;
+    } = {},
+  ) {
+    this.queue =
+      options.queue ??
+      new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
+        connection: connectionRedis,
+      });
     this.database = options.database ?? prisma;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) =>
-      createOpenAITranslationProvider(providerOptions));
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
-    this.credentialResolverFactory = options.credentialResolverFactory ?? defaultCredentialResolver;
-    this.runStateService = options.runStateService ?? new MerchantPricingTranslationRunStateService(this.database);
-    this.batchAssemblyService = options.batchAssemblyService ?? new MerchantPricingTranslationBatchAssemblyService(this.database);
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.credentialResolverFactory =
+      options.credentialResolverFactory ?? defaultCredentialResolver;
+    this.runStateService =
+      options.runStateService ??
+      new MerchantPricingTranslationRunStateService(this.database);
+    this.batchAssemblyService =
+      options.batchAssemblyService ??
+      new MerchantPricingTranslationBatchAssemblyService(this.database);
   }
 
   async reconcile(
@@ -118,7 +145,9 @@ export class MerchantPricingTranslationReconciliationService {
       runsFailed: 0,
     };
 
-    const startedRuns = await this.database.$queryRaw<Array<{ id: string; shopifyPlanHandle: string }>>(Prisma.sql`
+    const startedRuns = await this.database.$queryRaw<
+      Array<{ id: string; shopifyPlanHandle: string }>
+    >(Prisma.sql`
       UPDATE "billing"."MerchantPricingTranslationRun"
       SET "status" = 'PROCESSING', "startedAt" = COALESCE("startedAt", NOW()), "updatedAt" = NOW()
       WHERE "id" IN (
@@ -139,7 +168,9 @@ export class MerchantPricingTranslationReconciliationService {
       });
     }
 
-    const processingRuns = await this.database.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    const processingRuns = await this.database.$queryRaw<
+      Array<{ id: string }>
+    >(Prisma.sql`
       SELECT "id"
       FROM "billing"."MerchantPricingTranslationRun"
       WHERE "status" = 'PROCESSING'
@@ -173,20 +204,41 @@ export class MerchantPricingTranslationReconciliationService {
       }
     }
 
-    const readyBatches = await this.loadRecoverableBatches("READY", snapshot.translationReconciliationPageSize, Prisma.sql`AND (b."nextSubmitAt" IS NULL OR b."nextSubmitAt" <= NOW())`);
-    for (const batch of readyBatches) result.repairedJobs += await this.ensureSubmitJob(batch.id);
+    const readyBatches = await this.loadRecoverableBatches(
+      "READY",
+      snapshot.translationReconciliationPageSize,
+      Prisma.sql`AND (b."nextSubmitAt" IS NULL OR b."nextSubmitAt" <= NOW())`,
+    );
+    for (const batch of readyBatches)
+      result.repairedJobs += await this.ensureSubmitJob(batch.id);
 
-    const duePollBatches = await this.loadRecoverableBatches("SUBMITTED", snapshot.translationReconciliationPageSize, Prisma.sql`AND (b."nextPollAt" IS NULL OR b."nextPollAt" <= NOW())`);
-    for (const batch of duePollBatches) result.repairedJobs += await this.ensurePollJob(batch);
+    const duePollBatches = await this.loadRecoverableBatches(
+      "SUBMITTED",
+      snapshot.translationReconciliationPageSize,
+      Prisma.sql`AND (b."nextPollAt" IS NULL OR b."nextPollAt" <= NOW())`,
+    );
+    for (const batch of duePollBatches)
+      result.repairedJobs += await this.ensurePollJob(batch);
 
-    const completedBatches = await this.loadRecoverableBatches("PROVIDER_COMPLETED", snapshot.translationReconciliationPageSize);
-    for (const batch of completedBatches) result.repairedJobs += await this.ensureResultsJob(batch.id);
+    const completedBatches = await this.loadRecoverableBatches(
+      "PROVIDER_COMPLETED",
+      snapshot.translationReconciliationPageSize,
+    );
+    for (const batch of completedBatches)
+      result.repairedJobs += await this.ensureResultsJob(batch.id);
 
-    const unknownBatches = await this.loadRecoverableBatches("SUBMISSION_UNKNOWN", snapshot.translationReconciliationPageSize);
+    const unknownBatches = await this.loadRecoverableBatches(
+      "SUBMISSION_UNKNOWN",
+      snapshot.translationReconciliationPageSize,
+    );
     for (const batch of unknownBatches) {
-      const correlation = await this.reconcileUnknownBatch(batch, snapshot.translationClaimTimeoutSeconds);
+      const correlation = await this.reconcileUnknownBatch(
+        batch,
+        snapshot.translationClaimTimeoutSeconds,
+      );
       if (correlation === "conflict") result.correlationConflicts += 1;
-      if (correlation === "completed") result.repairedJobs += await this.ensureResultsJob(batch.id);
+      if (correlation === "completed")
+        result.repairedJobs += await this.ensureResultsJob(batch.id);
       if (correlation === "poll") {
         result.repairedJobs += await this.ensurePollJob({
           id: batch.id,
@@ -195,7 +247,9 @@ export class MerchantPricingTranslationReconciliationService {
       }
     }
 
-    const finalRuns = await this.database.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    const finalRuns = await this.database.$queryRaw<
+      Array<{ id: string }>
+    >(Prisma.sql`
       SELECT "id"
       FROM "billing"."MerchantPricingTranslationRun"
       WHERE "status" = 'PROCESSING'
@@ -215,7 +269,9 @@ export class MerchantPricingTranslationReconciliationService {
     await this.queue.close?.();
   }
 
-  private async advanceRunState(runId: string): Promise<"PROCESSING" | "READY_TO_APPLY" | "FAILED"> {
+  private async advanceRunState(
+    runId: string,
+  ): Promise<"PROCESSING" | "READY_TO_APPLY" | "FAILED"> {
     const transition = await this.runStateService.advance(runId);
     if (transition.status === "FAILED") {
       logger.error("background.merchant_pricing_translation.run_failed", {
@@ -266,14 +322,19 @@ export class MerchantPricingTranslationReconciliationService {
     });
   }
 
-  private async ensurePollJob(batch: Pick<BatchRecoveryRow, "id" | "pollSequence">): Promise<number> {
+  private async ensurePollJob(
+    batch: Pick<BatchRecoveryRow, "id" | "pollSequence">,
+  ): Promise<number> {
     const job: MerchantPricingTranslationBatchPollJob = {
       schemaVersion: MERCHANT_PRICING_TRANSLATION_SCHEMA_VERSION,
       translationBatchId: batch.id,
       pollSequence: batch.pollSequence,
     };
     return ensureDeterministicTranslationQueueJob(this.queue, {
-      id: createMerchantPricingTranslationBatchPollJobId(batch.id, batch.pollSequence),
+      id: createMerchantPricingTranslationBatchPollJobId(
+        batch.id,
+        batch.pollSequence,
+      ),
       name: MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_POLL,
       data: job,
     });
@@ -295,14 +356,24 @@ export class MerchantPricingTranslationReconciliationService {
     batch: BatchRecoveryRow,
     claimTimeoutSeconds: number,
   ): Promise<"poll" | "completed" | "none" | "conflict" | "stale"> {
-    const environment = CommerceEnvironmentSchema.parse(batch.environment) as CommerceEnvironment;
-    const apiKey = await (await this.credentialResolverFactory()).resolve({
+    const environment = CommerceEnvironmentSchema.parse(
+      batch.environment,
+    ) as CommerceEnvironment;
+    const apiKey = await (
+      await this.credentialResolverFactory()
+    ).resolve({
       environment,
       provider: batch.provider,
     });
-    const provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
+    const provider = this.providerFactory({
+      provider: batch.provider,
+      model: batch.model,
+      apiKey,
+    });
     const submittedAfter = batch.submissionStartedAt
-      ? new Date(batch.submissionStartedAt.getTime() - claimTimeoutSeconds * 1000)
+      ? new Date(
+          batch.submissionStartedAt.getTime() - claimTimeoutSeconds * 1000,
+        )
       : undefined;
     const correlation = await provider.findBatchByCorrelation({
       logicalBatchId: batch.id,

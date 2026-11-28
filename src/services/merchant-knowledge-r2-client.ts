@@ -7,7 +7,10 @@ import {
 import type { MerchantKnowledgeR2Config } from "./merchant-knowledge-r2-config.js";
 
 export interface MerchantKnowledgeR2Client {
-  getObject(input: { bucket: string; key: string }): Promise<AsyncIterable<Uint8Array>>;
+  getObject(input: {
+    bucket: string;
+    key: string;
+  }): Promise<AsyncIterable<Uint8Array>>;
   deleteObject(input: { bucket: string; key: string }): Promise<void>;
 }
 
@@ -26,7 +29,9 @@ export function createMerchantKnowledgeR2Client(
 
   return {
     async getObject({ bucket, key }) {
-      const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      const response = await client.send(
+        new GetObjectCommand({ Bucket: bucket, Key: key }),
+      );
       if (!response.Body || !(Symbol.asyncIterator in Object(response.Body))) {
         throw new Error("R2_OBJECT_BODY_UNAVAILABLE");
       }

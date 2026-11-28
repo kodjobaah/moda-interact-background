@@ -48,7 +48,11 @@ class FakeJob {
 
 class FakeQueue {
   jobs = new Map<string, FakeJob>();
-  addCalls: Array<{ jobName: string; data: Candidate; opts: { jobId: string; delay: number } }> = [];
+  addCalls: Array<{
+    jobName: string;
+    data: Candidate;
+    opts: { jobId: string; delay: number };
+  }> = [];
 
   async add(
     jobName: string,
@@ -77,11 +81,13 @@ let queueOptions: Record<string, unknown> | null = null;
 const redisStore = new Map<string, string>();
 const redisZsets = new Map<string, Map<string, number>>();
 const redisMock = {
-  set: vi.fn(async (key: string, value: string, ...options: Array<string | number>) => {
-    if (options.includes("NX") && redisStore.has(key)) return null;
-    redisStore.set(key, value);
-    return "OK";
-  }),
+  set: vi.fn(
+    async (key: string, value: string, ...options: Array<string | number>) => {
+      if (options.includes("NX") && redisStore.has(key)) return null;
+      redisStore.set(key, value);
+      return "OK";
+    },
+  ),
   get: vi.fn(async (key: string) => redisStore.get(key) ?? null),
   del: vi.fn(async (...keys: string[]) => {
     let count = 0;
@@ -117,7 +123,7 @@ const prismaMock = {
     findUnique: vi.fn(async () => ({
       id: "shop_1",
       status: "ACTIVE",
-        platform: "SHOPIFY",
+      platform: "SHOPIFY",
       subscription: { status: "ACTIVE" },
       settings: { recoveryDelayMinutes: 45 },
     })),
@@ -151,13 +157,11 @@ vi.mock("../../../src/services/recovery-policy.service.js", () => ({
   },
 }));
 
-const serviceModule = await import(
-  "../../../src/services/pending-recovery-candidate.service.js"
-);
+const serviceModule =
+  await import("../../../src/services/pending-recovery-candidate.service.js");
 
-const domainModule = await import(
-  "../../../src/domain/pending-recovery-candidate.js"
-);
+const domainModule =
+  await import("../../../src/domain/pending-recovery-candidate.js");
 
 const facadeContext = {
   FakeJob,

@@ -45,7 +45,8 @@ export function mergeCandidateInternationalContext(
 
   return {
     languageTag: incoming?.languageTag ?? existing?.languageTag ?? null,
-    languageSource: incoming?.languageSource ?? existing?.languageSource ?? null,
+    languageSource:
+      incoming?.languageSource ?? existing?.languageSource ?? null,
     countryCode: incoming?.countryCode ?? existing?.countryCode ?? null,
     currencyCode: incoming?.currencyCode ?? existing?.currencyCode ?? null,
     timeZone: incoming?.timeZone ?? existing?.timeZone ?? null,

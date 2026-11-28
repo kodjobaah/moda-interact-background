@@ -142,7 +142,8 @@ export function startQueuePerformanceTelemetry({
     }
   }
   const interval = setInterval(() => {
-    for (const { queue, queueName } of resources) void sampleQueue(queueName, queue);
+    for (const { queue, queueName } of resources)
+      void sampleQueue(queueName, queue);
   }, sampleIntervalMs);
   interval.unref();
 
@@ -151,17 +152,21 @@ export function startQueuePerformanceTelemetry({
     if (closed) return;
     closed = true;
     clearInterval(interval);
-    await Promise.all(resources.map(async ({ events, queue, queueName }) => {
-      await Promise.allSettled([events.close(), queue.close()]);
-      snapshots.delete(queueName);
-      eligibleAtByQueue.delete(queueName);
-    }));
+    await Promise.all(
+      resources.map(async ({ events, queue, queueName }) => {
+        await Promise.allSettled([events.close(), queue.close()]);
+        snapshots.delete(queueName);
+        eligibleAtByQueue.delete(queueName);
+      }),
+    );
   };
 }
 
 function createInstruments(): QueuePerformanceInstruments {
   try {
-    const meter = metrics.getMeter("moda-interact-background.queue-performance");
+    const meter = metrics.getMeter(
+      "moda-interact-background.queue-performance",
+    );
     const jobs = meter.createObservableGauge("moda.background.queue.jobs", {
       description: "Current BullMQ jobs by operational state",
       unit: "1",
@@ -175,7 +180,12 @@ function createInstruments(): QueuePerformanceInstruments {
     );
     jobs.addCallback((result) => {
       for (const [queueName, snapshot] of snapshots) {
-        for (const state of ["waiting", "active", "delayed", "failed"] as const) {
+        for (const state of [
+          "waiting",
+          "active",
+          "delayed",
+          "failed",
+        ] as const) {
           result.observe(snapshot[state], {
             "bullmq.queue.name": queueName,
             "bullmq.job.state": state,

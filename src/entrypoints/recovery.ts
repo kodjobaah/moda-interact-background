@@ -12,10 +12,14 @@ import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lea
 import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 import { checkoutRecoveryExpiryService } from "../services/checkout-recovery-expiry.service.js";
-import { WooCouponDispatcherService, WOO_COUPON_SYNC_QUEUE_NAME } from "../services/woo-coupon-dispatcher.service.js";
+import {
+  WooCouponDispatcherService,
+  WOO_COUPON_SYNC_QUEUE_NAME,
+} from "../services/woo-coupon-dispatcher.service.js";
 
 const wooDispatchLogger = createLogger({
-  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
 });
 
 void startReadyWorkerProcess({
@@ -41,16 +45,23 @@ void startReadyWorkerProcess({
       import("../services/recovery-capacity-resume.service.js"),
       import("../services/recovery-outreach-follow-up.service.js"),
     ]);
-    const { createWooRecoveryRuntime } = await import("../services/woocommerce-recovery/woo-recovery-composition.js");
+    const { createWooRecoveryRuntime } =
+      await import("../services/woocommerce-recovery/woo-recovery-composition.js");
     const wooRecovery = createWooRecoveryRuntime("moda-recovery-worker");
-    const pendingRecoveryCandidateWorker =
-      createPendingRecoveryCandidateWorker(wooRecovery.orchestrator);
+    const pendingRecoveryCandidateWorker = createPendingRecoveryCandidateWorker(
+      wooRecovery.orchestrator,
+    );
     const recoveryCapacityResumeWorker = createRecoveryCapacityResumeWorker();
     const recoveryOutreachFollowUpWorker =
       createRecoveryOutreachFollowUpWorker();
     const shopifyDiscountSyncWorker = createShopifyDiscountSyncWorker();
-    const wooCouponSyncWorker = createWooCouponSyncWorker(undefined, (await readWooCouponPolicy()).workerConcurrency);
-    const wooCouponSyncQueue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, { connection: connectionRedis });
+    const wooCouponSyncWorker = createWooCouponSyncWorker(
+      undefined,
+      (await readWooCouponPolicy()).workerConcurrency,
+    );
+    const wooCouponSyncQueue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, {
+      connection: connectionRedis,
+    });
     const stopQueueConcurrencyController =
       await startQueueConcurrencyController({
         config: backgroundRuntimeConfigService,
@@ -58,11 +69,14 @@ void startReadyWorkerProcess({
       });
 
     // ARCH-049: independent durable ShopBrand JSONB sweep; no BullMQ wake required.
-    const { startShopBrandMediaReconciler } = await import("../services/shop-brand-media-orchestration/runner.js");
+    const { startShopBrandMediaReconciler } =
+      await import("../services/shop-brand-media-orchestration/runner.js");
     const stopShopBrandMediaReconciler = await startShopBrandMediaReconciler();
-    const { startShopifyShopNameSync } = await import("../services/shopify-shop-name/runner.js");
+    const { startShopifyShopNameSync } =
+      await import("../services/shopify-shop-name/runner.js");
     const stopShopifyShopNameSync = await startShopifyShopNameSync();
-    const { startShopifyBrandSourceSync } = await import("../services/shop-brand-media-shopify/runner.js");
+    const { startShopifyBrandSourceSync } =
+      await import("../services/shop-brand-media-shopify/runner.js");
     const stopShopifyBrandSourceSync = await startShopifyBrandSourceSync();
 
     const stopRepairScheduler = await startDynamicLeasedScheduler({
@@ -78,7 +92,8 @@ void startReadyWorkerProcess({
       },
       onError: (error) => {
         wooDispatchLogger.error("recovery.capacity_repair.failed", {
-          errorMessage: error instanceof Error ? error.message : String(error), error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
         });
       },
     });
@@ -93,7 +108,8 @@ void startReadyWorkerProcess({
       },
       onError: (error) => {
         wooDispatchLogger.error("recovery.expiry.failed", {
-          errorMessage: error instanceof Error ? error.message : String(error), error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
         });
       },
     });
@@ -109,7 +125,11 @@ void startReadyWorkerProcess({
       run: async () => {
         // The dispatcher is re-created with current policy on every lease cycle.
         const cycle = await readWooCouponPolicy();
-        await new WooCouponDispatcherService(prisma, wooCouponSyncQueue, cycle).dispatch(cycle.dispatchBatchSize);
+        await new WooCouponDispatcherService(
+          prisma,
+          wooCouponSyncQueue,
+          cycle,
+        ).dispatch(cycle.dispatchBatchSize);
       },
       onError: (error) => {
         wooDispatchLogger.error("woo.coupon_sync.dispatch_failed", {
@@ -120,7 +140,8 @@ void startReadyWorkerProcess({
       },
     });
 
-    const { createRecoveryDeliveryRetryWorker } = await import("../workers/recovery-delivery-retry.worker.js");
+    const { createRecoveryDeliveryRetryWorker } =
+      await import("../workers/recovery-delivery-retry.worker.js");
     const recoveryDeliveryRetryWorker = createRecoveryDeliveryRetryWorker();
 
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
@@ -145,31 +166,47 @@ void startReadyWorkerProcess({
       ],
       // startWorkerProcess closes workers first. Then stop producers before
       // closing their queue, and only then disconnect shared Redis/Postgres.
-      closeResources: [async () => {
-        const stopFunctions = [
-          stopQueueConcurrencyController,
-          wooRecovery.close,
-          stopRepairScheduler,
-          stopExpiryScheduler,
-          stopWooCouponDispatcher,
-          stopShopBrandMediaReconciler,
-          stopShopifyShopNameSync,
-          stopShopifyBrandSourceSync,
-          closeWorkerObservability,
-          () => backgroundRuntimeConfigService.close(),
-          () => recoveryCapacityResumeService.close(),
-          () => recoveryOutreachFollowUpService.close(),
-          closeQueuePerformanceTelemetry,
-        ];
-        const stopResults = await Promise.allSettled(stopFunctions.map((stop) => stop()));
-        const queueResults = await Promise.allSettled([wooCouponSyncQueue.close()]);
-        const connectionResults = await Promise.allSettled(closeWorkerResources.map((close) => close()));
-        const results: PromiseSettledResult<unknown>[] = [
-          ...stopResults, ...queueResults, ...connectionResults,
-        ];
-        const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-        if (failures.length > 0) throw new AggregateError(failures, "Recovery resources failed to close");
-      }],
+      closeResources: [
+        async () => {
+          const stopFunctions = [
+            stopQueueConcurrencyController,
+            wooRecovery.close,
+            stopRepairScheduler,
+            stopExpiryScheduler,
+            stopWooCouponDispatcher,
+            stopShopBrandMediaReconciler,
+            stopShopifyShopNameSync,
+            stopShopifyBrandSourceSync,
+            closeWorkerObservability,
+            () => backgroundRuntimeConfigService.close(),
+            () => recoveryCapacityResumeService.close(),
+            () => recoveryOutreachFollowUpService.close(),
+            closeQueuePerformanceTelemetry,
+          ];
+          const stopResults = await Promise.allSettled(
+            stopFunctions.map((stop) => stop()),
+          );
+          const queueResults = await Promise.allSettled([
+            wooCouponSyncQueue.close(),
+          ]);
+          const connectionResults = await Promise.allSettled(
+            closeWorkerResources.map((close) => close()),
+          );
+          const results: PromiseSettledResult<unknown>[] = [
+            ...stopResults,
+            ...queueResults,
+            ...connectionResults,
+          ];
+          const failures = results.flatMap((result) =>
+            result.status === "rejected" ? [result.reason] : [],
+          );
+          if (failures.length > 0)
+            throw new AggregateError(
+              failures,
+              "Recovery resources failed to close",
+            );
+        },
+      ],
     };
   },
 }).catch(reportReadinessFailure);

@@ -60,9 +60,7 @@ export interface NormalizedAbandonedCheckoutCustomer {
 }
 
 export type ShopifyConsentReceiptAttribute =
-  | { kind: "MISSING" }
-  | { kind: "VALUE"; value: string }
-  | { kind: "INVALID" };
+  { kind: "MISSING" } | { kind: "VALUE"; value: string } | { kind: "INVALID" };
 
 export interface NormalizedAbandonedCheckoutLineItem {
   productId: string | null;

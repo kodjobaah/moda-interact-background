@@ -13,13 +13,15 @@ import {
 describe("initial outreach credit evidence", () => {
   it("accepts only the stored sequence-one INITIAL identity for the supplied Shop and recovery", async () => {
     const tx = transactionForAttempt();
-    await expect(readInitialAttempt(tx as never, input)).resolves.toMatchObject({
-      id: input.outreachAttemptId,
-      checkoutRecoveryId: input.recoveryId,
-      sequence: 1,
-      trigger: "INITIAL",
-      checkoutRecovery: { shopId: input.shopId },
-    });
+    await expect(readInitialAttempt(tx as never, input)).resolves.toMatchObject(
+      {
+        id: input.outreachAttemptId,
+        checkoutRecoveryId: input.recoveryId,
+        sequence: 1,
+        trigger: "INITIAL",
+        checkoutRecovery: { shopId: input.shopId },
+      },
+    );
   });
 
   it("rejects contradictory Shop identity rather than inferring a replacement", async () => {
@@ -27,11 +29,16 @@ describe("initial outreach credit evidence", () => {
       recoveryOutreachAttempt: {
         findUnique: async () => ({
           ...attemptEvidence(),
-          checkoutRecovery: { ...attemptEvidence().checkoutRecovery, shopId: "another-shop" },
+          checkoutRecovery: {
+            ...attemptEvidence().checkoutRecovery,
+            shopId: "another-shop",
+          },
         }),
       },
     });
-    await expect(readInitialAttempt(tx as never, input)).rejects.toThrow("lineage");
+    await expect(readInitialAttempt(tx as never, input)).rejects.toThrow(
+      "lineage",
+    );
   });
 
   it("rejects a linked automated message on a different conversation of the same recovery", async () => {
@@ -58,30 +65,47 @@ describe("initial outreach credit evidence", () => {
       },
     };
 
-    await expect(validateInitialMessageIdentity(
-      tx as never,
-      input,
-      attempt,
-      message as never,
-      false,
-    )).rejects.toThrow("lineage");
+    await expect(
+      validateInitialMessageIdentity(
+        tx as never,
+        input,
+        attempt,
+        message as never,
+        false,
+      ),
+    ).rejects.toThrow("lineage");
   });
 
   it("requires a null-message attempt to have no sent, failure, link, message or usage evidence", async () => {
     const tx = transactionForAttempt({
-      conversationMessage: { findUnique: async () => null, findFirst: async () => null },
+      conversationMessage: {
+        findUnique: async () => null,
+        findFirst: async () => null,
+      },
       usageEvent: { findUnique: async () => null, findMany: async () => [] },
     });
-    await expect(assertNoInitialMessageEvidence(tx as never, {
-      ...input,
-      outboundMessageId: null,
-    }, attemptEvidence())).resolves.toBeUndefined();
+    await expect(
+      assertNoInitialMessageEvidence(
+        tx as never,
+        {
+          ...input,
+          outboundMessageId: null,
+        },
+        attemptEvidence(),
+      ),
+    ).resolves.toBeUndefined();
 
     const sentAttempt = { ...attemptEvidence(), sentAt: new Date() };
-    await expect(assertNoInitialMessageEvidence(tx as never, {
-      ...input,
-      outboundMessageId: null,
-    }, sentAttempt)).rejects.toThrow("lineage");
+    await expect(
+      assertNoInitialMessageEvidence(
+        tx as never,
+        {
+          ...input,
+          outboundMessageId: null,
+        },
+        sentAttempt,
+      ),
+    ).rejects.toThrow("lineage");
   });
 
   it("rejects an unlinked outbound automated message in the recovery conversation", async () => {
@@ -93,20 +117,34 @@ describe("initial outreach credit evidence", () => {
       usageEvent: { findUnique: async () => null, findMany: async () => [] },
     });
 
-    await expect(assertNoInitialMessageEvidence(tx as never, {
-      ...input,
-      outboundMessageId: null,
-    }, attemptEvidence())).rejects.toThrow("discoverable message, command or automated usage event");
+    await expect(
+      assertNoInitialMessageEvidence(
+        tx as never,
+        {
+          ...input,
+          outboundMessageId: null,
+        },
+        attemptEvidence(),
+      ),
+    ).rejects.toThrow("discoverable message, command or automated usage event");
   });
 
   it("rejects a merchant command linked to a null-message initial attempt", async () => {
     const tx = transactionForAttempt({
-      merchantConversationSendCommand: { findFirst: async () => ({ id: "command-1" }) },
+      merchantConversationSendCommand: {
+        findFirst: async () => ({ id: "command-1" }),
+      },
     });
 
-    await expect(assertNoInitialMessageEvidence(tx as never, {
-      ...input,
-      outboundMessageId: null,
-    }, attemptEvidence())).rejects.toThrow("discoverable message, command or automated usage event");
+    await expect(
+      assertNoInitialMessageEvidence(
+        tx as never,
+        {
+          ...input,
+          outboundMessageId: null,
+        },
+        attemptEvidence(),
+      ),
+    ).rejects.toThrow("discoverable message, command or automated usage event");
   });
 });

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { LLMock } from "@copilotkit/aimock";
-import type { CommerceModelInvoker, ModelRequest } from "@modainteract/moda-interact-shared/commerce/runner";
+import type {
+  CommerceModelInvoker,
+  ModelRequest,
+} from "@modainteract/moda-interact-shared/commerce/runner";
 import { runInitialOutreachOfferAgent } from "../../src/agents/initial-outreach-offer.agent.js";
 import { InitialOutreachAgentContextSchema } from "../../src/agents/initial-outreach-offer.types.js";
 import type { OutreachMcpToolDescriptor } from "../../src/services/recovery-offers/recovery-outreach-mcp-selector.service.js";
@@ -52,7 +55,11 @@ const details = {
     combination: {
       discountClasses: ["PRODUCT" as const],
       shopifyPlus: null,
-      combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true },
+      combinesWith: {
+        orderDiscounts: true,
+        productDiscounts: true,
+        shippingDiscounts: true,
+      },
       discountTags: [],
       allowedSameLineProductTags: [],
     },
@@ -64,12 +71,25 @@ const tools: OutreachMcpToolDescriptor[] = [
   {
     name: "commerce_get_discount_options",
     description: "List authorised discounts",
-    inputSchema: { type: "object", properties: { limit: { type: "integer" }, cursor: { type: ["string", "null"] } }, required: ["limit", "cursor"], additionalProperties: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "integer" },
+        cursor: { type: ["string", "null"] },
+      },
+      required: ["limit", "cursor"],
+      additionalProperties: false,
+    },
   },
   {
     name: "commerce_get_discount_details",
     description: "Read source conditions for one discount",
-    inputSchema: { type: "object", properties: { offerId: { type: "string" } }, required: ["offerId"], additionalProperties: false },
+    inputSchema: {
+      type: "object",
+      properties: { offerId: { type: "string" } },
+      required: ["offerId"],
+      additionalProperties: false,
+    },
   },
 ];
 
@@ -88,18 +108,20 @@ function context() {
       totalMinor: 9_600,
       fingerprint: "b".repeat(64),
       generation: 3,
-      items: [{
-        lineKey: "line-0001",
-        productId: "product-aimock",
-        variantId: "variant-aimock",
-        categoryIds: null,
-        collectionIds: null,
-        isSaleItem: false,
-        title: "Basket item",
-        category: null,
-        quantity: 1,
-        lineTotalMinor: 8_000,
-      }],
+      items: [
+        {
+          lineKey: "line-0001",
+          productId: "product-aimock",
+          variantId: "variant-aimock",
+          categoryIds: null,
+          collectionIds: null,
+          isSaleItem: false,
+          title: "Basket item",
+          category: null,
+          quantity: 1,
+          lineTotalMinor: 8_000,
+        },
+      ],
     },
     priceReconciliation: {
       shopId: "shop-aimock",
@@ -111,20 +133,22 @@ function context() {
       completeness: "COMPLETE",
       reasonCodes: [],
       currentMerchandiseSubtotal: { amountDecimal: "80.00", currency: "GBP" },
-      lines: [{
-        lineKey: "line-0001",
-        productId: "product-aimock",
-        variantId: "variant-aimock",
-        quantity: 1,
-        checkoutUnitPrice: "80.00",
-        checkoutCurrency: "GBP",
-        catalogueUnitPrice: "80.00",
-        catalogueCurrency: "GBP",
-        catalogueObservedAt: "2026-10-31T12:00:00.000Z",
-        catalogueComparison: "EQUAL",
-        checkoutPriceChange: "UNVERIFIABLE",
-        reasonCodes: [],
-      }],
+      lines: [
+        {
+          lineKey: "line-0001",
+          productId: "product-aimock",
+          variantId: "variant-aimock",
+          quantity: 1,
+          checkoutUnitPrice: "80.00",
+          checkoutCurrency: "GBP",
+          catalogueUnitPrice: "80.00",
+          catalogueCurrency: "GBP",
+          catalogueObservedAt: "2026-10-31T12:00:00.000Z",
+          catalogueComparison: "EQUAL",
+          checkoutPriceChange: "UNVERIFIABLE",
+          reasonCodes: [],
+        },
+      ],
     },
     platformInstructions: "Use source evidence only.",
     merchantInstructions: null,
@@ -137,7 +161,10 @@ describe("initial outreach offer agent with local Aimock", () => {
   it("routes real model/tool/model turns through loopback and returns the source-validated offer", async () => {
     const mock = new LLMock({ port: 0 });
     const timeline: string[] = [];
-    const selectorCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const selectorCalls: Array<{
+      name: string;
+      args: Record<string, unknown>;
+    }> = [];
     await mock.start();
     const endpoint = new URL(mock.url);
     expect(endpoint.protocol).toBe("http:");
@@ -146,53 +173,99 @@ describe("initial outreach offer agent with local Aimock", () => {
     const modelName = "moda/initial-outreach-aimock";
     mock.on({ model: modelName, sequenceIndex: 0 }, () => {
       timeline.push("model");
-      return { toolCalls: [{ name: "commerce_get_discount_options", arguments: { limit: 10, cursor: null } }] };
+      return {
+        toolCalls: [
+          {
+            name: "commerce_get_discount_options",
+            arguments: { limit: 10, cursor: null },
+          },
+        ],
+      };
     });
     mock.on({ model: modelName, sequenceIndex: 1 }, () => {
       timeline.push("model");
-      return { toolCalls: [{ name: "commerce_get_discount_details", arguments: { offerId: offer.offerId } }] };
+      return {
+        toolCalls: [
+          {
+            name: "commerce_get_discount_details",
+            arguments: { offerId: offer.offerId },
+          },
+        ],
+      };
     });
     mock.on({ model: modelName, sequenceIndex: 2 }, () => {
       timeline.push("model");
-      return { toolCalls: [{ name: "submitInitialOutreachOffer", arguments: { kind: "CHECKOUT_DISCOUNT", offerIds: [offer.offerId] } }] };
+      return {
+        toolCalls: [
+          {
+            name: "submitInitialOutreachOffer",
+            arguments: { kind: "CHECKOUT_DISCOUNT", offerIds: [offer.offerId] },
+          },
+        ],
+      };
     });
 
     const modelInvoker: CommerceModelInvoker = {
       async invoke(request: ModelRequest, signal: AbortSignal) {
         const response = await fetch(`${endpoint.origin}/v1/chat/completions`, {
           method: "POST",
-          headers: { authorization: "Bearer test-only-local-aimock", "content-type": "application/json" },
+          headers: {
+            authorization: "Bearer test-only-local-aimock",
+            "content-type": "application/json",
+          },
           body: JSON.stringify({
             model: modelName,
             messages: [
               { role: "system", content: request.instructions.join("\n") },
-              { role: "user", content: JSON.stringify({
-                context: request.context, history: request.history, messages: request.messages,
-              }) },
+              {
+                role: "user",
+                content: JSON.stringify({
+                  context: request.context,
+                  history: request.history,
+                  messages: request.messages,
+                }),
+              },
             ],
             tools: request.tools.map((tool) => ({
-              type: "function", function: { name: tool.name, description: tool.description,
-                parameters: tool.inputSchema },
+              type: "function",
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.inputSchema,
+              },
             })),
             max_tokens: request.maxOutputTokens,
             stream: false,
           }),
           signal,
         });
-        if (!response.ok) throw new Error(`Local Aimock returned HTTP ${response.status}`);
-        const body = await response.json() as {
-          choices?: Array<{ message?: { tool_calls?: Array<{
-            function?: { name?: string; arguments?: string };
-          }> } }>;
+        if (!response.ok)
+          throw new Error(`Local Aimock returned HTTP ${response.status}`);
+        const body = (await response.json()) as {
+          choices?: Array<{
+            message?: {
+              tool_calls?: Array<{
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+          }>;
           usage?: { completion_tokens?: number };
         };
         const calls = body.choices?.[0]?.message?.tool_calls ?? [];
-        if (calls.length !== 1 || !calls[0]?.function?.name || !calls[0].function.arguments) {
+        if (
+          calls.length !== 1 ||
+          !calls[0]?.function?.name ||
+          !calls[0].function.arguments
+        ) {
           throw new Error("Local Aimock did not produce exactly one tool call");
         }
         return {
-          calls: [{ name: calls[0].function.name,
-            arguments: JSON.parse(calls[0].function.arguments) as unknown }],
+          calls: [
+            {
+              name: calls[0].function.name,
+              arguments: JSON.parse(calls[0].function.arguments) as unknown,
+            },
+          ],
           outputTokens: body.usage?.completion_tokens ?? 0,
         };
       },
@@ -202,29 +275,53 @@ describe("initial outreach offer agent with local Aimock", () => {
       const result = await runInitialOutreachOfferAgent(context(), {
         signal: new AbortController().signal,
         modelInvoker,
-        createSelector: () => ({
-          async connect() {},
-          async tools() { return tools; },
-          async call(name: string, args: Record<string, unknown>) {
-            timeline.push(`tool:${name}`);
-            selectorCalls.push({ name, args });
-            if (name === "commerce_get_discount_options") {
-              return { contractVersion: "commerce.v1", status: "OK", data: {
-                mode: "AI_BEST_APPLICABLE", offers: [offer], cursor: null, truncated: false,
-              }, renderedText: "Source options." };
-            }
-            if (name === "commerce_get_discount_details") {
-              return { contractVersion: "commerce.v1", status: "OK", data: { details }, renderedText: "Source details." };
-            }
-            throw new Error("Unexpected MCP tool");
-          },
-          async close() {},
-        } as never),
-        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+        createSelector: () =>
+          ({
+            async connect() {},
+            async tools() {
+              return tools;
+            },
+            async call(name: string, args: Record<string, unknown>) {
+              timeline.push(`tool:${name}`);
+              selectorCalls.push({ name, args });
+              if (name === "commerce_get_discount_options") {
+                return {
+                  contractVersion: "commerce.v1",
+                  status: "OK",
+                  data: {
+                    mode: "AI_BEST_APPLICABLE",
+                    offers: [offer],
+                    cursor: null,
+                    truncated: false,
+                  },
+                  renderedText: "Source options.",
+                };
+              }
+              if (name === "commerce_get_discount_details") {
+                return {
+                  contractVersion: "commerce.v1",
+                  status: "OK",
+                  data: { details },
+                  renderedText: "Source details.",
+                };
+              }
+              throw new Error("Unexpected MCP tool");
+            },
+            async close() {},
+          }) as never,
+        logger: {
+          info: () => undefined,
+          warn: () => undefined,
+          error: () => undefined,
+        },
       });
 
-      const requests = mock.getRequests().filter((entry) =>
-        entry.method === "POST" && entry.path.endsWith("/chat/completions"));
+      const requests = mock
+        .getRequests()
+        .filter(
+          (entry) =>
+            entry.method === "POST" && entry.path.endsWith("/chat/completions"),
+        );
       expect(requests).toHaveLength(3);
       expect(timeline).toEqual([
         "model",
@@ -244,8 +341,23 @@ describe("initial outreach offer agent with local Aimock", () => {
       }
       expect(result).toMatchObject({
         kind: "CHECKOUT_DISCOUNT",
-        offerSet: { offers: [{ offerId: offer.offerId, providerDiscountId: details.providerDiscountId, code: offer.code }] },
-        members: [{ eligibility: { verdict: "SUPPORTED", eligibleLineKeys: ["line-0001"] } }],
+        offerSet: {
+          offers: [
+            {
+              offerId: offer.offerId,
+              providerDiscountId: details.providerDiscountId,
+              code: offer.code,
+            },
+          ],
+        },
+        members: [
+          {
+            eligibility: {
+              verdict: "SUPPORTED",
+              eligibleLineKeys: ["line-0001"],
+            },
+          },
+        ],
         generation: 3,
         fingerprint: "b".repeat(64),
       });

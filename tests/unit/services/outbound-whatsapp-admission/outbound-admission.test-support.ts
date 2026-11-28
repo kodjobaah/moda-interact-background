@@ -28,7 +28,11 @@ export function admissionHarness({
   postContractPolicy = null,
 }: {
   policy?: Record<string, unknown>;
-  usageRows?: Array<{ sourceType: string; quantity: number; sourceId?: string }>;
+  usageRows?: Array<{
+    sourceType: string;
+    quantity: number;
+    sourceId?: string;
+  }>;
   conversationMessages?: Array<{ id: string; conversationId: string }>;
   existing?: { sourceId: string } | null;
   provider?: Record<string, unknown>;
@@ -44,46 +48,70 @@ export function admissionHarness({
   durableReservation?: Record<string, unknown> | null;
   postContractPolicy?: Record<string, unknown> | null;
 } = {}) {
-  const messages = new Map<string, { id: string; content: string; status: string }>();
+  const messages = new Map<
+    string,
+    { id: string; content: string; status: string }
+  >();
   const usage = [...usageRows];
   let messageNumber = 0;
-  const allowanceBlock={id:"allowance-1",conversationId:"conversation-1",shopId:"shop-1",ordinal:0,state:"ACTIVE",fundingKind:"INITIAL",hardMessageLimit:20,terminalReservedSlots:1};
+  const allowanceBlock = {
+    id: "allowance-1",
+    conversationId: "conversation-1",
+    shopId: "shop-1",
+    ordinal: 0,
+    state: "ACTIVE",
+    fundingKind: "INITIAL",
+    hardMessageLimit: 20,
+    terminalReservedSlots: 1,
+  };
   const transaction = {
-    conversationAllowanceBlock:{findFirst:vi.fn(async()=>allowanceBlock),findFirstOrThrow:vi.fn(async()=>allowanceBlock),findUniqueOrThrow:vi.fn(async()=>allowanceBlock)},
+    conversationAllowanceBlock: {
+      findFirst: vi.fn(async () => allowanceBlock),
+      findFirstOrThrow: vi.fn(async () => allowanceBlock),
+      findUniqueOrThrow: vi.fn(async () => allowanceBlock),
+    },
     usageEvent: {
       findUnique: vi.fn().mockResolvedValue(existing),
-      aggregate:vi.fn(async()=>({_sum:{quantity:usage.reduce((sum,row)=>sum+row.quantity,0)}})),
-      groupBy: vi.fn().mockImplementation(
-        async ({ where }: { where?: { sourceId?: { in: string[] } } }) =>
-          [
-            ...usage
-              .filter(
-                (row) =>
-                  !row.sourceId ||
-                  !where?.sourceId ||
-                  where.sourceId.in.includes(row.sourceId),
-              )
-              .reduce(
-                (totals, row) =>
-                  totals.set(
-                    row.sourceType,
-                    (totals.get(row.sourceType) ?? 0) + row.quantity,
-                  ),
-                new Map<string, number>(),
-              ),
-          ].map(([sourceType, quantity]) => ({
-            sourceType,
-            _sum: { quantity },
-          })),
-      ),
-      create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
-        usage.push({
-          sourceType: String(data.sourceType),
-          quantity: Number(data.quantity),
-          sourceId: String(data.sourceId),
-        });
-        return { id: `usage-${usage.length}` };
-      }),
+      aggregate: vi.fn(async () => ({
+        _sum: { quantity: usage.reduce((sum, row) => sum + row.quantity, 0) },
+      })),
+      groupBy: vi
+        .fn()
+        .mockImplementation(
+          async ({ where }: { where?: { sourceId?: { in: string[] } } }) =>
+            [
+              ...usage
+                .filter(
+                  (row) =>
+                    !row.sourceId ||
+                    !where?.sourceId ||
+                    where.sourceId.in.includes(row.sourceId),
+                )
+                .reduce(
+                  (totals, row) =>
+                    totals.set(
+                      row.sourceType,
+                      (totals.get(row.sourceType) ?? 0) + row.quantity,
+                    ),
+                  new Map<string, number>(),
+                ),
+            ].map(([sourceType, quantity]) => ({
+              sourceType,
+              _sum: { quantity },
+            })),
+        ),
+      create: vi
+        .fn()
+        .mockImplementation(
+          async ({ data }: { data: Record<string, unknown> }) => {
+            usage.push({
+              sourceType: String(data.sourceType),
+              quantity: Number(data.quantity),
+              sourceId: String(data.sourceId),
+            });
+            return { id: `usage-${usage.length}` };
+          },
+        ),
       deleteMany: vi.fn(),
     },
     usageReservation: {
@@ -103,69 +131,118 @@ export function admissionHarness({
       update: vi.fn(),
     },
     conversationMessage: {
-      findMany: vi.fn().mockImplementation(
-        async ({ where }: { where: { conversationId: string } }) =>
-          conversationMessages
-            .filter((message) => message.conversationId === where.conversationId)
-            .map(({ id }) => ({ id })),
-      ),
-      findUnique: vi.fn().mockImplementation(async ({ where }: { where: { id: string } }) => ({
-        id: where.id,
-        conversationId: "conversation-1",
-        status: "PENDING",
-        sentAt: null,
-        providerDispatchKey: null,
-        providerDispatchAdmittedAt: null,
-        content: messages.get(where.id)?.content ?? "",
-        senderType: "AGENT",
-      })),
-      create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
-        const message = {
-          id: `message-${++messageNumber}`,
-          content: String(data.content),
-          status: String(data.status),
-        };
-        messages.set(message.id, message);
-        conversationMessages.push({
-          id: message.id,
-          conversationId: String(data.conversationId),
-        });
-        return message;
-      }),
-      update: vi.fn().mockImplementation(
-        async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
-          const message = messages.get(where.id);
-          if (message) Object.assign(message, data);
-          return message;
-        },
-      ),
+      findMany: vi
+        .fn()
+        .mockImplementation(
+          async ({ where }: { where: { conversationId: string } }) =>
+            conversationMessages
+              .filter(
+                (message) => message.conversationId === where.conversationId,
+              )
+              .map(({ id }) => ({ id })),
+        ),
+      findUnique: vi
+        .fn()
+        .mockImplementation(async ({ where }: { where: { id: string } }) => ({
+          id: where.id,
+          conversationId: "conversation-1",
+          status: "PENDING",
+          sentAt: null,
+          providerDispatchKey: null,
+          providerDispatchAdmittedAt: null,
+          content: messages.get(where.id)?.content ?? "",
+          senderType: "AGENT",
+        })),
+      create: vi
+        .fn()
+        .mockImplementation(
+          async ({ data }: { data: Record<string, unknown> }) => {
+            const message = {
+              id: `message-${++messageNumber}`,
+              content: String(data.content),
+              status: String(data.status),
+            };
+            messages.set(message.id, message);
+            conversationMessages.push({
+              id: message.id,
+              conversationId: String(data.conversationId),
+            });
+            return message;
+          },
+        ),
+      update: vi
+        .fn()
+        .mockImplementation(
+          async ({
+            where,
+            data,
+          }: {
+            where: { id: string };
+            data: Record<string, unknown>;
+          }) => {
+            const message = messages.get(where.id);
+            if (message) Object.assign(message, data);
+            return message;
+          },
+        ),
     },
   };
-  const queryRawUnsafe = vi.fn(async (statement: string, ...parameters: unknown[]): Promise<Array<Record<string, unknown>>> => {
-    if (statement.includes('FROM "whatsapp"."Conversation" c') && statement.includes('JOIN "commerce"."CheckoutRecovery" r'))
-      return recoveryLinked ? [{ id: "conversation-1", shopId: "shop-1", recoveryId: "recovery-1",
-        checkoutToken: "checkout-1", recoveryStatus, mode: "AI", revision: 0, inboundVersion: 0, lastInboundAt: null }] : [];
-    if (statement.includes('FROM "commerce"."Shop"') && statement.includes('FOR UPDATE'))
-      return [{ id: "shop-1", status: "ACTIVE" }];
-    if (statement.includes('FROM "whatsapp"."Conversation"') && statement.includes('FOR UPDATE'))
-      return [{ id: "conversation-1", controlRevision: 0 }];
-    if (statement.includes('FROM "whatsapp"."ConversationMessage"'))
-      return [{
-        status: "PENDING",
-        content: messages.get(String(parameters[0]))?.content ?? "",
-        providerDispatchKey: null,
-        providerDispatchAdmittedAt: null,
-      }];
-    if (statement.includes('UPDATE "whatsapp"."ConversationMessage"'))
-      return [{ id: "message-1" }];
-    return [];
-  });
+  const queryRawUnsafe = vi.fn(
+    async (
+      statement: string,
+      ...parameters: unknown[]
+    ): Promise<Array<Record<string, unknown>>> => {
+      if (
+        statement.includes('FROM "whatsapp"."Conversation" c') &&
+        statement.includes('JOIN "commerce"."CheckoutRecovery" r')
+      )
+        return recoveryLinked
+          ? [
+              {
+                id: "conversation-1",
+                shopId: "shop-1",
+                recoveryId: "recovery-1",
+                checkoutToken: "checkout-1",
+                recoveryStatus,
+                mode: "AI",
+                revision: 0,
+                inboundVersion: 0,
+                lastInboundAt: null,
+              },
+            ]
+          : [];
+      if (
+        statement.includes('FROM "commerce"."Shop"') &&
+        statement.includes("FOR UPDATE")
+      )
+        return [{ id: "shop-1", status: "ACTIVE" }];
+      if (
+        statement.includes('FROM "whatsapp"."Conversation"') &&
+        statement.includes("FOR UPDATE")
+      )
+        return [{ id: "conversation-1", controlRevision: 0 }];
+      if (statement.includes('FROM "whatsapp"."ConversationMessage"'))
+        return [
+          {
+            status: "PENDING",
+            content: messages.get(String(parameters[0]))?.content ?? "",
+            providerDispatchKey: null,
+            providerDispatchAdmittedAt: null,
+          },
+        ];
+      if (statement.includes('UPDATE "whatsapp"."ConversationMessage"'))
+        return [{ id: "message-1" }];
+      return [];
+    },
+  );
   Object.assign(transaction, { $queryRawUnsafe: queryRawUnsafe });
   const database = {
     $queryRawUnsafe: queryRawUnsafe,
-    $transaction: vi.fn().mockImplementation(async (operation: unknown) =>
-      typeof operation === "function" ? operation(transaction) : undefined,
-    ),
+    $transaction: vi
+      .fn()
+      .mockImplementation(async (operation: unknown) =>
+        typeof operation === "function" ? operation(transaction) : undefined,
+      ),
     ...transaction,
   };
   const resolver = {
@@ -196,20 +273,37 @@ export function admissionHarness({
   };
   const providerMock = {
     getProviderAccountId: vi.fn().mockReturnValue("phone-number-id"),
-    sendWhatsAppText: vi.fn().mockResolvedValue({ providerMessageId: "wamid-1" }),
-    sendWhatsAppTemplate: vi.fn().mockResolvedValue({ providerMessageId: "wamid-template" }),
+    sendWhatsAppText: vi
+      .fn()
+      .mockResolvedValue({ providerMessageId: "wamid-1" }),
+    sendWhatsAppTemplate: vi
+      .fn()
+      .mockResolvedValue({ providerMessageId: "wamid-template" }),
     ...provider,
   };
   // Keep the post-contract recovery unit test inside its injected DB boundary:
   // no calls to the process-wide recovery reader or external provider.
-  const ownership = { readTurnOwnership: vi.fn(async () => recoveryLinked ? {
-    conversationId: "conversation-1", recoveryId: "recovery-1", shopId: "shop-1",
-    mode: "AI" as const, revision: 0,
-  } : null) };
-  const fence = { admitFinalSend: vi.fn(async () => ({
-    kind: "admitted" as const, messageId: "message-1",
-    dispatchKey: "unit-test-permit", admittedAt: new Date(),
-  })) };
+  const ownership = {
+    readTurnOwnership: vi.fn(async () =>
+      recoveryLinked
+        ? {
+            conversationId: "conversation-1",
+            recoveryId: "recovery-1",
+            shopId: "shop-1",
+            mode: "AI" as const,
+            revision: 0,
+          }
+        : null,
+    ),
+  };
+  const fence = {
+    admitFinalSend: vi.fn(async () => ({
+      kind: "admitted" as const,
+      messageId: "message-1",
+      dispatchKey: "unit-test-permit",
+      admittedAt: new Date(),
+    })),
+  };
   const createPolicyResolver = () => resolver;
   const createPostContractPolicyResolver = () => postContractResolver;
 
@@ -220,7 +314,9 @@ export function admissionHarness({
     usage,
     resolver,
     providerMock,
-    executionEligibility, ownership, fence,
+    executionEligibility,
+    ownership,
+    fence,
     postContractResolver,
     reservation: new OutboundAdmissionReservationService(
       database as never,
@@ -235,8 +331,10 @@ export function admissionHarness({
       3,
       executionEligibility as never,
       createPostContractPolicyResolver as never,
-      { assessText: vi.fn(async () => ({ kind: "allow" })),
-        requireCurrentAllowance: vi.fn(async () => true) } as never,
+      {
+        assessText: vi.fn(async () => ({ kind: "allow" })),
+        requireCurrentAllowance: vi.fn(async () => true),
+      } as never,
       ownership as never,
       fence as never,
     ),

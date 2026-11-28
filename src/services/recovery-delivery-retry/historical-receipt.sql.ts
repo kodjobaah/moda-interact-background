@@ -2,7 +2,9 @@
  * request data. Historical contact is independent of current retry policy or
  * a late cancellation. Every physical successor must trace to sequence one.
  * Positive contact must still have the exact platform provider permit. */
-export function historicalInitialRetryReceiptSql(alias: "sender" | "window"): string {
+export function historicalInitialRetryReceiptSql(
+  alias: "sender" | "window",
+): string {
   const a = alias === "sender" ? "i" : "initial";
   const r = alias === "sender" ? "r" : "recovery";
   const c = alias === "sender" ? "c.id" : "$2";

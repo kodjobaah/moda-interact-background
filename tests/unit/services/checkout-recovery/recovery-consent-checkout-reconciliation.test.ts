@@ -2,10 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
 const storedPhone = vi.hoisted(() => vi.fn());
-vi.mock("../../../../src/services/shopify-whatsapp-consent/phone-resolution.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../../../src/services/shopify-whatsapp-consent/phone-resolution.js")>(),
-  selectStoredShopifyCheckoutPhone: storedPhone,
-}));
+vi.mock(
+  "../../../../src/services/shopify-whatsapp-consent/phone-resolution.js",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("../../../../src/services/shopify-whatsapp-consent/phone-resolution.js")
+    >()),
+    selectStoredShopifyCheckoutPhone: storedPhone,
+  }),
+);
 
 import { CheckoutEventOrchestratorService } from "../../../../src/services/checkout-recovery/checkout-event-orchestrator.service.js";
 import { RecoveryMaterializationService } from "../../../../src/services/checkout-recovery/recovery-materialization.service.js";
@@ -25,8 +30,17 @@ const checkout = {
   abandonedCheckoutUrl: checkoutEvent.abandonedCheckoutUrl,
   createdAt: checkoutEvent.checkoutCreatedAt,
   consentReceiptAttribute: { kind: "MISSING" as const },
-  internationalContext: { countryCode: "GB", currencyCode: "GBP", languageTag: null, languageSource: null, timeZone: null },
-  customer: { shopifyCustomerId: "gid://shopify/Customer/123", phone: "+447400123456" },
+  internationalContext: {
+    countryCode: "GB",
+    currencyCode: "GBP",
+    languageTag: null,
+    languageSource: null,
+    timeZone: null,
+  },
+  customer: {
+    shopifyCustomerId: "gid://shopify/Customer/123",
+    phone: "+447400123456",
+  },
 };
 
 /** Test the ordinary checkout event -> matured candidate boundary, without a consent-specific scheduler. */
@@ -36,79 +50,154 @@ function scenario() {
   let currentRecipient = "447400123456";
   let authorisedRecipient = "447400123456";
   let currentCheckout = { ...checkout };
-  let storedRecovery: { id: string; shopId: string; checkoutToken: string; status: string; generation: number } | null = null;
+  let storedRecovery: {
+    id: string;
+    shopId: string;
+    checkoutToken: string;
+    status: string;
+    generation: number;
+  } | null = null;
   const candidates: Array<Record<string, unknown>> = [];
-  const writes = { recovery: vi.fn(), attempt: vi.fn(), charge: vi.fn(), send: vi.fn() };
+  const writes = {
+    recovery: vi.fn(),
+    attempt: vi.fn(),
+    charge: vi.fn(),
+    send: vi.fn(),
+  };
   const notice = { notify: vi.fn(async () => "created" as const) };
   // Model the current evidence-backed phone selection. No eligible current or
   // previously verified phone exists when this fixture's grant is absent.
-  storedPhone.mockReset().mockImplementation(async () => granted && currentRecipient === authorisedRecipient
-    ? { customerId: "customer-1", customerPhoneId: "phone-1", recipient: currentRecipient, source: "customer" }
-    : null);
+  storedPhone.mockReset().mockImplementation(async () =>
+    granted && currentRecipient === authorisedRecipient
+      ? {
+          customerId: "customer-1",
+          customerPhoneId: "phone-1",
+          recipient: currentRecipient,
+          source: "customer",
+        }
+      : null,
+  );
   const native = {
     evaluateRecipient: vi.fn(),
-    evaluateStoredRecipient: vi.fn(async (input: { recipient: string }) => granted && input.recipient === `+${authorisedRecipient}`
-      ? { status: "ALLOWED" as const, customerPhoneId: "phone-1", canonicalRecipient: currentRecipient, consentRevision: 2n, noContactRevision: 0n }
-      : { status: "NOT_AUTHORISED" as const, reason: "CONSENT_NOT_GRANTED_OR_EVIDENCED" as const }),
+    evaluateStoredRecipient: vi.fn(async (input: { recipient: string }) =>
+      granted && input.recipient === `+${authorisedRecipient}`
+        ? {
+            status: "ALLOWED" as const,
+            customerPhoneId: "phone-1",
+            canonicalRecipient: currentRecipient,
+            consentRevision: 2n,
+            noContactRevision: 0n,
+          }
+        : {
+            status: "NOT_AUTHORISED" as const,
+            reason: "CONSENT_NOT_GRANTED_OR_EVIDENCED" as const,
+          },
+    ),
   };
   const consent = new RecoveryConsentAdmissionService(native, notice);
   const pending = {
     scheduleFromCheckoutCreated: vi.fn(),
-    refreshCandidateActivity: vi.fn(async () => ({ outcome: "not-found" as const })),
+    refreshCandidateActivity: vi.fn(async () => ({
+      outcome: "not-found" as const,
+    })),
     scheduleFromCheckoutUpdated: vi.fn(async (event: typeof checkoutEvent) => {
       candidates.push({
-        shopId: "shop-1", shopDomain: event.shopDomain,
-        checkoutToken: event.checkoutToken, cartToken: event.cartToken,
+        shopId: "shop-1",
+        shopDomain: event.shopDomain,
+        checkoutToken: event.checkoutToken,
+        cartToken: event.cartToken,
         checkoutCreatedAt: event.checkoutCreatedAt,
         abandonedCheckoutUrl: event.abandonedCheckoutUrl,
       });
-      return { outcome: "enqueued" as const, jobId: `job-${candidates.length}` };
+      return {
+        outcome: "enqueued" as const,
+        jobId: `job-${candidates.length}`,
+      };
     }),
-    withCheckoutLock: vi.fn(async (_shopId: string, _checkoutToken: string, action: () => Promise<unknown>) => action()),
+    withCheckoutLock: vi.fn(
+      async (
+        _shopId: string,
+        _checkoutToken: string,
+        action: () => Promise<unknown>,
+      ) => action(),
+    ),
     hasOrderProcessed: vi.fn(async () => paidOrderRecorded),
     findCandidateJobIdByCheckout: vi.fn(async () => null),
   };
   const shop = {
-    findUnique: vi.fn(async () => ({ id: "shop-1", status: "ACTIVE", platform: "SHOPIFY", onboardingCompleted: true,
-      subscription: { status: "ACTIVE", lastProviderLifecycleState: null } })),
+    findUnique: vi.fn(async () => ({
+      id: "shop-1",
+      status: "ACTIVE",
+      platform: "SHOPIFY",
+      onboardingCompleted: true,
+      subscription: { status: "ACTIVE", lastProviderLifecycleState: null },
+    })),
   };
   const db = { shop };
   const eligibility = {
-    evaluateResolvedShop: vi.fn(() => ({ allowed: true as const, shopId: "shop-1" })),
+    evaluateResolvedShop: vi.fn(() => ({
+      allowed: true as const,
+      shopId: "shop-1",
+    })),
     evaluate: vi.fn(async () => ({ allowed: true as const, shopId: "shop-1" })),
   };
   const latest = vi.fn(async () => storedRecovery);
   const lookup = {
     resolveShopDomain: vi.fn(async () => checkoutEvent.shopDomain),
-    lookup: vi.fn(async () => ({ kind: "found" as const, checkout: currentCheckout })),
+    lookup: vi.fn(async () => ({
+      kind: "found" as const,
+      checkout: currentCheckout,
+    })),
   };
   const snapshot = {
     serializeLineItems: vi.fn(() => []),
     build: vi.fn(async (candidate: { checkoutToken: string }) => ({
-      shop: checkoutEvent.shopDomain, checkoutToken: candidate.checkoutToken,
-      customer: { shopifyCustomerId: "gid://shopify/Customer/123", phone: "+447400123456" },
+      shop: checkoutEvent.shopDomain,
+      checkoutToken: candidate.checkoutToken,
+      customer: {
+        shopifyCustomerId: "gid://shopify/Customer/123",
+        phone: "+447400123456",
+      },
     })),
   };
   const recipientResolver = { resolve: vi.fn(async () => currentRecipient) };
-  const initiate = vi.fn(async (seed: { checkoutToken: string }, _generation: number, recipient: string) => {
-    const permitted = await consent.evaluateFirst({
-      shopId: "shop-1", checkoutToken: seed.checkoutToken,
-      customerId: "customer-1", shopifyCustomerId: "gid://shopify/Customer/123", recipient,
-    });
-    if (!permitted) return null;
-    // The initiation service's separate unit tests cover the actual pre-insert and
-    // post-reservation fences. These spies represent its durable writes at this boundary.
-    storedRecovery = { id: "recovery-1", shopId: "shop-1", checkoutToken: seed.checkoutToken,
-      status: "MESSAGE_SENT", generation: 1 };
-    writes.recovery(storedRecovery);
-    writes.attempt("attempt-1");
-    writes.charge("credit-1");
-    writes.send(recipient);
-    return storedRecovery;
-  });
+  const initiate = vi.fn(
+    async (
+      seed: { checkoutToken: string },
+      _generation: number,
+      recipient: string,
+    ) => {
+      const permitted = await consent.evaluateFirst({
+        shopId: "shop-1",
+        checkoutToken: seed.checkoutToken,
+        customerId: "customer-1",
+        shopifyCustomerId: "gid://shopify/Customer/123",
+        recipient,
+      });
+      if (!permitted) return null;
+      // The initiation service's separate unit tests cover the actual pre-insert and
+      // post-reservation fences. These spies represent its durable writes at this boundary.
+      storedRecovery = {
+        id: "recovery-1",
+        shopId: "shop-1",
+        checkoutToken: seed.checkoutToken,
+        status: "MESSAGE_SENT",
+        generation: 1,
+      };
+      writes.recovery(storedRecovery);
+      writes.attempt("attempt-1");
+      writes.charge("credit-1");
+      writes.send(recipient);
+      return storedRecovery;
+    },
+  );
   const orchestrator = new CheckoutEventOrchestratorService(
-    db as never, pending as never, eligibility as never, latest as never,
-    lookup as never, snapshot as never,
+    db as never,
+    pending as never,
+    eligibility as never,
+    latest as never,
+    lookup as never,
+    snapshot as never,
   );
   const materialization = new RecoveryMaterializationService({
     executionEligibility: eligibility as never,
@@ -117,38 +206,66 @@ function scenario() {
     findLatestRecovery: latest as never,
     snapshotBuilder: snapshot as never,
     recipientResolver: recipientResolver as never,
-    noticeMissingRecipient: (shopId, checkoutToken) => consent.notifyMissingRecipient({ shopId, checkoutToken }),
+    noticeMissingRecipient: (shopId, checkoutToken) =>
+      consent.notifyMissingRecipient({ shopId, checkoutToken }),
     initiate: initiate as never,
   });
   return {
-    orchestrator, materialization, pending, candidates, writes, native, notice,
-    lookup, initiate, recipientResolver,
-    setGrant: (value: boolean) => { granted = value; },
-    recordPaidOrder: () => { paidOrderRecorded = true; },
-    setCheckoutCompleted: (date: string) => { currentCheckout = { ...currentCheckout, completedAt: date }; },
+    orchestrator,
+    materialization,
+    pending,
+    candidates,
+    writes,
+    native,
+    notice,
+    lookup,
+    initiate,
+    recipientResolver,
+    setGrant: (value: boolean) => {
+      granted = value;
+    },
+    recordPaidOrder: () => {
+      paidOrderRecorded = true;
+    },
+    setCheckoutCompleted: (date: string) => {
+      currentCheckout = { ...currentCheckout, completedAt: date };
+    },
     setCurrentRecipient: (value: string) => {
       currentRecipient = value;
-      currentCheckout = { ...currentCheckout, customer: { ...currentCheckout.customer, phone: `+${value}` } };
+      currentCheckout = {
+        ...currentCheckout,
+        customer: { ...currentCheckout.customer, phone: `+${value}` },
+      };
     },
-    setAuthorisedRecipient: (value: string) => { authorisedRecipient = value; },
+    setAuthorisedRecipient: (value: string) => {
+      authorisedRecipient = value;
+    },
   };
 }
 
 async function matureNext(ctx: ReturnType<typeof scenario>) {
   const candidate = ctx.candidates.shift();
-  if (!candidate) throw new Error("Expected an ordinary checkout event to enqueue a candidate");
+  if (!candidate)
+    throw new Error(
+      "Expected an ordinary checkout event to enqueue a candidate",
+    );
   return ctx.materialization.materialize(candidate as never);
 }
 
 describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
   it("does nothing on grant alone, then admits only after a separate legitimate checkout event", async () => {
     const ctx = scenario();
-    expect(await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent)).toMatchObject({ kind: "pending" });
+    expect(
+      await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent),
+    ).toMatchObject({ kind: "pending" });
     expect((await matureNext(ctx)).outcome).toBe("deferred-no-recipient");
     expect(ctx.native.evaluateStoredRecipient).not.toHaveBeenCalled();
     expect(ctx.native.evaluateRecipient).not.toHaveBeenCalled();
-    expect(ctx.notice.notify).toHaveBeenCalledWith(expect.objectContaining({ reason: "RECIPIENT_UNVERIFIED" }));
-    for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
+    expect(ctx.notice.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "RECIPIENT_UNVERIFIED" }),
+    );
+    for (const action of Object.values(ctx.writes))
+      expect(action).not.toHaveBeenCalled();
 
     // Native consent webhook/CustomerPhone projection alone does not invoke the
     // checkout event orchestrator or retain a consent-wait candidate.
@@ -157,15 +274,20 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
     expect(ctx.pending.scheduleFromCheckoutUpdated).toHaveBeenCalledTimes(1);
     expect(ctx.pending.scheduleFromCheckoutCreated).not.toHaveBeenCalled();
     expect(ctx.initiate).not.toHaveBeenCalled();
-    for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
+    for (const action of Object.values(ctx.writes))
+      expect(action).not.toHaveBeenCalled();
 
-    expect(await ctx.orchestrator.handleCheckoutUpdatedContract({
-      ...checkoutEvent, activityAt: "2026-10-22T11:30:00Z",
-    })).toMatchObject({ kind: "pending" });
+    expect(
+      await ctx.orchestrator.handleCheckoutUpdatedContract({
+        ...checkoutEvent,
+        activityAt: "2026-10-22T11:30:00Z",
+      }),
+    ).toMatchObject({ kind: "pending" });
     expect((await matureNext(ctx)).outcome).toBe("recovery-created");
     expect(ctx.native.evaluateStoredRecipient).toHaveBeenCalledOnce();
     expect(ctx.native.evaluateRecipient).not.toHaveBeenCalled();
-    for (const action of Object.values(ctx.writes)) expect(action).toHaveBeenCalledTimes(1);
+    for (const action of Object.values(ctx.writes))
+      expect(action).toHaveBeenCalledTimes(1);
     expect(ctx.writes.send).toHaveBeenCalledWith("447400123456");
     expect(ctx.candidates).toHaveLength(0);
   });
@@ -177,23 +299,27 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
     await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent);
     expect((await matureNext(ctx)).outcome).toBe("discarded-not-recoverable");
     expect(ctx.native.evaluateRecipient).not.toHaveBeenCalled();
-    for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
+    for (const action of Object.values(ctx.writes))
+      expect(action).not.toHaveBeenCalled();
   });
 
   it("loses the paid-order race under the checkout lock without recovery, billing or provider send", async () => {
     const ctx = scenario();
     ctx.setGrant(true);
     await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent);
-    ctx.pending.withCheckoutLock.mockImplementationOnce(async (_shopId, _token, action) => {
-      // Order completion wins immediately before candidate admission obtains the lock.
-      ctx.recordPaidOrder();
-      return action();
-    });
+    ctx.pending.withCheckoutLock.mockImplementationOnce(
+      async (_shopId, _token, action) => {
+        // Order completion wins immediately before candidate admission obtains the lock.
+        ctx.recordPaidOrder();
+        return action();
+      },
+    );
     expect((await matureNext(ctx)).outcome).toBe("discarded-order-completed");
     expect(ctx.pending.hasOrderProcessed).toHaveBeenCalledOnce();
     expect(ctx.lookup.lookup).not.toHaveBeenCalled();
     expect(ctx.native.evaluateRecipient).not.toHaveBeenCalled();
-    for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
+    for (const action of Object.values(ctx.writes))
+      expect(action).not.toHaveBeenCalled();
   });
 
   it("deduplicates a repeated matured candidate against the persisted recovery", async () => {
@@ -202,11 +328,14 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
     await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent);
     const first = { ...ctx.candidates[0] };
     expect((await matureNext(ctx)).outcome).toBe("recovery-created");
-    expect(await ctx.materialization.materialize(first as never)).toMatchObject({ outcome: "no-op-existing" });
+    expect(await ctx.materialization.materialize(first as never)).toMatchObject(
+      { outcome: "no-op-existing" },
+    );
     expect(ctx.initiate).toHaveBeenCalledOnce();
     expect(ctx.native.evaluateStoredRecipient).toHaveBeenCalledOnce();
     expect(ctx.native.evaluateRecipient).not.toHaveBeenCalled();
-    for (const action of Object.values(ctx.writes)) expect(action).toHaveBeenCalledTimes(1);
+    for (const action of Object.values(ctx.writes))
+      expect(action).toHaveBeenCalledTimes(1);
   });
 
   it("does not transfer a prior grant to a changed phone when no eligible stored phone exists", async () => {
@@ -216,18 +345,22 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
     await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent);
     expect((await matureNext(ctx)).outcome).toBe("deferred-no-recipient");
     expect(ctx.native.evaluateStoredRecipient).not.toHaveBeenCalled();
-    for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
+    for (const action of Object.values(ctx.writes))
+      expect(action).not.toHaveBeenCalled();
 
     // Granting the old number must never authorise the new active recipient.
     // Only a fresh native grant for that number on a separate checkout event can.
     ctx.setAuthorisedRecipient("447400123457");
     await ctx.orchestrator.handleCheckoutUpdatedContract({
-      ...checkoutEvent, activityAt: "2026-10-22T11:30:00Z",
+      ...checkoutEvent,
+      activityAt: "2026-10-22T11:30:00Z",
     });
     expect((await matureNext(ctx)).outcome).toBe("recovery-created");
-    expect(ctx.native.evaluateStoredRecipient).toHaveBeenLastCalledWith(expect.objectContaining({
-      recipient: "+447400123457",
-    }));
+    expect(ctx.native.evaluateStoredRecipient).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        recipient: "+447400123457",
+      }),
+    );
     expect(ctx.writes.send).toHaveBeenCalledWith("447400123457");
     expect(ctx.writes.send).not.toHaveBeenCalledWith("447400123456");
   });

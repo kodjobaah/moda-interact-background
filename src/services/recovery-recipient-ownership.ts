@@ -1,17 +1,40 @@
 import { Prisma } from "@prisma/client";
-import { canonicalWhatsAppSender, matchesRegisteredPhone } from "./whatsapp-contact-opt-out/phone.js";
+import {
+  canonicalWhatsAppSender,
+  matchesRegisteredPhone,
+} from "./whatsapp-contact-opt-out/phone.js";
 
 export const recoveryRecipientCustomerSelect = {
-  id: true, shopId: true, phone: true, firstName: true,
-  phones: { where: { endedAt: null }, take: 2, select: {
-    phone: true, whatsappCanonicalPhone: true, whatsappNoContact: true, whatsappNoContactReason: true,
-  } },
+  id: true,
+  shopId: true,
+  phone: true,
+  firstName: true,
+  phones: {
+    where: { endedAt: null },
+    take: 2,
+    select: {
+      phone: true,
+      whatsappCanonicalPhone: true,
+      whatsappNoContact: true,
+      whatsappNoContactReason: true,
+    },
+  },
   _count: { select: { phones: true } },
 } as const;
 export const recoveryRecipientAttemptsSelect = {
-  where: { sequence: 1 }, take: 1, select: {
-    recipient: true, sentAt: true,
-    outboundMessage: { select: { providerMessageId: true, sentAt: true, conversationId: true, direction: true } },
+  where: { sequence: 1 },
+  take: 1,
+  select: {
+    recipient: true,
+    sentAt: true,
+    outboundMessage: {
+      select: {
+        providerMessageId: true,
+        sentAt: true,
+        conversationId: true,
+        direction: true,
+      },
+    },
   },
 } as const;
 
@@ -19,13 +42,25 @@ type RecoveryOwner = {
   shopId: string;
   shop: { defaultCountryCode?: string | null };
   customer: {
-    shopId?: string; phone: string | null;
-    phones?: Array<{ phone: string; whatsappCanonicalPhone: string | null; whatsappNoContact: boolean; whatsappNoContactReason?: string | null }>;
+    shopId?: string;
+    phone: string | null;
+    phones?: Array<{
+      phone: string;
+      whatsappCanonicalPhone: string | null;
+      whatsappNoContact: boolean;
+      whatsappNoContactReason?: string | null;
+    }>;
     _count?: { phones: number };
   } | null;
   outreachAttempts?: Array<{
-    recipient: string; sentAt: Date | null;
-    outboundMessage: { providerMessageId: string | null; sentAt: Date | null; conversationId: string; direction: string } | null;
+    recipient: string;
+    sentAt: Date | null;
+    outboundMessage: {
+      providerMessageId: string | null;
+      sentAt: Date | null;
+      conversationId: string;
+      direction: string;
+    } | null;
   }>;
 };
 const legacyCanonical = (phone: string) => phone.trim().replace(/^\+/, "");
@@ -33,18 +68,39 @@ const legacyCanonical = (phone: string) => phone.trim().replace(/^\+/, "");
 /** Current phone ownership and sent outreach must name the same recipient.
  * A phone change must never transfer an old recovery to its new number.
  */
-export function resolveRecoveryRecipient(owner: RecoveryOwner, conversationId: string): string | null {
+export function resolveRecoveryRecipient(
+  owner: RecoveryOwner,
+  conversationId: string,
+): string | null {
   const customer = owner.customer;
-  if (!customer || (customer.shopId !== undefined && customer.shopId !== owner.shopId)) return null;
+  if (
+    !customer ||
+    (customer.shopId !== undefined && customer.shopId !== owner.shopId)
+  )
+    return null;
   const phones = customer.phones ?? [];
   const initial = owner.outreachAttempts?.[0];
-  const sentRecipient = initial?.sentAt && initial.outboundMessage?.sentAt &&
-    initial.outboundMessage.providerMessageId && initial.outboundMessage.direction === "OUTBOUND" &&
+  const sentRecipient =
+    initial?.sentAt &&
+    initial.outboundMessage?.sentAt &&
+    initial.outboundMessage.providerMessageId &&
+    initial.outboundMessage.direction === "OUTBOUND" &&
     initial.outboundMessage.conversationId === conversationId
-    ? canonicalWhatsAppSender(initial.recipient) : null;
+      ? canonicalWhatsAppSender(initial.recipient)
+      : null;
   if (phones.length || (customer._count?.phones ?? 0) > 0) {
-    if (phones.length !== 1 || phones[0]!.whatsappNoContact || phones[0]!.whatsappNoContactReason || !sentRecipient ||
-        !matchesRegisteredPhone(phones[0]!, sentRecipient, owner.shop.defaultCountryCode)) return null;
+    if (
+      phones.length !== 1 ||
+      phones[0]!.whatsappNoContact ||
+      phones[0]!.whatsappNoContactReason ||
+      !sentRecipient ||
+      !matchesRegisteredPhone(
+        phones[0]!,
+        sentRecipient,
+        owner.shop.defaultCountryCode,
+      )
+    )
+      return null;
     return `+${sentRecipient}`;
   }
   // Compatibility for pre-CustomerPhone recoveries only. A displaced/ended

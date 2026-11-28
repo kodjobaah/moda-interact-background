@@ -32,6 +32,7 @@ export function localPrismaCliPath(
   }
 
   const existing = (currentPath ?? "").split(path.delimiter).filter(Boolean);
-  return [localBin, ...existing.filter((entry) => entry !== localBin)]
-    .join(path.delimiter);
+  return [localBin, ...existing.filter((entry) => entry !== localBin)].join(
+    path.delimiter,
+  );
 }

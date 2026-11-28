@@ -1,8 +1,14 @@
 import "dotenv/config";
 import { describe, expect, it, vi } from "vitest";
-import { PostgresModerationAssessmentService, sha256Text } from "../../src/services/conversation-moderation/moderation-assessment.service.js";
+import {
+  PostgresModerationAssessmentService,
+  sha256Text,
+} from "../../src/services/conversation-moderation/moderation-assessment.service.js";
 import { loadCommerceHistory } from "../../src/commerce/history.js";
-import { UNCONFIRMED_DELIVERY, UNCONFIRMED_AUTOMATION } from "../../src/commerce/history-delivery.js";
+import {
+  UNCONFIRMED_DELIVERY,
+  UNCONFIRMED_AUTOMATION,
+} from "../../src/commerce/history-delivery.js";
 import { ModerationTurnGate } from "../../src/services/conversation-moderation/moderation-turn-gate.js";
 import { moderationConfig } from "../../src/services/conversation-moderation/moderation-policy.js";
 import { allowedHistoryCandidates } from "../../src/services/conversation-moderation/moderation-history.js";
@@ -14,17 +20,29 @@ import { AiTurnOwnershipService } from "../../src/services/recovery-conversation
 import { OutboundSendFenceService } from "../../src/services/recovery-conversation/outbound-send-fence.service.js";
 import { prepareAutomatedTemplateInput } from "../../src/services/conversation-moderation/automated-template-input.js";
 
-const suite = process.env.TEST_DATABASE_URL && process.env.REDIS_URL &&
-  process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
+const suite =
+  process.env.TEST_DATABASE_URL &&
+  process.env.REDIS_URL &&
+  process.env.MODA_DISPOSABLE_INTEGRATION === "1"
+    ? describe
+    : describe.skip;
 
-async function moderatedFixture(name: string, options: { blockedTexts?: string[] } = {}) {
+async function moderatedFixture(
+  name: string,
+  options: { blockedTexts?: string[] } = {},
+) {
   const f = await humanDispatchFixture(name, { pooledSender: true });
   try {
     const aimock = await startArch040ModerationAimock(options);
     return {
-      f, aimock,
+      f,
+      aimock,
       async close() {
-        try { await aimock.close(); } finally { await f.close(); }
+        try {
+          await aimock.close();
+        } finally {
+          await f.close();
+        }
       },
     };
   } catch (error) {
@@ -34,371 +52,1014 @@ async function moderatedFixture(name: string, options: { blockedTexts?: string[]
 }
 
 function assertModerationHttp(
-  journal: Array<{ path?: string; input?: unknown; model?: unknown; status?: number }>,
-  inputs: string[], statuses: number[] = inputs.map(() => 200),
+  journal: Array<{
+    path?: string;
+    input?: unknown;
+    model?: unknown;
+    status?: number;
+  }>,
+  inputs: string[],
+  statuses: number[] = inputs.map(() => 200),
 ) {
-  expect(journal).toEqual(inputs.map((input, index) => ({
-    path: "/v1/moderations", input, model: "omni-moderation-latest", status: statuses[index],
-  })));
+  expect(journal).toEqual(
+    inputs.map((input, index) => ({
+      path: "/v1/moderations",
+      input,
+      model: "omni-moderation-latest",
+      status: statuses[index],
+    })),
+  );
 }
 
-suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and WhatsApp mocks", () => {
-  it("moderates verified inbound content before a turn, keeps flagged messages and permits later safe content", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-inbound");
-    const service = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-    const gate = new ModerationTurnGate(service);
-    try {
-      const started = new Date(Date.now() - 2_000);
-      const blocked = await f.db.conversationMessage.create({ data: {
-        conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
-        status: "DELIVERED", content: "moderation-fixture-block", createdAt: new Date(started.getTime() + 100),
-      } });
-      expect(await gate.moderatePending(f.conversationId, started)).toBe("suppressed");
-      expect((await f.db.conversationMessage.findUnique({ where: { id: blocked.id } }))?.content)
-        .toBe("moderation-fixture-block");
-      expect((await f.db.conversationModerationAssessment.findFirst({
-        where: { conversationMessageId: blocked.id }, select: { decision: true },
-      }))?.decision).toBe("BLOCK");
-      await f.db.conversationMessage.create({ data: {
-        conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
-        status: "DELIVERED", content: "How do I find my order?", createdAt: new Date(started.getTime() + 200),
-      } });
-      expect(await gate.moderatePending(f.conversationId, started)).toBe("allowed");
-      const safe = await allowedHistoryCandidates([
-        { id: blocked.id, direction: "INBOUND", senderType: "CUSTOMER", content: "moderation-fixture-block" },
-      ], aimock.readOperation);
-      expect(safe).toHaveLength(0); // blocked text never enters normal CommerceAgent history
-      assertModerationHttp(aimock.journal(), ["moderation-fixture-block", "How do I find my order?"]); // cached BLOCK was not reclassified
-      expect(await gate.moderatePending(f.conversationId, started)).toBe("allowed");
-      assertModerationHttp(aimock.journal(), ["moderation-fixture-block", "How do I find my order?"]);
-    } finally { await close(); }
-  }, 120_000);
-
-  it("refuses an unsupported image without fabricating an approval or calling OpenAI", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-media");
-    try {
-      const started = new Date(Date.now() - 2_000);
-      const image = await f.db.conversationMessage.create({ data: {
-        conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
-        contentType: "UNSUPPORTED", content: "[unsupported image]", createdAt: started,
-      } });
-      const gate = new ModerationTurnGate(new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation));
-      expect(await gate.moderatePending(f.conversationId, new Date(started.getTime() - 10))).toBe("suppressed");
-      expect(await f.db.conversationModerationAssessment.count({ where: { conversationMessageId: image.id, decision: "ALLOW" } })).toBe(0);
-      expect(aimock.journal()).toHaveLength(0);
-    } finally { await close(); }
-  }, 120_000);
-
-  it('backfills completed historical audio and blocks unsafe history without authorizing a blocked current turn',async()=>{
-    const {f,aimock,close}=await moderatedFixture('handback-audio');try{
-      const boundary=new Date(Date.now()-1000),past=new Date(boundary.getTime()-1000);
-      const audio=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',contentType:'AUDIO',transcriptionStatus:'COMPLETED',transcriptionCompletedAt:past,content:'Completed human-mode transcript',createdAt:past}});
-      const blocked=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content:'moderation-fixture-block',createdAt:past}});
-      const incomplete=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',contentType:'AUDIO',transcriptionStatus:'PENDING',content:'Not an approved transcript',createdAt:past}});
-      await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content:'Allowed new current question',createdAt:boundary}});
-      await f.changeOwner('HUMAN','AI',1);const service=new PostgresModerationAssessmentService(f.db,aimock.moderate,undefined,aimock.readOperation),gate=new ModerationTurnGate(service);
-      expect(await gate.moderatePending(f.conversationId,boundary)).toBe('allowed');
-      const safe=await allowedHistoryCandidates([audio,blocked,incomplete],aimock.readOperation);expect(safe.map(m=>m.id)).toEqual([audio.id]);expect(await f.db.conversationModerationAssessment.count({where:{conversationMessageId:incomplete.id}})).toBe(0);
-      await expect(service.assessText({subject:{kind:'CUSTOMER_MESSAGE',messageId:audio.id},shopId:'foreign',conversationId:f.conversationId,effectiveText:audio.content,inputKind:'TRANSCRIPT',policyVersion:moderationConfig().policyVersion})).rejects.toThrow();await expect(service.assessText({subject:{kind:'CUSTOMER_MESSAGE',messageId:audio.id},shopId:f.shopId,conversationId:f.conversationId,effectiveText:'tampered',inputKind:'TRANSCRIPT',policyVersion:moderationConfig().policyVersion})).rejects.toThrow();
-      const count=aimock.journal().length;expect(await Promise.all([gate.moderatePending(f.conversationId,boundary),gate.moderatePending(f.conversationId,boundary)])).toEqual(['allowed','allowed']);expect(aimock.journal()).toHaveLength(count);
-      const next=new Date();await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content:'moderation-fixture-block',createdAt:next}});expect(await gate.moderatePending(f.conversationId,next)).toBe('suppressed');expect(f.providerHttpRequests).toHaveLength(0);
-    }finally{await close();}
-  },120000);
-
-  it("BLOCK on a HUMAN command terminates it before billing and WhatsApp emulator", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-human-block");
-    try {
-      // Verified customer inbound opens the HUMAN text service window.
-      const inboundAt = new Date(Date.now() - 5_000);
-      await f.db.conversationMessage.create({ data: {
-        conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
-        content: "Please contact me about my order", status: "DELIVERED", createdAt: inboundAt,
-      } });
-      await f.db.conversation.update({ where: { id: f.conversationId },
-        data: { lastInboundAt: inboundAt } });
-      const commandId = await f.addCommand({ textBody: "moderation-fixture-block" });
-      const service = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-      const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
-      await f.dispatcher(undefined, service).processClaim(commandId, claim.leaseToken);
-      const decision = await f.db.conversationModerationAssessment.findFirst({
-        where: { merchantSendCommandId: commandId },
-      });
-      expect(decision?.decision).toBe("BLOCK");
-      const prepared=await f.db.merchantConversationSendCommand.findUniqueOrThrow({where:{id:commandId},select:{preparedTextBody:true}});
-      expect(prepared.preparedTextBody).toContain("moderation-fixture-block");
-      assertModerationHttp(aimock.journal(), [prepared.preparedTextBody!]);
-      expect(await f.db.conversationMessage.count({ where: { conversationId: f.conversationId, senderType: "HUMAN" } })).toBe(0);
-      expect(f.providerHttpRequests).toHaveLength(0);
-      expect(f.billing.admitAndRevalidate).not.toHaveBeenCalled();
-    } finally { await close(); }
-  }, 120_000);
-
-  it("moderates real Aimock output before B002 WhatsApp HTTP emulator send; reuses ALLOW", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-aimock-meta");
-    try {
-      const service = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-      const turn = await runAiTurnThroughBackgroundMocks(f, {
-        takeoverThenResume: false, moderation: service,
-      });
-      expect(turn.aimockJournal.requestCount).toBe(1);
-      await f.whatsapp.waitForMessageCount(1);
-      expect(f.providerHttpRequests).toHaveLength(1);
-      const record = await f.db.conversationModerationAssessment.findFirst({ where: {
-        conversationMessageId: turn.messageId, decision: "ALLOW",
-      } });
-      expect(record).toEqual(expect.objectContaining({
-        contentSha256: sha256Text("Your basket is ready to recover."),
-        policyVersion: moderationConfig().policyVersion,
-      }));
-      assertModerationHttp(aimock.journal(), ["Your basket is ready to recover."]);
-      expect(await service.requireCurrentAllowance({
-        subject: { kind: "AGENT_MESSAGE", messageId: turn.messageId },
-        effectiveText: "Your basket is ready to recover.", policyVersion: moderationConfig().policyVersion,
-      })).toBe(true);
-      assertModerationHttp(aimock.journal(), ["Your basket is ready to recover."]);
-    } finally { await close(); }
-  }, 120_000);
-
-  it("Aimock-generated flagged AGENT output cannot reach B002 WhatsApp emulator", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-aimock-block", {
-      blockedTexts: ["Your basket is ready to recover."],
-    });
-    try {
-      const service = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-      const result = await runAiTurnThroughBackgroundMocks(f, {
-        takeoverThenResume: false, moderation: service,
-      });
-      expect(result.aimockJournal.requestCount).toBe(1);
-      expect(f.providerHttpRequests).toHaveLength(0);
-      await f.whatsapp.assertNoAdditionalMessages({ count: 0, quietMs: 100 });
-      expect((await f.db.conversationMessage.findUnique({ where: { id: result.messageId } }))?.status).toBe("FAILED");
-      expect((await f.db.conversationModerationAssessment.findFirst({
-        where: { conversationMessageId: result.messageId },
-      }))?.decision).toBe("BLOCK");
-      assertModerationHttp(aimock.journal(), ["Your basket is ready to recover."]);
-    } finally { await close(); }
-  }, 120_000);
-
-  it("rejects a legacy unlinked AUTOMATION template before moderation and WhatsApp delivery", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-automation-template-allow");
-    try {
-      await f.changeOwner("HUMAN", "AI", 1);
-      const message = await f.db.conversationMessage.create({ data: {
-        conversationId: f.conversationId, direction: "OUTBOUND", senderType: "AUTOMATION",
-        status: "PENDING", content: "[Pending automated template]",
-      } });
-      const moderation = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-      const delivery = new OutboundMessageDeliveryService(f.db, f.provider, f.execution,
-        new AiTurnOwnershipService(f.db), new OutboundSendFenceService(f.db, async () => null), moderation,
-        undefined, undefined,
-        // The fixture tests absent BG001 registration, not a valid provider
-        // approval. BG006 requires a linked registration before moderation.
-        { preflight: async () => ({ kind: "allowed", snapshot: null }) });
-      const template = { to: f.recipient, templateName: "checkout_recovery", languageCode: "en_US",
-        bodyParameters: ["Your basket is ready to recover.", "cart-123"] };
-      expect(await delivery.sendPreparedTemplate({
-        kind: "admitted", shopId: f.shopId, conversationId: f.conversationId,
-        messageId: message.id, terminal: false, executionScope: "recovery",
-      }, template)).toEqual({ kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" });
-      expect(f.providerHttpRequests).toHaveLength(0);
-      expect(aimock.journal()).toHaveLength(0);
-      expect(await f.db.conversationModerationAssessment.findFirst({
-        where: { conversationMessageId: message.id },
-      })).toBeNull();
-    } finally { await close(); }
-  }, 120_000);
-
-  it("blocks changed AUTOMATION template parameters rather than reusing an earlier ALLOW", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-automation-template-block", {
-      blockedTexts: ["moderation-fixture-block"],
-    });
-    try {
-      await f.changeOwner("HUMAN", "AI", 1);
-      const message = await f.db.conversationMessage.create({ data: {
-        conversationId: f.conversationId, direction: "OUTBOUND", senderType: "AUTOMATION",
-        status: "PENDING", content: "[Pending automated template]",
-      } });
-      const subject = { kind: "AUTOMATION_MESSAGE" as const, messageId: message.id };
-      const moderation = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-      const allowedTemplate = { to: f.recipient, templateName: "checkout_recovery", languageCode: "en_US",
-        bodyParameters: ["Customer-safe value"] };
-      const oldContent = prepareAutomatedTemplateInput(allowedTemplate).effectiveText;
-      await f.db.conversationMessage.update({ where: { id: message.id }, data: { content: oldContent } });
-      expect((await moderation.assessText({ subject, shopId: f.shopId, conversationId: f.conversationId,
-        effectiveText: oldContent, inputKind: "TEXT", policyVersion: moderationConfig().policyVersion,
-        now: new Date() })).kind).toBe("allow");
-      const blockedTemplate = { ...allowedTemplate, bodyParameters: ["moderation-fixture-block"] };
-      const blockedContent = prepareAutomatedTemplateInput(blockedTemplate).effectiveText;
-      const delivery = new OutboundMessageDeliveryService(f.db, f.provider, f.execution,
-        new AiTurnOwnershipService(f.db), new OutboundSendFenceService(f.db, async () => null), moderation);
-      expect(await delivery.sendPreparedTemplate({
-        kind: "admitted", shopId: f.shopId, conversationId: f.conversationId,
-        messageId: message.id, terminal: false, executionScope: "recovery",
-      }, blockedTemplate)).toMatchObject({ kind: "suppressed" });
-      expect(f.providerHttpRequests).toHaveLength(0);
-      await f.whatsapp.assertNoAdditionalMessages({ count: 0, quietMs: 100 });
-      expect(await f.db.conversationModerationAssessment.findMany({
-        where: { conversationMessageId: message.id }, select: { decision: true, contentSha256: true },
-      })).toEqual([{ decision: "ALLOW", contentSha256: sha256Text(oldContent) }]);
-      expect(await moderation.requireCurrentAllowance({ subject, effectiveText: blockedContent,
-        policyVersion: moderationConfig().policyVersion })).toBe(false);
-      assertModerationHttp(aimock.journal(), [oldContent]);
-    } finally { await close(); }
-  }, 120_000);
-
-  it("a terminal ALLOW does not approve changed text or a new policy, including duplicate inbound", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-content-revision");
-    const service = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-    try {
-      const msg = await f.db.conversationMessage.create({ data: {
-        conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
-        content: "Safe first response", status: "DELIVERED",
-      } });
-      const subject = { kind: "CUSTOMER_MESSAGE" as const, messageId: msg.id };
-      const original = { subject, shopId: f.shopId, conversationId: f.conversationId,
-        effectiveText: "Safe first response", inputKind: "TEXT" as const,
-        policyVersion: moderationConfig().policyVersion, now: new Date() };
-      expect((await service.assessText(original)).kind).toBe("allow");
-      expect((await service.assessText(original)).kind).toBe("allow");
-      assertModerationHttp(aimock.journal(), ["Safe first response"]);
-      await f.db.conversationMessage.update({ where: { id: msg.id },
-        data: { content: "Second response needs fresh approval" } });
-      expect(await service.requireCurrentAllowance({ subject, effectiveText: original.effectiveText,
-        policyVersion: original.policyVersion })).toBe(false);
-      expect((await service.assessText({ ...original, effectiveText: "Second response needs fresh approval" })).kind).toBe("allow");
-      assertModerationHttp(aimock.journal(), ["Safe first response", "Second response needs fresh approval"]);
-      expect(await f.db.conversationModerationAssessment.count({ where: { conversationMessageId: msg.id } })).toBe(2);
-    } finally { await close(); }
-  }, 120_000);
-
-  it("unknown classifier/network errors retain the same assessment and never yield ALLOW", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-retry");
-    try {
-      const message = await f.db.conversationMessage.create({ data: {
-        conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
-        content: "Ordinary order help question", status: "DELIVERED",
-      } });
-      await aimock.failNextWith(429, { error: { message: "rate limited", type: "rate_limit_error" } });
-      const service = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-      const input = { subject: { kind: "CUSTOMER_MESSAGE" as const, messageId: message.id },
-        shopId: f.shopId, conversationId: f.conversationId, effectiveText: message.content,
-        inputKind: "TEXT" as const, policyVersion: moderationConfig().policyVersion, now: new Date() };
-      expect((await service.assessText(input)).kind).toBe("retry");
-      expect((await service.assessText(input)).kind).toBe("retry");
-      assertModerationHttp(aimock.journal(), ["Ordinary order help question"], [429]);
-      expect(await service.requireCurrentAllowance({ subject: input.subject,
-        effectiveText: input.effectiveText, policyVersion: input.policyVersion })).toBe(false);
-      expect(await f.db.conversationModerationAssessment.count({
-        where: { conversationMessageId: message.id },
-      })).toBe(1);
-    } finally { await close(); }
-  }, 120_000);
-
-  it("malformed HTTP 200 moderation response cannot persist ALLOW or submit to WhatsApp", async () => {
-    const { f, aimock, close } = await moderatedFixture("moderation-malformed");
-    try {
-      const message = await f.db.conversationMessage.create({ data: {
-        conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
-        content: "Please check my order", status: "DELIVERED",
-      } });
-      await aimock.failNextWith(200, { model: "omni-moderation-latest", results: [] });
-      const service = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-      const subject = { kind: "CUSTOMER_MESSAGE" as const, messageId: message.id };
-      const outcome = await service.assessText({
-        subject, shopId: f.shopId, conversationId: f.conversationId,
-        effectiveText: message.content, inputKind: "TEXT",
-        policyVersion: moderationConfig().policyVersion, now: new Date(),
-      });
-      expect(outcome.kind).toBe("retry");
-      assertModerationHttp(aimock.journal(), ["Please check my order"]);
-      expect(await f.db.conversationModerationAssessment.findFirst({
-        where: { conversationMessageId: message.id }, select: { decision: true },
-      })).toEqual({ decision: "RETRYABLE_ERROR" });
-      expect(await service.requireCurrentAllowance({ subject, effectiveText: message.content,
-        policyVersion: moderationConfig().policyVersion })).toBe(false);
-      expect(f.providerHttpRequests).toHaveLength(0);
-    } finally { await close(); }
-  }, 120_000);
-
-  it.each([false,true])("keeps failed old backlog historical and latest blocked=%s authoritative in PostgreSQL",async blocked=>{
-    const {f,aimock,close}=await moderatedFixture('latest-objective-'+blocked);
-    const {platformConsumerConfiguration}=await import('../../src/services/platform-configuration/consumers.js');
-    const operation=vi.spyOn(platformConsumerConfiguration,'requireModerationOperation').mockImplementation(aimock.readOperation as never);
-    try{
-      const boundary=new Date(Date.now()-8*60*60*1000),latestAt=new Date(Date.now()-1000);
-      const old=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content:'What categories do you sell?',createdAt:boundary}});
-      const content=blocked?'moderation-fixture-block':'Tell me about The Videographer Snowboard';
-      await f.db.conversationMessage.create({data:{id:'zz-latest-'+f.conversationId,conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content,createdAt:latestAt}});
-      const sameTime=await f.db.conversationMessage.create({data:{id:'aa-previous-'+f.conversationId,conversationId:f.conversationId,direction:'OUTBOUND',senderType:'AGENT',status:'SENT',content:'Earlier same-timestamp answer',createdAt:latestAt,sentAt:latestAt}});
-      await new PostgresModerationAssessmentService(f.db,aimock.moderate,undefined,aimock.readOperation).assessText({subject:{kind:'AGENT_MESSAGE',messageId:sameTime.id},shopId:f.shopId,conversationId:f.conversationId,effectiveText:sameTime.content,inputKind:'TEXT',policyVersion:moderationConfig().policyVersion,now:new Date()});
-      const gate=new ModerationTurnGate(new PostgresModerationAssessmentService(f.db,aimock.moderate,undefined,aimock.readOperation));
-      expect(await gate.moderatePending(f.conversationId,boundary)).toBe(blocked?'suppressed':'allowed');
-      const loaded=await loadCommerceHistory(f.conversationId,boundary);
-      expect(loaded.currentMessages).toEqual(blocked?[]:[{role:'user',content}]);
-      expect(loaded.history).toContainEqual({role:'user',content:old.content});
-      expect(loaded.history).toContainEqual({role:'assistant',content:`${UNCONFIRMED_DELIVERY} Earlier same-timestamp answer`});
-      expect(f.whatsapp.messages).toHaveLength(0);
-      expect(await f.db.conversationMessage.count({where:{conversationId:f.conversationId,direction:'INBOUND'}})).toBeGreaterThanOrEqual(2);
-    }finally{operation.mockRestore();await close();}
-  },120000);
-
-  it("excludes failed deliveries before the history limit and preserves only moderated communicated offers", async () => {
-    const { f, aimock, close } = await moderatedFixture("delivery-aware-history");
-    const { platformConsumerConfiguration } = await import("../../src/services/platform-configuration/consumers.js");
-    const operation = vi.spyOn(platformConsumerConfiguration, "requireModerationOperation").mockImplementation(aimock.readOperation as never);
-    try {
-      const boundary = new Date(Date.now() - 1000);
-      const moderation = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
-      const receipt = (code: string) => JSON.stringify({
-        contract: "moda.whatsapp.automated-template-parameters.v1", templateName: "checkout_recovery",
-        languageCode: "en_US", bodyParameters: [code], recoveryPromise: {
-          kind: "CODE_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: code, code,
-        },
-      });
-      const createAutomation = async (code: string, status: "FAILED" | "SENT" | "DELIVERED", offset: number, approve = true) => {
-        const at = new Date(+boundary - offset);
-        const message = await f.db.conversationMessage.create({ data: {
-          conversationId: f.conversationId, direction: "OUTBOUND", senderType: "AUTOMATION",
-          content: receipt(code), status, createdAt: at, sentAt: at,
-          providerMessageId: `${f.conversationId}-${code}`,
-          ...(status === "DELIVERED" ? { deliveredAt: at } : {}),
-          ...(status === "FAILED" ? { failedAt: at, providerFailureCode: "131049" } : {}),
-        } });
-        if (approve) expect((await moderation.assessText({ subject: { kind: "AUTOMATION_MESSAGE", messageId: message.id },
-          shopId: f.shopId, conversationId: f.conversationId, effectiveText: message.content,
-          inputKind: "TEXT", policyVersion: moderationConfig().policyVersion, now: new Date() })).kind).toBe("allow");
-        return message;
-      };
-      const communicated = await createAutomation("SAVE20", "DELIVERED", 60000);
-      const failed = await createAutomation("FAILED10", "FAILED", 50000);
-      // More failed rows than the entire SQL history window; they must not
-      // displace the earlier successful offer or consume moderation work.
-      await f.db.conversationMessage.createMany({ data: Array.from({ length: 21 }, (_, index) => ({
-        conversationId: f.conversationId, direction: "OUTBOUND" as const, senderType: "AUTOMATION" as const,
-        status: "FAILED" as const, content: receipt(`FAILED-${index}`),
-        createdAt: new Date(+boundary - 40000 + index), sentAt: new Date(+boundary - 40000 + index),
-        failedAt: new Date(+boundary - 40000 + index), providerFailureCode: "131049",
-      })) });
-      await createAutomation("UNCONFIRMED30", "SENT", 30000);
-      await createAutomation("UNMODERATED40", "DELIVERED", 20000, false);
-      const quoted = await createAutomation("QUOTED25", "SENT", 10000);
-      await f.db.conversationMessage.create({ data: { conversationId: f.conversationId,
-        direction: "INBOUND", senderType: "CUSTOMER", status: "DELIVERED", createdAt: boundary,
-        providerMessageId: `${f.conversationId}-question`, inReplyToProviderId: quoted.providerMessageId,
-        content: "Can I use this discount?",
-      } });
-      expect(await new ModerationTurnGate(moderation).moderatePending(f.conversationId, boundary)).toBe("allowed");
-      const loaded = await loadCommerceHistory(f.conversationId, boundary);
-      expect(loaded.currentMessages).toEqual([{ role: "user", content: "Can I use this discount?" }]);
-      expect(loaded.history).toHaveLength(3);
-      expect(loaded.history).toContainEqual({ role: "assistant", content: UNCONFIRMED_AUTOMATION });
-      for (const message of [communicated, quoted]) {
-        expect(loaded.history.some(row => row.content.includes("Delivery confirmed") && row.content.endsWith(message.content))).toBe(true);
+suite(
+  "ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and WhatsApp mocks",
+  () => {
+    it("moderates verified inbound content before a turn, keeps flagged messages and permits later safe content", async () => {
+      const { f, aimock, close } = await moderatedFixture("moderation-inbound");
+      const service = new PostgresModerationAssessmentService(
+        f.db,
+        aimock.moderate,
+        undefined,
+        aimock.readOperation,
+      );
+      const gate = new ModerationTurnGate(service);
+      try {
+        const started = new Date(Date.now() - 2_000);
+        const blocked = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            status: "DELIVERED",
+            content: "moderation-fixture-block",
+            createdAt: new Date(started.getTime() + 100),
+          },
+        });
+        expect(await gate.moderatePending(f.conversationId, started)).toBe(
+          "suppressed",
+        );
+        expect(
+          (
+            await f.db.conversationMessage.findUnique({
+              where: { id: blocked.id },
+            })
+          )?.content,
+        ).toBe("moderation-fixture-block");
+        expect(
+          (
+            await f.db.conversationModerationAssessment.findFirst({
+              where: { conversationMessageId: blocked.id },
+              select: { decision: true },
+            })
+          )?.decision,
+        ).toBe("BLOCK");
+        await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            status: "DELIVERED",
+            content: "How do I find my order?",
+            createdAt: new Date(started.getTime() + 200),
+          },
+        });
+        expect(await gate.moderatePending(f.conversationId, started)).toBe(
+          "allowed",
+        );
+        const safe = await allowedHistoryCandidates(
+          [
+            {
+              id: blocked.id,
+              direction: "INBOUND",
+              senderType: "CUSTOMER",
+              content: "moderation-fixture-block",
+            },
+          ],
+          aimock.readOperation,
+        );
+        expect(safe).toHaveLength(0); // blocked text never enters normal CommerceAgent history
+        assertModerationHttp(aimock.journal(), [
+          "moderation-fixture-block",
+          "How do I find my order?",
+        ]); // cached BLOCK was not reclassified
+        expect(await gate.moderatePending(f.conversationId, started)).toBe(
+          "allowed",
+        );
+        assertModerationHttp(aimock.journal(), [
+          "moderation-fixture-block",
+          "How do I find my order?",
+        ]);
+      } finally {
+        await close();
       }
-      expect(JSON.stringify(loaded)).not.toMatch(/FAILED10|FAILED-[0-9]|UNCONFIRMED30|UNMODERATED40/);
-      expect(await f.db.conversationMessage.findUniqueOrThrow({where:{id:failed.id}})).toEqual(failed);
-      expect(f.whatsapp.messages).toHaveLength(0);
-    } finally { operation.mockRestore(); await close(); }
-  }, 120_000);
+    }, 120_000);
 
-});
+    it("refuses an unsupported image without fabricating an approval or calling OpenAI", async () => {
+      const { f, aimock, close } = await moderatedFixture("moderation-media");
+      try {
+        const started = new Date(Date.now() - 2_000);
+        const image = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            contentType: "UNSUPPORTED",
+            content: "[unsupported image]",
+            createdAt: started,
+          },
+        });
+        const gate = new ModerationTurnGate(
+          new PostgresModerationAssessmentService(
+            f.db,
+            aimock.moderate,
+            undefined,
+            aimock.readOperation,
+          ),
+        );
+        expect(
+          await gate.moderatePending(
+            f.conversationId,
+            new Date(started.getTime() - 10),
+          ),
+        ).toBe("suppressed");
+        expect(
+          await f.db.conversationModerationAssessment.count({
+            where: { conversationMessageId: image.id, decision: "ALLOW" },
+          }),
+        ).toBe(0);
+        expect(aimock.journal()).toHaveLength(0);
+      } finally {
+        await close();
+      }
+    }, 120_000);
+
+    it("backfills completed historical audio and blocks unsafe history without authorizing a blocked current turn", async () => {
+      const { f, aimock, close } = await moderatedFixture("handback-audio");
+      try {
+        const boundary = new Date(Date.now() - 1000),
+          past = new Date(boundary.getTime() - 1000);
+        const audio = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            status: "DELIVERED",
+            contentType: "AUDIO",
+            transcriptionStatus: "COMPLETED",
+            transcriptionCompletedAt: past,
+            content: "Completed human-mode transcript",
+            createdAt: past,
+          },
+        });
+        const blocked = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            status: "DELIVERED",
+            content: "moderation-fixture-block",
+            createdAt: past,
+          },
+        });
+        const incomplete = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            status: "DELIVERED",
+            contentType: "AUDIO",
+            transcriptionStatus: "PENDING",
+            content: "Not an approved transcript",
+            createdAt: past,
+          },
+        });
+        await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            status: "DELIVERED",
+            content: "Allowed new current question",
+            createdAt: boundary,
+          },
+        });
+        await f.changeOwner("HUMAN", "AI", 1);
+        const service = new PostgresModerationAssessmentService(
+            f.db,
+            aimock.moderate,
+            undefined,
+            aimock.readOperation,
+          ),
+          gate = new ModerationTurnGate(service);
+        expect(await gate.moderatePending(f.conversationId, boundary)).toBe(
+          "allowed",
+        );
+        const safe = await allowedHistoryCandidates(
+          [audio, blocked, incomplete],
+          aimock.readOperation,
+        );
+        expect(safe.map((m) => m.id)).toEqual([audio.id]);
+        expect(
+          await f.db.conversationModerationAssessment.count({
+            where: { conversationMessageId: incomplete.id },
+          }),
+        ).toBe(0);
+        await expect(
+          service.assessText({
+            subject: { kind: "CUSTOMER_MESSAGE", messageId: audio.id },
+            shopId: "foreign",
+            conversationId: f.conversationId,
+            effectiveText: audio.content,
+            inputKind: "TRANSCRIPT",
+            policyVersion: moderationConfig().policyVersion,
+          }),
+        ).rejects.toThrow();
+        await expect(
+          service.assessText({
+            subject: { kind: "CUSTOMER_MESSAGE", messageId: audio.id },
+            shopId: f.shopId,
+            conversationId: f.conversationId,
+            effectiveText: "tampered",
+            inputKind: "TRANSCRIPT",
+            policyVersion: moderationConfig().policyVersion,
+          }),
+        ).rejects.toThrow();
+        const count = aimock.journal().length;
+        expect(
+          await Promise.all([
+            gate.moderatePending(f.conversationId, boundary),
+            gate.moderatePending(f.conversationId, boundary),
+          ]),
+        ).toEqual(["allowed", "allowed"]);
+        expect(aimock.journal()).toHaveLength(count);
+        const next = new Date();
+        await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            status: "DELIVERED",
+            content: "moderation-fixture-block",
+            createdAt: next,
+          },
+        });
+        expect(await gate.moderatePending(f.conversationId, next)).toBe(
+          "suppressed",
+        );
+        expect(f.providerHttpRequests).toHaveLength(0);
+      } finally {
+        await close();
+      }
+    }, 120000);
+
+    it("BLOCK on a HUMAN command terminates it before billing and WhatsApp emulator", async () => {
+      const { f, aimock, close } = await moderatedFixture(
+        "moderation-human-block",
+      );
+      try {
+        // Verified customer inbound opens the HUMAN text service window.
+        const inboundAt = new Date(Date.now() - 5_000);
+        await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            content: "Please contact me about my order",
+            status: "DELIVERED",
+            createdAt: inboundAt,
+          },
+        });
+        await f.db.conversation.update({
+          where: { id: f.conversationId },
+          data: { lastInboundAt: inboundAt },
+        });
+        const commandId = await f.addCommand({
+          textBody: "moderation-fixture-block",
+        });
+        const service = new PostgresModerationAssessmentService(
+          f.db,
+          aimock.moderate,
+          undefined,
+          aimock.readOperation,
+        );
+        const claim = (
+          await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() })
+        )[0]!;
+        await f
+          .dispatcher(undefined, service)
+          .processClaim(commandId, claim.leaseToken);
+        const decision = await f.db.conversationModerationAssessment.findFirst({
+          where: { merchantSendCommandId: commandId },
+        });
+        expect(decision?.decision).toBe("BLOCK");
+        const prepared =
+          await f.db.merchantConversationSendCommand.findUniqueOrThrow({
+            where: { id: commandId },
+            select: { preparedTextBody: true },
+          });
+        expect(prepared.preparedTextBody).toContain("moderation-fixture-block");
+        assertModerationHttp(aimock.journal(), [prepared.preparedTextBody!]);
+        expect(
+          await f.db.conversationMessage.count({
+            where: { conversationId: f.conversationId, senderType: "HUMAN" },
+          }),
+        ).toBe(0);
+        expect(f.providerHttpRequests).toHaveLength(0);
+        expect(f.billing.admitAndRevalidate).not.toHaveBeenCalled();
+      } finally {
+        await close();
+      }
+    }, 120_000);
+
+    it("moderates real Aimock output before B002 WhatsApp HTTP emulator send; reuses ALLOW", async () => {
+      const { f, aimock, close } = await moderatedFixture(
+        "moderation-aimock-meta",
+      );
+      try {
+        const service = new PostgresModerationAssessmentService(
+          f.db,
+          aimock.moderate,
+          undefined,
+          aimock.readOperation,
+        );
+        const turn = await runAiTurnThroughBackgroundMocks(f, {
+          takeoverThenResume: false,
+          moderation: service,
+        });
+        expect(turn.aimockJournal.requestCount).toBe(1);
+        await f.whatsapp.waitForMessageCount(1);
+        expect(f.providerHttpRequests).toHaveLength(1);
+        const record = await f.db.conversationModerationAssessment.findFirst({
+          where: {
+            conversationMessageId: turn.messageId,
+            decision: "ALLOW",
+          },
+        });
+        expect(record).toEqual(
+          expect.objectContaining({
+            contentSha256: sha256Text("Your basket is ready to recover."),
+            policyVersion: moderationConfig().policyVersion,
+          }),
+        );
+        assertModerationHttp(aimock.journal(), [
+          "Your basket is ready to recover.",
+        ]);
+        expect(
+          await service.requireCurrentAllowance({
+            subject: { kind: "AGENT_MESSAGE", messageId: turn.messageId },
+            effectiveText: "Your basket is ready to recover.",
+            policyVersion: moderationConfig().policyVersion,
+          }),
+        ).toBe(true);
+        assertModerationHttp(aimock.journal(), [
+          "Your basket is ready to recover.",
+        ]);
+      } finally {
+        await close();
+      }
+    }, 120_000);
+
+    it("Aimock-generated flagged AGENT output cannot reach B002 WhatsApp emulator", async () => {
+      const { f, aimock, close } = await moderatedFixture(
+        "moderation-aimock-block",
+        {
+          blockedTexts: ["Your basket is ready to recover."],
+        },
+      );
+      try {
+        const service = new PostgresModerationAssessmentService(
+          f.db,
+          aimock.moderate,
+          undefined,
+          aimock.readOperation,
+        );
+        const result = await runAiTurnThroughBackgroundMocks(f, {
+          takeoverThenResume: false,
+          moderation: service,
+        });
+        expect(result.aimockJournal.requestCount).toBe(1);
+        expect(f.providerHttpRequests).toHaveLength(0);
+        await f.whatsapp.assertNoAdditionalMessages({ count: 0, quietMs: 100 });
+        expect(
+          (
+            await f.db.conversationMessage.findUnique({
+              where: { id: result.messageId },
+            })
+          )?.status,
+        ).toBe("FAILED");
+        expect(
+          (
+            await f.db.conversationModerationAssessment.findFirst({
+              where: { conversationMessageId: result.messageId },
+            })
+          )?.decision,
+        ).toBe("BLOCK");
+        assertModerationHttp(aimock.journal(), [
+          "Your basket is ready to recover.",
+        ]);
+      } finally {
+        await close();
+      }
+    }, 120_000);
+
+    it("rejects a legacy unlinked AUTOMATION template before moderation and WhatsApp delivery", async () => {
+      const { f, aimock, close } = await moderatedFixture(
+        "moderation-automation-template-allow",
+      );
+      try {
+        await f.changeOwner("HUMAN", "AI", 1);
+        const message = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "OUTBOUND",
+            senderType: "AUTOMATION",
+            status: "PENDING",
+            content: "[Pending automated template]",
+          },
+        });
+        const moderation = new PostgresModerationAssessmentService(
+          f.db,
+          aimock.moderate,
+          undefined,
+          aimock.readOperation,
+        );
+        const delivery = new OutboundMessageDeliveryService(
+          f.db,
+          f.provider,
+          f.execution,
+          new AiTurnOwnershipService(f.db),
+          new OutboundSendFenceService(f.db, async () => null),
+          moderation,
+          undefined,
+          undefined,
+          // The fixture tests absent BG001 registration, not a valid provider
+          // approval. BG006 requires a linked registration before moderation.
+          { preflight: async () => ({ kind: "allowed", snapshot: null }) },
+        );
+        const template = {
+          to: f.recipient,
+          templateName: "checkout_recovery",
+          languageCode: "en_US",
+          bodyParameters: ["Your basket is ready to recover.", "cart-123"],
+        };
+        expect(
+          await delivery.sendPreparedTemplate(
+            {
+              kind: "admitted",
+              shopId: f.shopId,
+              conversationId: f.conversationId,
+              messageId: message.id,
+              terminal: false,
+              executionScope: "recovery",
+            },
+            template,
+          ),
+        ).toEqual({
+          kind: "suppressed",
+          reason: "TEMPLATE_REGISTRATION_UNAVAILABLE",
+        });
+        expect(f.providerHttpRequests).toHaveLength(0);
+        expect(aimock.journal()).toHaveLength(0);
+        expect(
+          await f.db.conversationModerationAssessment.findFirst({
+            where: { conversationMessageId: message.id },
+          }),
+        ).toBeNull();
+      } finally {
+        await close();
+      }
+    }, 120_000);
+
+    it("blocks changed AUTOMATION template parameters rather than reusing an earlier ALLOW", async () => {
+      const { f, aimock, close } = await moderatedFixture(
+        "moderation-automation-template-block",
+        {
+          blockedTexts: ["moderation-fixture-block"],
+        },
+      );
+      try {
+        await f.changeOwner("HUMAN", "AI", 1);
+        const message = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "OUTBOUND",
+            senderType: "AUTOMATION",
+            status: "PENDING",
+            content: "[Pending automated template]",
+          },
+        });
+        const subject = {
+          kind: "AUTOMATION_MESSAGE" as const,
+          messageId: message.id,
+        };
+        const moderation = new PostgresModerationAssessmentService(
+          f.db,
+          aimock.moderate,
+          undefined,
+          aimock.readOperation,
+        );
+        const allowedTemplate = {
+          to: f.recipient,
+          templateName: "checkout_recovery",
+          languageCode: "en_US",
+          bodyParameters: ["Customer-safe value"],
+        };
+        const oldContent =
+          prepareAutomatedTemplateInput(allowedTemplate).effectiveText;
+        await f.db.conversationMessage.update({
+          where: { id: message.id },
+          data: { content: oldContent },
+        });
+        expect(
+          (
+            await moderation.assessText({
+              subject,
+              shopId: f.shopId,
+              conversationId: f.conversationId,
+              effectiveText: oldContent,
+              inputKind: "TEXT",
+              policyVersion: moderationConfig().policyVersion,
+              now: new Date(),
+            })
+          ).kind,
+        ).toBe("allow");
+        const blockedTemplate = {
+          ...allowedTemplate,
+          bodyParameters: ["moderation-fixture-block"],
+        };
+        const blockedContent =
+          prepareAutomatedTemplateInput(blockedTemplate).effectiveText;
+        const delivery = new OutboundMessageDeliveryService(
+          f.db,
+          f.provider,
+          f.execution,
+          new AiTurnOwnershipService(f.db),
+          new OutboundSendFenceService(f.db, async () => null),
+          moderation,
+        );
+        expect(
+          await delivery.sendPreparedTemplate(
+            {
+              kind: "admitted",
+              shopId: f.shopId,
+              conversationId: f.conversationId,
+              messageId: message.id,
+              terminal: false,
+              executionScope: "recovery",
+            },
+            blockedTemplate,
+          ),
+        ).toMatchObject({ kind: "suppressed" });
+        expect(f.providerHttpRequests).toHaveLength(0);
+        await f.whatsapp.assertNoAdditionalMessages({ count: 0, quietMs: 100 });
+        expect(
+          await f.db.conversationModerationAssessment.findMany({
+            where: { conversationMessageId: message.id },
+            select: { decision: true, contentSha256: true },
+          }),
+        ).toEqual([
+          { decision: "ALLOW", contentSha256: sha256Text(oldContent) },
+        ]);
+        expect(
+          await moderation.requireCurrentAllowance({
+            subject,
+            effectiveText: blockedContent,
+            policyVersion: moderationConfig().policyVersion,
+          }),
+        ).toBe(false);
+        assertModerationHttp(aimock.journal(), [oldContent]);
+      } finally {
+        await close();
+      }
+    }, 120_000);
+
+    it("a terminal ALLOW does not approve changed text or a new policy, including duplicate inbound", async () => {
+      const { f, aimock, close } = await moderatedFixture(
+        "moderation-content-revision",
+      );
+      const service = new PostgresModerationAssessmentService(
+        f.db,
+        aimock.moderate,
+        undefined,
+        aimock.readOperation,
+      );
+      try {
+        const msg = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            content: "Safe first response",
+            status: "DELIVERED",
+          },
+        });
+        const subject = {
+          kind: "CUSTOMER_MESSAGE" as const,
+          messageId: msg.id,
+        };
+        const original = {
+          subject,
+          shopId: f.shopId,
+          conversationId: f.conversationId,
+          effectiveText: "Safe first response",
+          inputKind: "TEXT" as const,
+          policyVersion: moderationConfig().policyVersion,
+          now: new Date(),
+        };
+        expect((await service.assessText(original)).kind).toBe("allow");
+        expect((await service.assessText(original)).kind).toBe("allow");
+        assertModerationHttp(aimock.journal(), ["Safe first response"]);
+        await f.db.conversationMessage.update({
+          where: { id: msg.id },
+          data: { content: "Second response needs fresh approval" },
+        });
+        expect(
+          await service.requireCurrentAllowance({
+            subject,
+            effectiveText: original.effectiveText,
+            policyVersion: original.policyVersion,
+          }),
+        ).toBe(false);
+        expect(
+          (
+            await service.assessText({
+              ...original,
+              effectiveText: "Second response needs fresh approval",
+            })
+          ).kind,
+        ).toBe("allow");
+        assertModerationHttp(aimock.journal(), [
+          "Safe first response",
+          "Second response needs fresh approval",
+        ]);
+        expect(
+          await f.db.conversationModerationAssessment.count({
+            where: { conversationMessageId: msg.id },
+          }),
+        ).toBe(2);
+      } finally {
+        await close();
+      }
+    }, 120_000);
+
+    it("unknown classifier/network errors retain the same assessment and never yield ALLOW", async () => {
+      const { f, aimock, close } = await moderatedFixture("moderation-retry");
+      try {
+        const message = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            content: "Ordinary order help question",
+            status: "DELIVERED",
+          },
+        });
+        await aimock.failNextWith(429, {
+          error: { message: "rate limited", type: "rate_limit_error" },
+        });
+        const service = new PostgresModerationAssessmentService(
+          f.db,
+          aimock.moderate,
+          undefined,
+          aimock.readOperation,
+        );
+        const input = {
+          subject: { kind: "CUSTOMER_MESSAGE" as const, messageId: message.id },
+          shopId: f.shopId,
+          conversationId: f.conversationId,
+          effectiveText: message.content,
+          inputKind: "TEXT" as const,
+          policyVersion: moderationConfig().policyVersion,
+          now: new Date(),
+        };
+        expect((await service.assessText(input)).kind).toBe("retry");
+        expect((await service.assessText(input)).kind).toBe("retry");
+        assertModerationHttp(
+          aimock.journal(),
+          ["Ordinary order help question"],
+          [429],
+        );
+        expect(
+          await service.requireCurrentAllowance({
+            subject: input.subject,
+            effectiveText: input.effectiveText,
+            policyVersion: input.policyVersion,
+          }),
+        ).toBe(false);
+        expect(
+          await f.db.conversationModerationAssessment.count({
+            where: { conversationMessageId: message.id },
+          }),
+        ).toBe(1);
+      } finally {
+        await close();
+      }
+    }, 120_000);
+
+    it("malformed HTTP 200 moderation response cannot persist ALLOW or submit to WhatsApp", async () => {
+      const { f, aimock, close } = await moderatedFixture(
+        "moderation-malformed",
+      );
+      try {
+        const message = await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            content: "Please check my order",
+            status: "DELIVERED",
+          },
+        });
+        await aimock.failNextWith(200, {
+          model: "omni-moderation-latest",
+          results: [],
+        });
+        const service = new PostgresModerationAssessmentService(
+          f.db,
+          aimock.moderate,
+          undefined,
+          aimock.readOperation,
+        );
+        const subject = {
+          kind: "CUSTOMER_MESSAGE" as const,
+          messageId: message.id,
+        };
+        const outcome = await service.assessText({
+          subject,
+          shopId: f.shopId,
+          conversationId: f.conversationId,
+          effectiveText: message.content,
+          inputKind: "TEXT",
+          policyVersion: moderationConfig().policyVersion,
+          now: new Date(),
+        });
+        expect(outcome.kind).toBe("retry");
+        assertModerationHttp(aimock.journal(), ["Please check my order"]);
+        expect(
+          await f.db.conversationModerationAssessment.findFirst({
+            where: { conversationMessageId: message.id },
+            select: { decision: true },
+          }),
+        ).toEqual({ decision: "RETRYABLE_ERROR" });
+        expect(
+          await service.requireCurrentAllowance({
+            subject,
+            effectiveText: message.content,
+            policyVersion: moderationConfig().policyVersion,
+          }),
+        ).toBe(false);
+        expect(f.providerHttpRequests).toHaveLength(0);
+      } finally {
+        await close();
+      }
+    }, 120_000);
+
+    it.each([false, true])(
+      "keeps failed old backlog historical and latest blocked=%s authoritative in PostgreSQL",
+      async (blocked) => {
+        const { f, aimock, close } = await moderatedFixture(
+          "latest-objective-" + blocked,
+        );
+        const { platformConsumerConfiguration } =
+          await import("../../src/services/platform-configuration/consumers.js");
+        const operation = vi
+          .spyOn(platformConsumerConfiguration, "requireModerationOperation")
+          .mockImplementation(aimock.readOperation as never);
+        try {
+          const boundary = new Date(Date.now() - 8 * 60 * 60 * 1000),
+            latestAt = new Date(Date.now() - 1000);
+          const old = await f.db.conversationMessage.create({
+            data: {
+              conversationId: f.conversationId,
+              direction: "INBOUND",
+              senderType: "CUSTOMER",
+              status: "DELIVERED",
+              content: "What categories do you sell?",
+              createdAt: boundary,
+            },
+          });
+          const content = blocked
+            ? "moderation-fixture-block"
+            : "Tell me about The Videographer Snowboard";
+          await f.db.conversationMessage.create({
+            data: {
+              id: "zz-latest-" + f.conversationId,
+              conversationId: f.conversationId,
+              direction: "INBOUND",
+              senderType: "CUSTOMER",
+              status: "DELIVERED",
+              content,
+              createdAt: latestAt,
+            },
+          });
+          const sameTime = await f.db.conversationMessage.create({
+            data: {
+              id: "aa-previous-" + f.conversationId,
+              conversationId: f.conversationId,
+              direction: "OUTBOUND",
+              senderType: "AGENT",
+              status: "SENT",
+              content: "Earlier same-timestamp answer",
+              createdAt: latestAt,
+              sentAt: latestAt,
+            },
+          });
+          await new PostgresModerationAssessmentService(
+            f.db,
+            aimock.moderate,
+            undefined,
+            aimock.readOperation,
+          ).assessText({
+            subject: { kind: "AGENT_MESSAGE", messageId: sameTime.id },
+            shopId: f.shopId,
+            conversationId: f.conversationId,
+            effectiveText: sameTime.content,
+            inputKind: "TEXT",
+            policyVersion: moderationConfig().policyVersion,
+            now: new Date(),
+          });
+          const gate = new ModerationTurnGate(
+            new PostgresModerationAssessmentService(
+              f.db,
+              aimock.moderate,
+              undefined,
+              aimock.readOperation,
+            ),
+          );
+          expect(await gate.moderatePending(f.conversationId, boundary)).toBe(
+            blocked ? "suppressed" : "allowed",
+          );
+          const loaded = await loadCommerceHistory(f.conversationId, boundary);
+          expect(loaded.currentMessages).toEqual(
+            blocked ? [] : [{ role: "user", content }],
+          );
+          expect(loaded.history).toContainEqual({
+            role: "user",
+            content: old.content,
+          });
+          expect(loaded.history).toContainEqual({
+            role: "assistant",
+            content: `${UNCONFIRMED_DELIVERY} Earlier same-timestamp answer`,
+          });
+          expect(f.whatsapp.messages).toHaveLength(0);
+          expect(
+            await f.db.conversationMessage.count({
+              where: { conversationId: f.conversationId, direction: "INBOUND" },
+            }),
+          ).toBeGreaterThanOrEqual(2);
+        } finally {
+          operation.mockRestore();
+          await close();
+        }
+      },
+      120000,
+    );
+
+    it("excludes failed deliveries before the history limit and preserves only moderated communicated offers", async () => {
+      const { f, aimock, close } = await moderatedFixture(
+        "delivery-aware-history",
+      );
+      const { platformConsumerConfiguration } =
+        await import("../../src/services/platform-configuration/consumers.js");
+      const operation = vi
+        .spyOn(platformConsumerConfiguration, "requireModerationOperation")
+        .mockImplementation(aimock.readOperation as never);
+      try {
+        const boundary = new Date(Date.now() - 1000);
+        const moderation = new PostgresModerationAssessmentService(
+          f.db,
+          aimock.moderate,
+          undefined,
+          aimock.readOperation,
+        );
+        const receipt = (code: string) =>
+          JSON.stringify({
+            contract: "moda.whatsapp.automated-template-parameters.v1",
+            templateName: "checkout_recovery",
+            languageCode: "en_US",
+            bodyParameters: [code],
+            recoveryPromise: {
+              kind: "CODE_OFFER",
+              promotionTarget: "CHECKOUT",
+              providerDiscountId: code,
+              code,
+            },
+          });
+        const createAutomation = async (
+          code: string,
+          status: "FAILED" | "SENT" | "DELIVERED",
+          offset: number,
+          approve = true,
+        ) => {
+          const at = new Date(+boundary - offset);
+          const message = await f.db.conversationMessage.create({
+            data: {
+              conversationId: f.conversationId,
+              direction: "OUTBOUND",
+              senderType: "AUTOMATION",
+              content: receipt(code),
+              status,
+              createdAt: at,
+              sentAt: at,
+              providerMessageId: `${f.conversationId}-${code}`,
+              ...(status === "DELIVERED" ? { deliveredAt: at } : {}),
+              ...(status === "FAILED"
+                ? { failedAt: at, providerFailureCode: "131049" }
+                : {}),
+            },
+          });
+          if (approve)
+            expect(
+              (
+                await moderation.assessText({
+                  subject: {
+                    kind: "AUTOMATION_MESSAGE",
+                    messageId: message.id,
+                  },
+                  shopId: f.shopId,
+                  conversationId: f.conversationId,
+                  effectiveText: message.content,
+                  inputKind: "TEXT",
+                  policyVersion: moderationConfig().policyVersion,
+                  now: new Date(),
+                })
+              ).kind,
+            ).toBe("allow");
+          return message;
+        };
+        const communicated = await createAutomation(
+          "SAVE20",
+          "DELIVERED",
+          60000,
+        );
+        const failed = await createAutomation("FAILED10", "FAILED", 50000);
+        // More failed rows than the entire SQL history window; they must not
+        // displace the earlier successful offer or consume moderation work.
+        await f.db.conversationMessage.createMany({
+          data: Array.from({ length: 21 }, (_, index) => ({
+            conversationId: f.conversationId,
+            direction: "OUTBOUND" as const,
+            senderType: "AUTOMATION" as const,
+            status: "FAILED" as const,
+            content: receipt(`FAILED-${index}`),
+            createdAt: new Date(+boundary - 40000 + index),
+            sentAt: new Date(+boundary - 40000 + index),
+            failedAt: new Date(+boundary - 40000 + index),
+            providerFailureCode: "131049",
+          })),
+        });
+        await createAutomation("UNCONFIRMED30", "SENT", 30000);
+        await createAutomation("UNMODERATED40", "DELIVERED", 20000, false);
+        const quoted = await createAutomation("QUOTED25", "SENT", 10000);
+        await f.db.conversationMessage.create({
+          data: {
+            conversationId: f.conversationId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            status: "DELIVERED",
+            createdAt: boundary,
+            providerMessageId: `${f.conversationId}-question`,
+            inReplyToProviderId: quoted.providerMessageId,
+            content: "Can I use this discount?",
+          },
+        });
+        expect(
+          await new ModerationTurnGate(moderation).moderatePending(
+            f.conversationId,
+            boundary,
+          ),
+        ).toBe("allowed");
+        const loaded = await loadCommerceHistory(f.conversationId, boundary);
+        expect(loaded.currentMessages).toEqual([
+          { role: "user", content: "Can I use this discount?" },
+        ]);
+        expect(loaded.history).toHaveLength(3);
+        expect(loaded.history).toContainEqual({
+          role: "assistant",
+          content: UNCONFIRMED_AUTOMATION,
+        });
+        for (const message of [communicated, quoted]) {
+          expect(
+            loaded.history.some(
+              (row) =>
+                row.content.includes("Delivery confirmed") &&
+                row.content.endsWith(message.content),
+            ),
+          ).toBe(true);
+        }
+        expect(JSON.stringify(loaded)).not.toMatch(
+          /FAILED10|FAILED-[0-9]|UNCONFIRMED30|UNMODERATED40/,
+        );
+        expect(
+          await f.db.conversationMessage.findUniqueOrThrow({
+            where: { id: failed.id },
+          }),
+        ).toEqual(failed);
+        expect(f.whatsapp.messages).toHaveLength(0);
+      } finally {
+        operation.mockRestore();
+        await close();
+      }
+    }, 120_000);
+  },
+);

@@ -20,11 +20,17 @@ import {
 
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
-import { createOpenAITranslationProvider, type TranslationProvider } from "../providers/translation.provider.js";
+import {
+  createOpenAITranslationProvider,
+  type TranslationProvider,
+} from "../providers/translation.provider.js";
 import { readSupportTranslationCredential } from "./platform-configuration/support-translation.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
-import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
+import {
+  currentTranslationRuntimeConfig,
+  type TranslationRuntimeConfigReader,
+} from "./translation-runtime-config.js";
 import { ensureDeterministicTranslationQueueJob } from "./translation-batch-runtime/queue-job-repair.js";
 import { routeTranslationBatchCorrelation } from "./translation-batch-runtime/provider-correlation.js";
 
@@ -36,8 +42,13 @@ const UNAVAILABLE_CREDENTIAL = "Translation provider credential is unavailable";
 
 const TERMINAL_BATCH_STATUSES = ["FAILED", "EXPIRED", "CANCELLED"] as const;
 
-type ReconciliationQueue = Pick<Queue, "add" | "getJob"> & { close?: () => Promise<void> };
-type ReconciliationDatabase = Pick<typeof prisma, "$queryRaw" | "$executeRaw" | "$transaction">;
+type ReconciliationQueue = Pick<Queue, "add" | "getJob"> & {
+  close?: () => Promise<void>;
+};
+type ReconciliationDatabase = Pick<
+  typeof prisma,
+  "$queryRaw" | "$executeRaw" | "$transaction"
+>;
 
 type BatchRecoveryRow = {
   id: string;
@@ -61,32 +72,55 @@ export type TranslationReconciliationResult = {
 export class TranslationReconciliationService {
   private readonly queue: ReconciliationQueue;
   private readonly database: ReconciliationDatabase;
-  private readonly providerFactory: (options: { provider: string; model: string; apiKey: string }) => TranslationProvider;
+  private readonly providerFactory: (options: {
+    provider: string;
+    model: string;
+    apiKey: string;
+  }) => TranslationProvider;
   private readonly credentialReader: (provider: string) => Promise<string>;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
-  constructor(options: {
-    queue?: ReconciliationQueue;
-    database?: ReconciliationDatabase;
-    providerFactory?: (options: { provider: string; model: string; apiKey: string }) => TranslationProvider;
-    credentialReader?: (provider: string) => Promise<string>;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-  } = {}) {
-    this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, { connection: connectionRedis });
+  constructor(
+    options: {
+      queue?: ReconciliationQueue;
+      database?: ReconciliationDatabase;
+      providerFactory?: (options: {
+        provider: string;
+        model: string;
+        apiKey: string;
+      }) => TranslationProvider;
+      credentialReader?: (provider: string) => Promise<string>;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+    } = {},
+  ) {
+    this.queue =
+      options.queue ??
+      new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
+        connection: connectionRedis,
+      });
     this.database = options.database ?? prisma;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) => createOpenAITranslationProvider(providerOptions));
-    this.credentialReader = options.credentialReader ?? readSupportTranslationCredential;
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.credentialReader =
+      options.credentialReader ?? readSupportTranslationCredential;
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
-  async reconcile(reconciliationRequestId?: string, snapshot = currentTranslationRuntimeConfig(this.runtimeConfig)): Promise<TranslationReconciliationResult> {
+  async reconcile(
+    reconciliationRequestId?: string,
+    snapshot = currentTranslationRuntimeConfig(this.runtimeConfig),
+  ): Promise<TranslationReconciliationResult> {
     const result: TranslationReconciliationResult = {
       repairedJobs: 0,
       requestsProcessed: 0,
       correlationConflicts: 0,
     };
 
-    const translations = await this.database.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    const translations = await this.database.$queryRaw<
+      Array<{ id: string }>
+    >(Prisma.sql`
       SELECT t."id"
       FROM "support"."MerchantMessageTranslation" t
       WHERE t."status" = 'PENDING'
@@ -96,14 +130,22 @@ export class TranslationReconciliationService {
       LIMIT ${snapshot.translationReconciliationPageSize}
     `);
     for (const translation of translations) {
-      result.repairedJobs += await ensureDeterministicTranslationQueueJob(this.queue, {
-        id: createTranslationDispatchJobId(translation.id),
-        name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_DISPATCH,
-        data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationId: translation.id } satisfies TranslationDispatchJob,
-      });
+      result.repairedJobs += await ensureDeterministicTranslationQueueJob(
+        this.queue,
+        {
+          id: createTranslationDispatchJobId(translation.id),
+          name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_DISPATCH,
+          data: {
+            schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION,
+            translationId: translation.id,
+          } satisfies TranslationDispatchJob,
+        },
+      );
     }
 
-    const readyBatches = await this.database.$queryRaw<BatchRecoveryRow[]>(Prisma.sql`
+    const readyBatches = await this.database.$queryRaw<
+      BatchRecoveryRow[]
+    >(Prisma.sql`
       SELECT "id", "status", "pollSequence", "provider", "model", "inputFileId", "providerBatchId", "submissionStartedAt", "outputFileId", "errorFileId"
       FROM "support"."MerchantTranslationBatch"
       WHERE "status" = 'READY' AND ("nextSubmitAt" IS NULL OR "nextSubmitAt" <= NOW())
@@ -114,7 +156,9 @@ export class TranslationReconciliationService {
       result.repairedJobs += await this.ensureSubmitJob(batch.id);
     }
 
-    const duePollBatches = await this.database.$queryRaw<BatchRecoveryRow[]>(Prisma.sql`
+    const duePollBatches = await this.database.$queryRaw<
+      BatchRecoveryRow[]
+    >(Prisma.sql`
       SELECT "id", "status", "pollSequence", "provider", "model", "inputFileId", "providerBatchId", "submissionStartedAt", "outputFileId", "errorFileId"
       FROM "support"."MerchantTranslationBatch"
       WHERE "status" = 'SUBMITTED' AND ("nextPollAt" IS NULL OR "nextPollAt" <= NOW())
@@ -125,7 +169,9 @@ export class TranslationReconciliationService {
       result.repairedJobs += await this.ensurePollJob(batch);
     }
 
-    const completedBatches = await this.database.$queryRaw<BatchRecoveryRow[]>(Prisma.sql`
+    const completedBatches = await this.database.$queryRaw<
+      BatchRecoveryRow[]
+    >(Prisma.sql`
       SELECT "id", "status", "pollSequence", "provider", "model", "inputFileId", "providerBatchId", "submissionStartedAt", "outputFileId", "errorFileId"
       FROM "support"."MerchantTranslationBatch"
       WHERE "status" = 'PROVIDER_COMPLETED'
@@ -136,7 +182,9 @@ export class TranslationReconciliationService {
       result.repairedJobs += await this.ensureResultsJob(batch.id);
     }
 
-    const unknownBatches = await this.database.$queryRaw<BatchRecoveryRow[]>(Prisma.sql`
+    const unknownBatches = await this.database.$queryRaw<
+      BatchRecoveryRow[]
+    >(Prisma.sql`
       SELECT "id", "status", "pollSequence", "provider", "model", "inputFileId", "providerBatchId", "submissionStartedAt", "outputFileId", "errorFileId"
       FROM "support"."MerchantTranslationBatch"
       WHERE "status" = 'SUBMISSION_UNKNOWN'
@@ -146,14 +194,26 @@ export class TranslationReconciliationService {
     for (const batch of unknownBatches ?? []) {
       const correlation = await this.reconcileUnknownBatch(batch, snapshot);
       result.correlationConflicts += correlation === "conflict" ? 1 : 0;
-      if (correlation === "completed") result.repairedJobs += await this.ensureResultsJob(batch.id);
-      if (correlation === "poll") result.repairedJobs += await this.ensurePollJob(batch);
+      if (correlation === "completed")
+        result.repairedJobs += await this.ensureResultsJob(batch.id);
+      if (correlation === "poll")
+        result.repairedJobs += await this.ensurePollJob(batch);
     }
 
-    await this.queue.getJob(createTranslationReconcileJobId("availability-check"));
-    const requests = await this.claimRequests(reconciliationRequestId, snapshot);
+    await this.queue.getJob(
+      createTranslationReconcileJobId("availability-check"),
+    );
+    const requests = await this.claimRequests(
+      reconciliationRequestId,
+      snapshot,
+    );
     for (const request of requests ?? []) {
-      await this.processRequest(request.id, request.scope, request.translationId, snapshot);
+      await this.processRequest(
+        request.id,
+        request.scope,
+        request.translationId,
+        snapshot,
+      );
       result.requestsProcessed += 1;
     }
     return result;
@@ -175,15 +235,24 @@ export class TranslationReconciliationService {
     return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createTranslationBatchSubmitJobId(batchId),
       name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_SUBMIT,
-      data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationBatchId: batchId } satisfies TranslationBatchSubmitJob,
+      data: {
+        schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION,
+        translationBatchId: batchId,
+      } satisfies TranslationBatchSubmitJob,
     });
   }
 
-  private async ensurePollJob(batch: Pick<BatchRecoveryRow, "id" | "pollSequence">): Promise<number> {
+  private async ensurePollJob(
+    batch: Pick<BatchRecoveryRow, "id" | "pollSequence">,
+  ): Promise<number> {
     return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createTranslationBatchPollJobId(batch.id, batch.pollSequence),
       name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_POLL,
-      data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationBatchId: batch.id, pollSequence: batch.pollSequence } satisfies TranslationBatchPollJob,
+      data: {
+        schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION,
+        translationBatchId: batch.id,
+        pollSequence: batch.pollSequence,
+      } satisfies TranslationBatchPollJob,
     });
   }
 
@@ -191,17 +260,23 @@ export class TranslationReconciliationService {
     return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createTranslationBatchResultsJobId(batchId),
       name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_RESULTS,
-      data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationBatchId: batchId } satisfies TranslationBatchResultsJob,
+      data: {
+        schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION,
+        translationBatchId: batchId,
+      } satisfies TranslationBatchResultsJob,
     });
   }
 
-  private async reconcileUnknownBatch(batch: {
-    id: string;
-    provider: string;
-    model: string;
-    inputFileId: string | null;
-    submissionStartedAt: Date | null;
-  }, snapshot: ReturnType<typeof currentTranslationRuntimeConfig>): Promise<"poll" | "completed" | "none" | "conflict" | "stale"> {
+  private async reconcileUnknownBatch(
+    batch: {
+      id: string;
+      provider: string;
+      model: string;
+      inputFileId: string | null;
+      submissionStartedAt: Date | null;
+    },
+    snapshot: ReturnType<typeof currentTranslationRuntimeConfig>,
+  ): Promise<"poll" | "completed" | "none" | "conflict" | "stale"> {
     // Resolve against the Commerce translation credential row for this operation.
     // A revoked row must never borrow legacy OPENAI_API_KEY or ai.providers.
     let apiKey: string;
@@ -210,15 +285,28 @@ export class TranslationReconciliationService {
       if (!apiKey.trim()) throw new Error(UNAVAILABLE_CREDENTIAL);
     } catch (error) {
       try {
-        logger.warn("background.support_translation.reconciliation_credential_unavailable", {
-          batchId: batch.id, reasonCode: "PROVIDER_CREDENTIAL_UNAVAILABLE",
-        });
-      } catch { /* Logging must not affect credential enforcement. */ }
+        logger.warn(
+          "background.support_translation.reconciliation_credential_unavailable",
+          {
+            batchId: batch.id,
+            reasonCode: "PROVIDER_CREDENTIAL_UNAVAILABLE",
+          },
+        );
+      } catch {
+        /* Logging must not affect credential enforcement. */
+      }
       throw new Error(UNAVAILABLE_CREDENTIAL, { cause: error });
     }
-    const provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
+    const provider = this.providerFactory({
+      provider: batch.provider,
+      model: batch.model,
+      apiKey,
+    });
     const submittedAfter = batch.submissionStartedAt
-      ? new Date(batch.submissionStartedAt.getTime() - snapshot.translationClaimTimeoutSeconds * 1000)
+      ? new Date(
+          batch.submissionStartedAt.getTime() -
+            snapshot.translationClaimTimeoutSeconds * 1000,
+        )
       : undefined;
     const correlation = await provider.findBatchByCorrelation({
       logicalBatchId: batch.id,
@@ -251,8 +339,15 @@ export class TranslationReconciliationService {
     return completed ? "completed" : "poll";
   }
 
-  private async claimRequests(requestId: string | undefined, snapshot: ReturnType<typeof currentTranslationRuntimeConfig>): Promise<Array<{ id: string; scope: string; translationId: string | null }>> {
-    const staleBefore = new Date(Date.now() - snapshot.translationClaimTimeoutSeconds * 1000);
+  private async claimRequests(
+    requestId: string | undefined,
+    snapshot: ReturnType<typeof currentTranslationRuntimeConfig>,
+  ): Promise<
+    Array<{ id: string; scope: string; translationId: string | null }>
+  > {
+    const staleBefore = new Date(
+      Date.now() - snapshot.translationClaimTimeoutSeconds * 1000,
+    );
     return this.database.$queryRaw(Prisma.sql`
       UPDATE "support"."MerchantTranslationReconciliationRequest"
       SET "status" = 'PROCESSING', "startedAt" = NOW()
@@ -269,12 +364,19 @@ export class TranslationReconciliationService {
     `);
   }
 
-  private async processRequest(id: string, scope: string, translationId: string | null, snapshot: ReturnType<typeof currentTranslationRuntimeConfig>): Promise<void> {
+  private async processRequest(
+    id: string,
+    scope: string,
+    translationId: string | null,
+    snapshot: ReturnType<typeof currentTranslationRuntimeConfig>,
+  ): Promise<void> {
     try {
       if (scope === "TRANSLATION" && translationId) {
         await this.reconcileTargetedTranslation(translationId, snapshot);
       } else if (scope === "FAILED_TRANSLATIONS") {
-        const restored = await this.database.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        const restored = await this.database.$queryRaw<
+          Array<{ id: string }>
+        >(Prisma.sql`
           UPDATE "support"."MerchantMessageTranslation"
           SET "currentBatchId" = NULL, "status" = 'PENDING', "nextAttemptAt" = NOW(), "retryCount" = "retryCount" + 1, "failureCode" = NULL, "updatedAt" = NOW()
           WHERE "status" = 'FAILED'
@@ -295,10 +397,15 @@ export class TranslationReconciliationService {
           await ensureDeterministicTranslationQueueJob(this.queue, {
             id: createTranslationDispatchJobId(translation.id),
             name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_DISPATCH,
-            data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationId: translation.id } satisfies TranslationDispatchJob,
+            data: {
+              schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION,
+              translationId: translation.id,
+            } satisfies TranslationDispatchJob,
           });
         }
-        const remaining = await this.database.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        const remaining = await this.database.$queryRaw<
+          Array<{ id: string }>
+        >(Prisma.sql`
           SELECT t."id"
           FROM "support"."MerchantMessageTranslation" t
           WHERE t."status" = 'FAILED'
@@ -333,14 +440,19 @@ export class TranslationReconciliationService {
     }
   }
 
-  private async reconcileTargetedTranslation(translationId: string, snapshot: ReturnType<typeof currentTranslationRuntimeConfig>): Promise<void> {
-    const rows = await this.database.$queryRaw<Array<{
-      id: string;
-      status: string;
-      currentBatchId: string | null;
-      batchStatus: string | null;
-      pollSequence: number | null;
-    }>>(Prisma.sql`
+  private async reconcileTargetedTranslation(
+    translationId: string,
+    snapshot: ReturnType<typeof currentTranslationRuntimeConfig>,
+  ): Promise<void> {
+    const rows = await this.database.$queryRaw<
+      Array<{
+        id: string;
+        status: string;
+        currentBatchId: string | null;
+        batchStatus: string | null;
+        pollSequence: number | null;
+      }>
+    >(Prisma.sql`
       SELECT t."id", t."status", t."currentBatchId", b."status" AS "batchStatus", b."pollSequence"
       FROM "support"."MerchantMessageTranslation" t
       LEFT JOIN "support"."MerchantTranslationBatch" b ON b."id" = t."currentBatchId"
@@ -353,18 +465,35 @@ export class TranslationReconciliationService {
       if (translation.batchStatus === "READY") {
         await this.ensureSubmitJob(translation.currentBatchId);
       } else if (translation.batchStatus === "SUBMITTED") {
-        await this.ensurePollJob({ id: translation.currentBatchId, pollSequence: translation.pollSequence ?? 0 });
+        await this.ensurePollJob({
+          id: translation.currentBatchId,
+          pollSequence: translation.pollSequence ?? 0,
+        });
       } else if (translation.batchStatus === "PROVIDER_COMPLETED") {
         await this.ensureResultsJob(translation.currentBatchId);
       } else if (translation.batchStatus === "SUBMISSION_UNKNOWN") {
-        const batch = await this.database.$queryRaw<BatchRecoveryRow[]>(Prisma.sql`
+        const batch = await this.database.$queryRaw<
+          BatchRecoveryRow[]
+        >(Prisma.sql`
           SELECT "id", "status", "pollSequence", "provider", "model", "inputFileId", "providerBatchId", "submissionStartedAt", "outputFileId", "errorFileId"
           FROM "support"."MerchantTranslationBatch" WHERE "id" = ${translation.currentBatchId}
         `);
-        const correlation = batch[0] ? await this.reconcileUnknownBatch(batch[0], snapshot) : "stale";
-        if (correlation === "completed") await this.ensureResultsJob(translation.currentBatchId);
-        if (correlation === "poll") await this.ensurePollJob({ id: translation.currentBatchId, pollSequence: translation.pollSequence ?? 0 });
-      } else if (translation.status === "FAILED" && TERMINAL_BATCH_STATUSES.includes(translation.batchStatus as typeof TERMINAL_BATCH_STATUSES[number])) {
+        const correlation = batch[0]
+          ? await this.reconcileUnknownBatch(batch[0], snapshot)
+          : "stale";
+        if (correlation === "completed")
+          await this.ensureResultsJob(translation.currentBatchId);
+        if (correlation === "poll")
+          await this.ensurePollJob({
+            id: translation.currentBatchId,
+            pollSequence: translation.pollSequence ?? 0,
+          });
+      } else if (
+        translation.status === "FAILED" &&
+        TERMINAL_BATCH_STATUSES.includes(
+          translation.batchStatus as (typeof TERMINAL_BATCH_STATUSES)[number],
+        )
+      ) {
         await this.restoreTranslation(translationId);
         await this.ensureDispatchJob(translationId);
       }
@@ -372,19 +501,25 @@ export class TranslationReconciliationService {
     }
 
     if (translation.status !== "FAILED") return;
-    if (await this.restoreTranslation(translationId)) await this.ensureDispatchJob(translationId);
+    if (await this.restoreTranslation(translationId))
+      await this.ensureDispatchJob(translationId);
   }
 
   private async ensureDispatchJob(translationId: string): Promise<number> {
     return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createTranslationDispatchJobId(translationId),
       name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_DISPATCH,
-      data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationId } satisfies TranslationDispatchJob,
+      data: {
+        schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION,
+        translationId,
+      } satisfies TranslationDispatchJob,
     });
   }
 
   private async restoreTranslation(translationId: string): Promise<boolean> {
-    const rows = await this.database.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    const rows = await this.database.$queryRaw<
+      Array<{ id: string }>
+    >(Prisma.sql`
       UPDATE "support"."MerchantMessageTranslation" t
       SET "currentBatchId" = NULL, "status" = 'PENDING', "nextAttemptAt" = NOW(), "retryCount" = "retryCount" + 1, "updatedAt" = NOW()
       WHERE t."id" = ${translationId}
@@ -399,4 +534,5 @@ export class TranslationReconciliationService {
   }
 }
 
-export const translationReconciliationService = new TranslationReconciliationService();
+export const translationReconciliationService =
+  new TranslationReconciliationService();

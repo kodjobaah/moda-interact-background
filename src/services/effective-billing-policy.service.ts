@@ -131,21 +131,25 @@ export class EffectiveBillingPolicyResolver {
       },
     });
 
-    if (!subscription || subscription.status === SubscriptionProjectionStatus.NO_CONTRACT) {
+    if (
+      !subscription ||
+      subscription.status === SubscriptionProjectionStatus.NO_CONTRACT
+    ) {
       throw new EffectiveBillingPolicyError(
         "NO_CONTRACT",
         `Shop ${shopId} has no active Shopify billing contract`,
       );
     }
 
-    const frozenWooPaid = subscription.status === SubscriptionProjectionStatus.FROZEN
-      && subscription.shop.platform === "WOOCOMMERCE"
-      && subscription.plan?.kind === BillingPlanKind.PAID_METERED
-      && subscription.plan.active;
+    const frozenWooPaid =
+      subscription.status === SubscriptionProjectionStatus.FROZEN &&
+      subscription.shop.platform === "WOOCOMMERCE" &&
+      subscription.plan?.kind === BillingPlanKind.PAID_METERED &&
+      subscription.plan.active;
 
     if (
-      subscription.status === SubscriptionProjectionStatus.FROZEN
-      && !frozenWooPaid
+      subscription.status === SubscriptionProjectionStatus.FROZEN &&
+      !frozenWooPaid
     ) {
       throw new EffectiveBillingPolicyError(
         "SUBSCRIPTION_FROZEN",
@@ -164,7 +168,8 @@ export class EffectiveBillingPolicyResolver {
       subscription.status === SubscriptionProjectionStatus.UNMAPPED ||
       !subscription.plan ||
       !subscription.plan.active ||
-      (!activeSubscriptionStatuses.includes(subscription.status) && !frozenWooPaid)
+      (!activeSubscriptionStatuses.includes(subscription.status) &&
+        !frozenWooPaid)
     ) {
       throw new EffectiveBillingPolicyError(
         "UNMAPPED_PLAN",
@@ -181,26 +186,39 @@ export class EffectiveBillingPolicyResolver {
 
     const plan = subscription.plan;
 
-    const [platformPolicy, override, counter, shopFeaturePreferences] = await Promise.all([
-      this.client.platformBillingPolicy.findUnique({ where: { id: "default" } }),
-      this.client.shopBillingPolicyOverride.findUnique({ where: { shopId } }),
-      this.client.shopEntitlementCounter.findUnique({
-        where: {
-          shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" },
-        },
-        select: { grantedQuantity: true, committedQuantity: true, reservedQuantity: true },
-      }),
-      this.client.shopFeaturePreference.findMany({
-        where: { shopId },
-        include: { feature: true },
-      }),
-    ]);
+    const [platformPolicy, override, counter, shopFeaturePreferences] =
+      await Promise.all([
+        this.client.platformBillingPolicy.findUnique({
+          where: { id: "default" },
+        }),
+        this.client.shopBillingPolicyOverride.findUnique({ where: { shopId } }),
+        this.client.shopEntitlementCounter.findUnique({
+          where: {
+            shopId_counter: {
+              shopId,
+              counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+            },
+          },
+          select: {
+            grantedQuantity: true,
+            committedQuantity: true,
+            reservedQuantity: true,
+          },
+        }),
+        this.client.shopFeaturePreference.findMany({
+          where: { shopId },
+          include: { feature: true },
+        }),
+      ]);
 
     if (!platformPolicy) {
       throw invalidConfiguration(shopId, "platform policy is missing");
     }
     if (!counter) {
-      throw invalidConfiguration(shopId, "lifetime Free recovery counter is missing");
+      throw invalidConfiguration(
+        shopId,
+        "lifetime Free recovery counter is missing",
+      );
     }
 
     const billingPeriodCounter =
@@ -209,7 +227,8 @@ export class EffectiveBillingPolicyResolver {
             where: {
               billingPeriodId_counter: {
                 billingPeriodId: subscription.billingPeriod.id,
-                counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+                counter:
+                  BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
               },
             },
           })
@@ -270,7 +289,8 @@ export class EffectiveBillingPolicyResolver {
       : null;
 
     const newRecoveriesPaused =
-      platformPolicy.globalPauseNewRecoveries || activeOverride?.pauseNewRecoveries === true;
+      platformPolicy.globalPauseNewRecoveries ||
+      activeOverride?.pauseNewRecoveries === true;
     const automatedWhatsappPaused =
       platformPolicy.globalPauseAutomatedWhatsapp ||
       activeOverride?.pauseAutomatedWhatsapp === true;
@@ -309,8 +329,7 @@ export class EffectiveBillingPolicyResolver {
       freeAllowance,
       shopifyUsageEventHandle: plan.shopifyUsageEventHandle,
       billingPeriod:
-        plan.kind === BillingPlanKind.PAID_METERED &&
-        subscription.billingPeriod
+        plan.kind === BillingPlanKind.PAID_METERED && subscription.billingPeriod
           ? {
               id: subscription.billingPeriod.id,
               shopId: subscription.billingPeriod.shopId,
@@ -322,7 +341,7 @@ export class EffectiveBillingPolicyResolver {
                 subscription.billingPeriod.periodEnd,
                 now,
                 subscription.shop.platform === "WOOCOMMERCE"
-                  ? subscription.providerCoverageEndAt ?? null
+                  ? (subscription.providerCoverageEndAt ?? null)
                   : null,
               ),
               includedCounter: {
@@ -330,14 +349,15 @@ export class EffectiveBillingPolicyResolver {
                 shopId: billingPeriodCounter!.shopId,
                 billingPeriodId: billingPeriodCounter!.billingPeriodId,
                 grantedQuantity: billingPeriodCounter!.grantedQuantity,
-                currentAllowanceQuantity: billingPeriodCounter!.currentAllowanceQuantity,
+                currentAllowanceQuantity:
+                  billingPeriodCounter!.currentAllowanceQuantity,
                 committedQuantity: billingPeriodCounter!.committedQuantity,
                 reservedQuantity: billingPeriodCounter!.reservedQuantity,
                 forfeitedQuantity: billingPeriodCounter!.forfeitedQuantity,
               },
             }
           : null,
-          recoveryCreditPack,
+      recoveryCreditPack,
       outboundSoftLimit: limits.soft,
       outboundHardLimit: limits.hard,
       terminalMessageReservedSlots,
@@ -347,26 +367,34 @@ export class EffectiveBillingPolicyResolver {
       pauseReasons,
       policyVersions: {
         platform: platformPolicy.version,
-        shopOverride: activeOverride ? activeOverride.updatedAt.getTime() : null,
+        shopOverride: activeOverride
+          ? activeOverride.updatedAt.getTime()
+          : null,
         plan: plan.updatedAt,
       },
     };
   }
 }
 
-function resolveRecoveryCreditPackConfiguration(
-  plan: {
-    recoveryCreditPackEnabled: boolean;
-    recoveryCreditsPerPack: number | null;
-    shopifyRecoveryCreditPackEventHandle: string | null;
-    shopifyUsageEventHandle: string | null;
-    kind: BillingPlanKind;
-    includedRecoveryConversationAllowance: number | null;
-  },
-): Omit<RecoveryCreditPackPolicy, "includedRecoveryConversationAllowance"> | null {
+function resolveRecoveryCreditPackConfiguration(plan: {
+  recoveryCreditPackEnabled: boolean;
+  recoveryCreditsPerPack: number | null;
+  shopifyRecoveryCreditPackEventHandle: string | null;
+  shopifyUsageEventHandle: string | null;
+  kind: BillingPlanKind;
+  includedRecoveryConversationAllowance: number | null;
+}): Omit<
+  RecoveryCreditPackPolicy,
+  "includedRecoveryConversationAllowance"
+> | null {
   if (!plan.recoveryCreditPackEnabled) return null;
   const creditsPerPack = plan.recoveryCreditsPerPack;
-  if (typeof creditsPerPack !== "number" || !Number.isSafeInteger(creditsPerPack) || creditsPerPack <= 0) return null;
+  if (
+    typeof creditsPerPack !== "number" ||
+    !Number.isSafeInteger(creditsPerPack) ||
+    creditsPerPack <= 0
+  )
+    return null;
   const eventHandle = plan.shopifyRecoveryCreditPackEventHandle?.trim();
   if (!eventHandle) return null;
   if (eventHandle === plan.shopifyUsageEventHandle) return null;
@@ -393,9 +421,21 @@ function resolveFreeAllowance(
   committed: number,
   reserved: number,
 ): FreeAllowancePolicy {
-  const grantValue = validateNonNegativeInteger(shopId, "lifetime Free grant", grant);
-  const committedValue = validateNonNegativeInteger(shopId, "committed lifetime Free credits", committed);
-  const reservedValue = validateNonNegativeInteger(shopId, "reserved lifetime Free credits", reserved);
+  const grantValue = validateNonNegativeInteger(
+    shopId,
+    "lifetime Free grant",
+    grant,
+  );
+  const committedValue = validateNonNegativeInteger(
+    shopId,
+    "committed lifetime Free credits",
+    committed,
+  );
+  const reservedValue = validateNonNegativeInteger(
+    shopId,
+    "reserved lifetime Free credits",
+    reserved,
+  );
   if (committedValue + reservedValue > grantValue) {
     throw invalidConfiguration(
       shopId,
@@ -449,17 +489,31 @@ function validatePaidBillingPeriod(
     period.shopId !== shopId ||
     period.subscriptionId !== subscription.id ||
     period.status !== BillingPeriodStatus.OPEN ||
-    period.periodStart.getTime() !== subscription.currentPeriodStart.getTime() ||
+    period.periodStart.getTime() !==
+      subscription.currentPeriodStart.getTime() ||
     period.periodEnd.getTime() !== subscription.currentPeriodEnd.getTime()
   ) {
-    throw invalidConfiguration(shopId, "paid billing period projection is missing or inconsistent");
+    throw invalidConfiguration(
+      shopId,
+      "paid billing period projection is missing or inconsistent",
+    );
   }
 
-  if (!counter || counter.shopId !== shopId || counter.billingPeriodId !== period.id) {
-    throw invalidConfiguration(shopId, "paid included recovery counter is missing or inconsistent");
+  if (
+    !counter ||
+    counter.shopId !== shopId ||
+    counter.billingPeriodId !== period.id
+  ) {
+    throw invalidConfiguration(
+      shopId,
+      "paid included recovery counter is missing or inconsistent",
+    );
   }
   if (!isValidPaidIncludedAllowanceCounter(counter)) {
-    throw invalidConfiguration(shopId, "paid included recovery counter quantities exceed the grant");
+    throw invalidConfiguration(
+      shopId,
+      "paid included recovery counter quantities exceed the grant",
+    );
   }
 }
 
@@ -468,10 +522,12 @@ function getBillingPeriodPhase(
   now: Date,
   providerCoverageEndAt: Date | null = null,
 ): "ACTIVE" | "DRAINING" | "EXPIRED_RECONCILING" {
-  const effectivePeriodEnd = providerCoverageEndAt && providerCoverageEndAt < periodEnd
-    ? providerCoverageEndAt
-    : periodEnd;
-  if (now.getTime() >= effectivePeriodEnd.getTime()) return "EXPIRED_RECONCILING";
+  const effectivePeriodEnd =
+    providerCoverageEndAt && providerCoverageEndAt < periodEnd
+      ? providerCoverageEndAt
+      : periodEnd;
+  if (now.getTime() >= effectivePeriodEnd.getTime())
+    return "EXPIRED_RECONCILING";
   if (
     now.getTime() >=
     effectivePeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS
@@ -481,18 +537,29 @@ function getBillingPeriodPhase(
   return "ACTIVE";
 }
 
-function validateNonNegativeInteger(shopId: string, label: string, value: number): number {
+function validateNonNegativeInteger(
+  shopId: string,
+  label: string,
+  value: number,
+): number {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw invalidConfiguration(shopId, `${label} must be a finite non-negative integer`);
+    throw invalidConfiguration(
+      shopId,
+      `${label} must be a finite non-negative integer`,
+    );
   }
   return value;
 }
 
-function invalidConfiguration(shopId: string, detail: string): EffectiveBillingPolicyError {
+function invalidConfiguration(
+  shopId: string,
+  detail: string,
+): EffectiveBillingPolicyError {
   return new EffectiveBillingPolicyError(
     "INVALID_CONFIGURATION",
     `Invalid billing policy for shop ${shopId}: ${detail}`,
   );
 }
 
-export const effectiveBillingPolicyResolver = new EffectiveBillingPolicyResolver();
+export const effectiveBillingPolicyResolver =
+  new EffectiveBillingPolicyResolver();

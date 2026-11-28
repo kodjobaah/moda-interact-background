@@ -13,7 +13,6 @@ export type CheckoutRecoveryStatus =
   | "EXPIRED"
   | "CANCELLED";
 
-
 /**
  * The purpose/context of a conversation associated
  * with a checkout recovery.
@@ -26,14 +25,10 @@ export type ConversationType =
   | "PRODUCT_SUPPORT"
   | "SUPPORT";
 
-
 /**
  * Direction of a message relative to Moda Interact.
  */
-export type MessageDirection =
-  | "INBOUND"
-  | "OUTBOUND";
-
+export type MessageDirection = "INBOUND" | "OUTBOUND";
 
 /**
  * Who actually produced the message.
@@ -52,23 +47,13 @@ export type MessageDirection =
  * CUSTOMER:
  *   the Shopify customer.
  */
-export type MessageSenderType =
-  | "CUSTOMER"
-  | "AUTOMATION"
-  | "AGENT"
-  | "HUMAN";
-
+export type MessageSenderType = "CUSTOMER" | "AUTOMATION" | "AGENT" | "HUMAN";
 
 /**
  * Delivery lifecycle of a WhatsApp message.
  */
 export type MessageStatus =
-  | "PENDING"
-  | "SENT"
-  | "DELIVERED"
-  | "READ"
-  | "FAILED";
-
+  "PENDING" | "SENT" | "DELIVERED" | "READ" | "FAILED";
 
 /**
  * Domain representation of a customer.
@@ -89,7 +74,6 @@ export interface CustomerContext {
 
   shopifyCustomerId: string | null;
 }
-
 
 /**
  * Domain representation of a checkout recovery.
@@ -119,7 +103,6 @@ export interface CheckoutRecoveryContext {
   expiredAt: Date | null;
 }
 
-
 /**
  * One persisted message within a conversation.
  */
@@ -142,7 +125,6 @@ export interface ConversationMessageContext {
   readAt: Date | null;
 }
 
-
 /**
  * Conversation belonging to a checkout recovery.
  *
@@ -164,7 +146,6 @@ export interface ConversationContext {
 
   messages: ConversationMessageContext[];
 }
-
 
 /**
  * Complete domain context supplied to the commerce agent.
@@ -200,10 +181,7 @@ export interface FindCustomerByPhoneInput {
 }
 
 export type UsageMetric =
-  | "monthly_conversations"
-  | "monthly_recoveries"
-  | "monthly_messages";
-
+  "monthly_conversations" | "monthly_recoveries" | "monthly_messages";
 
 export interface RecordUsageInput {
   shopId: string;
@@ -212,4 +190,4 @@ export interface RecordUsageInput {
   idempotencyKey: string;
   sourceType?: string;
   sourceId?: string;
-}  
+}

@@ -29,7 +29,9 @@ describeWithDatabase("Free recovery reservation PostgreSQL concurrency", () => {
           kind: "FREE",
         },
       });
-      await database.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
+      await database.shop.create({
+        data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" },
+      });
       await database.subscription.create({
         data: {
           shopId,
@@ -64,22 +66,45 @@ describeWithDatabase("Free recovery reservation PostgreSQL concurrency", () => {
       });
 
       const [first, second] = await Promise.all([
-        new FreeRecoveryReservationService(firstClient).reserve({ shopId, sourceKey: `${shopId}:recovery:1` }),
-        new FreeRecoveryReservationService(secondClient).reserve({ shopId, sourceKey: `${shopId}:recovery:2` }),
+        new FreeRecoveryReservationService(firstClient).reserve({
+          shopId,
+          sourceKey: `${shopId}:recovery:1`,
+        }),
+        new FreeRecoveryReservationService(secondClient).reserve({
+          shopId,
+          sourceKey: `${shopId}:recovery:2`,
+        }),
       ]);
       const outcomes = [first, second];
 
-      expect(outcomes.filter((outcome) => outcome.kind === "reserved")).toHaveLength(1);
-      expect(outcomes.filter((outcome) => outcome.kind === "allowance-exhausted")).toHaveLength(1);
+      expect(
+        outcomes.filter((outcome) => outcome.kind === "reserved"),
+      ).toHaveLength(1);
+      expect(
+        outcomes.filter((outcome) => outcome.kind === "allowance-exhausted"),
+      ).toHaveLength(1);
 
       const counter = await database.shopEntitlementCounter.findUnique({
-        where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
+        where: {
+          shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" },
+        },
       });
-      expect(counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
-      expect(await database.usageReservation.count({ where: { shopId } })).toBe(1);
+      expect(counter).toMatchObject({
+        committedQuantity: 0,
+        reservedQuantity: 1,
+      });
+      expect(await database.usageReservation.count({ where: { shopId } })).toBe(
+        1,
+      );
     } finally {
-      await database.shop.delete({ where: { id: shopId } }).catch(() => undefined);
-      await Promise.all([database.$disconnect(), firstClient.$disconnect(), secondClient.$disconnect()]);
+      await database.shop
+        .delete({ where: { id: shopId } })
+        .catch(() => undefined);
+      await Promise.all([
+        database.$disconnect(),
+        firstClient.$disconnect(),
+        secondClient.$disconnect(),
+      ]);
     }
   }, 30_000);
 });

@@ -1,14 +1,37 @@
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
-import { ShopBrandMediaError, type ShopBrandMediaProcessor } from "../shop-brand-media/contracts.js";
-import { BRAND_ROLES, BrandStateError, type BrandClaim, type BrandRole } from "./contracts.js";
+import {
+  ShopBrandMediaError,
+  type ShopBrandMediaProcessor,
+} from "../shop-brand-media/contracts.js";
+import {
+  BRAND_ROLES,
+  BrandStateError,
+  type BrandClaim,
+  type BrandRole,
+} from "./contracts.js";
 import { claimable, parseBrandDocument } from "./state.js";
 import type { ScannedBrandRow } from "./repository.js";
 
 export interface BrandMediaPersistence {
-  listPage(afterShopId: string | null, limit: number): Promise<ScannedBrandRow[]>;
+  listPage(
+    afterShopId: string | null,
+    limit: number,
+  ): Promise<ScannedBrandRow[]>;
   claim(shopId: string, role: BrandRole, at?: Date): Promise<BrandClaim | null>;
-  complete(claim: BrandClaim, outcome: { result: Awaited<ReturnType<ShopBrandMediaProcessor["process"]>>; verifiedAt: string }, at?: Date): Promise<boolean>;
-  fail(claim: BrandClaim, failureCode: string, retryable: boolean, at?: Date): Promise<boolean>;
+  complete(
+    claim: BrandClaim,
+    outcome: {
+      result: Awaited<ReturnType<ShopBrandMediaProcessor["process"]>>;
+      verifiedAt: string;
+    },
+    at?: Date,
+  ): Promise<boolean>;
+  fail(
+    claim: BrandClaim,
+    failureCode: string,
+    retryable: boolean,
+    at?: Date,
+  ): Promise<boolean>;
 }
 
 export type BrandMediaServiceOptions = {
@@ -41,20 +64,38 @@ export class ShopBrandMediaReconciliationService {
     this.maxRows = deps.maxRowsPerSweep ?? 500;
     this.maxClaims = deps.maxClaimsPerSweep ?? 20;
     this.concurrency = deps.concurrency ?? 2;
-    if (!Number.isSafeInteger(this.pageSize) || this.pageSize < 1 || this.pageSize > 100 ||
-        !Number.isSafeInteger(this.maxRows) || this.maxRows < 1 || this.maxRows > 2_000 ||
-        !Number.isSafeInteger(this.maxClaims) || this.maxClaims < 1 || this.maxClaims > 100 ||
-        !Number.isSafeInteger(this.concurrency) || this.concurrency < 1 || this.concurrency > 4) {
+    if (
+      !Number.isSafeInteger(this.pageSize) ||
+      this.pageSize < 1 ||
+      this.pageSize > 100 ||
+      !Number.isSafeInteger(this.maxRows) ||
+      this.maxRows < 1 ||
+      this.maxRows > 2_000 ||
+      !Number.isSafeInteger(this.maxClaims) ||
+      this.maxClaims < 1 ||
+      this.maxClaims > 100 ||
+      !Number.isSafeInteger(this.concurrency) ||
+      this.concurrency < 1 ||
+      this.concurrency > 4
+    ) {
       throw new RangeError("INVALID_BRAND_RECONCILIATION_BOUNDS");
     }
   }
 
-  async reconcileOnce(): Promise<{ inspected: number; claimed: number; cursor: string | null }> {
+  async reconcileOnce(): Promise<{
+    inspected: number;
+    claimed: number;
+    cursor: string | null;
+  }> {
     const begun = this.now().getTime();
     const claims: BrandClaim[] = [];
     let inspected = 0;
     let endReached = false;
-    while (inspected < this.maxRows && claims.length < this.maxClaims && !endReached) {
+    while (
+      inspected < this.maxRows &&
+      claims.length < this.maxClaims &&
+      !endReached
+    ) {
       const take = Math.min(this.pageSize, this.maxRows - inspected);
       let page: ScannedBrandRow[];
       try {
@@ -62,14 +103,18 @@ export class ShopBrandMediaReconciliationService {
       } catch (error) {
         this.deps.logger.error("shop_brand.media.scan_page_failed", {
           reasonCode: "PAGE_READ_FAILURE",
-          exceptionType: error instanceof Error ? "Error" : "NonErrorThrownValue",
+          exceptionType:
+            error instanceof Error ? "Error" : "NonErrorThrownValue",
           pageSize: take,
           errorMessage: error instanceof Error ? error.message : String(error),
           error: error,
         });
         throw error;
       }
-      if (page.length === 0) { this.cursor = null; break; }
+      if (page.length === 0) {
+        this.cursor = null;
+        break;
+      }
       let processedFromPage = 0;
       for (const row of page) {
         processedFromPage++;
@@ -78,18 +123,39 @@ export class ShopBrandMediaReconciliationService {
         try {
           const document = parseBrandDocument(row.whatsAppMedia);
           // One role per shop per sweep to avoid a single shop dominating external I/O.
-          const selected = BRAND_ROLES.find((role) => claimable(document.roles[role], this.now().getTime(), row.domain, role));
+          const selected = BRAND_ROLES.find((role) =>
+            claimable(
+              document.roles[role],
+              this.now().getTime(),
+              row.domain,
+              role,
+            ),
+          );
           if (selected) {
-            const claim = await this.deps.repository.claim(row.shopId, selected, this.now());
+            const claim = await this.deps.repository.claim(
+              row.shopId,
+              selected,
+              this.now(),
+            );
             if (claim) claims.push(claim);
           }
         } catch (error) {
           this.deps.logger.error("shop_brand.media.scan_row_failed", {
-            shopId: /^[A-Za-z0-9_-]{1,128}$/.test(row.shopId) ? row.shopId : "INVALID_SHOP_ID",
-            reasonCode: error instanceof BrandStateError ? error.code : "SCAN_ROW_FAILURE",
-            exceptionType: error instanceof BrandStateError ? "BrandStateError" :
-              error instanceof Error ? "Error" : "NonErrorThrownValue",
-            errorMessage: error instanceof Error ? error.message : String(error),
+            shopId: /^[A-Za-z0-9_-]{1,128}$/.test(row.shopId)
+              ? row.shopId
+              : "INVALID_SHOP_ID",
+            reasonCode:
+              error instanceof BrandStateError
+                ? error.code
+                : "SCAN_ROW_FAILURE",
+            exceptionType:
+              error instanceof BrandStateError
+                ? "BrandStateError"
+                : error instanceof Error
+                  ? "Error"
+                  : "NonErrorThrownValue",
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
             error: error,
           });
         }
@@ -103,30 +169,50 @@ export class ShopBrandMediaReconciliationService {
     // Bound in-flight fetch/transform/R2 calls. Complete or fail each claim independently.
     const failures: unknown[] = [];
     let next = 0;
-    await Promise.all(Array.from({ length: Math.min(claims.length, this.concurrency) }, async () => {
-      while (next < claims.length) {
-        const claim = claims[next++]!;
-        try { await this.processClaim(claim); }
-        catch (error) {
-          // A failed DB completion must not hide the failure of an individual claim
-          // behind the aggregate cycle error. Continue other claims, then reject.
-          this.deps.logger.error("shop_brand.media.claim_failed", {
-            shopId: claim.shopId, role: claim.role, generation: claim.generation,
-            kind: claim.kind,
-            reasonCode: error instanceof BrandStateError ? error.code : "CLAIM_OPERATION_FAILED",
-            exceptionType: error instanceof BrandStateError ? "BrandStateError" :
-              error instanceof Error ? "Error" : "NonErrorThrownValue",
-            errorMessage: error instanceof Error ? error.message : String(error),
-            error: error,
-          });
-          failures.push(error);
-        }
-      }
-    }));
+    await Promise.all(
+      Array.from(
+        { length: Math.min(claims.length, this.concurrency) },
+        async () => {
+          while (next < claims.length) {
+            const claim = claims[next++]!;
+            try {
+              await this.processClaim(claim);
+            } catch (error) {
+              // A failed DB completion must not hide the failure of an individual claim
+              // behind the aggregate cycle error. Continue other claims, then reject.
+              this.deps.logger.error("shop_brand.media.claim_failed", {
+                shopId: claim.shopId,
+                role: claim.role,
+                generation: claim.generation,
+                kind: claim.kind,
+                reasonCode:
+                  error instanceof BrandStateError
+                    ? error.code
+                    : "CLAIM_OPERATION_FAILED",
+                exceptionType:
+                  error instanceof BrandStateError
+                    ? "BrandStateError"
+                    : error instanceof Error
+                      ? "Error"
+                      : "NonErrorThrownValue",
+                errorMessage:
+                  error instanceof Error ? error.message : String(error),
+                error: error,
+              });
+              failures.push(error);
+            }
+          }
+        },
+      ),
+    );
     this.deps.logger.info("shop_brand.media.reconcile_cycle", {
-      inspected, claimed: claims.length, failed: failures.length, durationMs: this.now().getTime() - begun,
+      inspected,
+      claimed: claims.length,
+      failed: failures.length,
+      durationMs: this.now().getTime() - begun,
     });
-    if (failures.length) throw new AggregateError(failures, "SHOP_BRAND_RECONCILIATION_FAILURE");
+    if (failures.length)
+      throw new AggregateError(failures, "SHOP_BRAND_RECONCILIATION_FAILURE");
     return { inspected, claimed: claims.length, cursor: this.cursor };
   }
 
@@ -134,15 +220,28 @@ export class ShopBrandMediaReconciliationService {
   async reconcileShop(shopId: string): Promise<void> {
     for (const role of BRAND_ROLES) {
       try {
-        const claim = await this.deps.repository.claim(shopId, role, this.now());
+        const claim = await this.deps.repository.claim(
+          shopId,
+          role,
+          this.now(),
+        );
         if (claim) await this.processClaim(claim);
       } catch (error) {
         this.deps.logger.error("shop_brand.media.local_wake_failed", {
-          shopId: /^[A-Za-z0-9_-]{1,128}$/.test(shopId) ? shopId : "INVALID_SHOP_ID",
+          shopId: /^[A-Za-z0-9_-]{1,128}$/.test(shopId)
+            ? shopId
+            : "INVALID_SHOP_ID",
           role,
-          reasonCode: error instanceof BrandStateError ? error.code : "LOCAL_WAKE_FAILURE",
-          exceptionType: error instanceof BrandStateError ? "BrandStateError" :
-            error instanceof Error ? "Error" : "NonErrorThrownValue",
+          reasonCode:
+            error instanceof BrandStateError
+              ? error.code
+              : "LOCAL_WAKE_FAILURE",
+          exceptionType:
+            error instanceof BrandStateError
+              ? "BrandStateError"
+              : error instanceof Error
+                ? "Error"
+                : "NonErrorThrownValue",
           errorMessage: error instanceof Error ? error.message : String(error),
           error: error,
         });
@@ -156,40 +255,78 @@ export class ShopBrandMediaReconciliationService {
     let result: Awaited<ReturnType<ShopBrandMediaProcessor["process"]>>;
     try {
       result = await this.deps.processor.process({
-        shopId: claim.shopId, role: claim.role, sourceUrl: claim.sourceUrl,
+        shopId: claim.shopId,
+        role: claim.role,
+        sourceUrl: claim.sourceUrl,
         domain: claim.domain,
-        sourceFingerprint: claim.fingerprint, sourceGeneration: claim.generation,
+        sourceFingerprint: claim.fingerprint,
+        sourceGeneration: claim.generation,
       });
     } catch (error) {
-      const reason = error instanceof ShopBrandMediaError ? error.code : "UNEXPECTED_FAILURE";
-      const retryable = error instanceof ShopBrandMediaError ? error.retryable : true;
+      const reason =
+        error instanceof ShopBrandMediaError
+          ? error.code
+          : "UNEXPECTED_FAILURE";
+      const retryable =
+        error instanceof ShopBrandMediaError ? error.retryable : true;
       this.deps.logger.error("shop_brand.media.processing_failed", {
-        shopId: claim.shopId, role: claim.role, generation: claim.generation,
-        kind: claim.kind, reasonCode: reason, retryable,
-        exceptionType: error instanceof ShopBrandMediaError ? "ShopBrandMediaError" :
-          error instanceof Error ? "Error" : "NonErrorThrownValue",
+        shopId: claim.shopId,
+        role: claim.role,
+        generation: claim.generation,
+        kind: claim.kind,
+        reasonCode: reason,
+        retryable,
+        exceptionType:
+          error instanceof ShopBrandMediaError
+            ? "ShopBrandMediaError"
+            : error instanceof Error
+              ? "Error"
+              : "NonErrorThrownValue",
         durationMs: this.now().getTime() - startedAt,
         errorMessage: error instanceof Error ? error.message : String(error),
         error: error,
       });
       // If the DB update fails, surface it to the scheduler. The expired lease will be
       // reclaimed without claiming a false success or swallowing the persistence failure.
-      const applied = await this.deps.repository.fail(claim, reason, retryable, this.now());
+      const applied = await this.deps.repository.fail(
+        claim,
+        reason,
+        retryable,
+        this.now(),
+      );
       if (!applied) {
         this.deps.logger.warn("shop_brand.media.failure_record_stale", {
-          shopId: claim.shopId, role: claim.role,
-          generation: claim.generation, kind: claim.kind, reasonCode: reason,
+          shopId: claim.shopId,
+          role: claim.role,
+          generation: claim.generation,
+          kind: claim.kind,
+          reasonCode: reason,
         });
       }
       return;
     }
     const at = this.now();
-    const applied = await this.deps.repository.complete(claim, { result, verifiedAt: at.toISOString() }, at);
-    this.deps.logger.info(applied ? "shop_brand.media.ready" : "shop_brand.media.stale_result", {
-      shopId: claim.shopId, role: claim.role, generation: claim.generation,
-      kind: claim.kind, durationMs: at.getTime() - startedAt,
-      ...(applied ? { contentSha256: result.contentSha256, sizeBytes: result.sizeBytes,
-        contentType: result.contentType } : {}),
-    });
+    const applied = await this.deps.repository.complete(
+      claim,
+      { result, verifiedAt: at.toISOString() },
+      at,
+    );
+    this.deps.logger.info(
+      applied ? "shop_brand.media.ready" : "shop_brand.media.stale_result",
+      {
+        shopId: claim.shopId,
+        role: claim.role,
+        generation: claim.generation,
+        kind: claim.kind,
+        durationMs: at.getTime() - startedAt,
+        ...(applied
+          ? {
+              contentSha256: result.contentSha256,
+              sizeBytes: result.sizeBytes,
+              contentType: result.contentType,
+            }
+          : {}),
+      },
+    );
   }
 }

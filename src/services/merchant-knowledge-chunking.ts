@@ -12,18 +12,28 @@ export interface MerchantKnowledgeChunkContent {
   contentHash: string;
 }
 
-export function chunkMerchantKnowledgeText(content: string): MerchantKnowledgeChunkContent[] {
+export function chunkMerchantKnowledgeText(
+  content: string,
+): MerchantKnowledgeChunkContent[] {
   const codePoints = [...content];
   const chunks: MerchantKnowledgeChunkContent[] = [];
 
-  for (let start = 0; start < codePoints.length; start += CHUNK_STEP_CODE_POINTS) {
-    const chunkContent = codePoints.slice(start, start + CHUNK_SIZE_CODE_POINTS).join("");
+  for (
+    let start = 0;
+    start < codePoints.length;
+    start += CHUNK_STEP_CODE_POINTS
+  ) {
+    const chunkContent = codePoints
+      .slice(start, start + CHUNK_SIZE_CODE_POINTS)
+      .join("");
     if (chunkContent.length === 0) continue;
     chunks.push({
       ordinal: chunks.length,
       content: chunkContent,
       contentUnits: merchantKnowledgeContentUnits(chunkContent),
-      contentHash: createHash("sha256").update(chunkContent, "utf8").digest("hex"),
+      contentHash: createHash("sha256")
+        .update(chunkContent, "utf8")
+        .digest("hex"),
     });
   }
 

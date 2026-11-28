@@ -8,7 +8,11 @@ import {
 } from "../../domain/pending-recovery-candidate.js";
 import { connectionRedis } from "../../lib/redis.js";
 import { PendingRecoveryCandidateIndexStore } from "../pending-recovery-candidate/candidate-index.store.js";
-import type { WooCandidateManager, WooCheckoutRef, WooPendingCandidate } from "./contracts.js";
+import type {
+  WooCandidateManager,
+  WooCheckoutRef,
+  WooPendingCandidate,
+} from "./contracts.js";
 
 export type WooCandidateJobPort = {
   data: WooPendingCandidate;
@@ -42,27 +46,46 @@ export interface WooCandidateScheduler extends WooCandidateManager {
 }
 
 export class WooCandidateMutationBlocked extends Error {
-  constructor(readonly reason: "job_not_mutable" | "unexpected_source" | "job_identity_conflict") {
+  constructor(
+    readonly reason:
+      "job_not_mutable" | "unexpected_source" | "job_identity_conflict",
+  ) {
     super(`Woo candidate mutation refused: ${reason}`);
   }
 }
 
 /** A separate deterministic namespace keeps Woo candidate jobs away from the
  * existing Shopify job IDs, while sharing the approved candidate queue/index. */
-export function wooCandidateJobId(ref: WooCheckoutRef, generation: number): string {
-  if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Invalid Woo candidate generation");
+export function wooCandidateJobId(
+  ref: WooCheckoutRef,
+  generation: number,
+): string {
+  if (!Number.isSafeInteger(generation) || generation < 1)
+    throw new Error("Invalid Woo candidate generation");
   const digest = createHash("sha256")
-    .update(ref.shopId).update("\0").update(ref.checkoutToken).update("\0").update(String(generation)).digest("hex");
+    .update(ref.shopId)
+    .update("\0")
+    .update(ref.checkoutToken)
+    .update("\0")
+    .update(String(generation))
+    .digest("hex");
   return `woo-candidate-${digest}`;
 }
 
 let wooCandidateQueue: Queue<WooPendingCandidate, void, string> | null = null;
 
-export function getWooCandidateQueue(): Queue<WooPendingCandidate, void, string> {
+export function getWooCandidateQueue(): Queue<
+  WooPendingCandidate,
+  void,
+  string
+> {
   if (!wooCandidateQueue) {
     wooCandidateQueue = new Queue(PENDING_RECOVERY_CANDIDATE_QUEUE, {
       connection: connectionRedis,
-      telemetry: createBullMQTelemetry({ serviceName: "moda-recovery-worker", enableMetrics: false }),
+      telemetry: createBullMQTelemetry({
+        serviceName: "moda-recovery-worker",
+        enableMetrics: false,
+      }),
       defaultJobOptions: {
         attempts: 3,
         backoff: { type: "exponential", delay: 1_000 },
@@ -87,15 +110,24 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
     if (candidate?.source !== "woocommerce") {
       throw new WooCandidateMutationBlocked("unexpected_source");
     }
-    if (candidate.shopId !== ref.shopId || candidate.checkoutToken !== ref.checkoutToken) {
+    if (
+      candidate.shopId !== ref.shopId ||
+      candidate.checkoutToken !== ref.checkoutToken
+    ) {
       throw new WooCandidateMutationBlocked("job_identity_conflict");
     }
-    if (!Number.isSafeInteger(candidate.generation) || (candidate.generation ?? 0) < 1) {
+    if (
+      !Number.isSafeInteger(candidate.generation) ||
+      (candidate.generation ?? 0) < 1
+    ) {
       throw new WooCandidateMutationBlocked("job_identity_conflict");
     }
   }
 
-  private async resolve(ref: WooCheckoutRef, expectedGeneration?: number): Promise<{
+  private async resolve(
+    ref: WooCheckoutRef,
+    expectedGeneration?: number,
+  ): Promise<{
     jobId: string;
     job: WooCandidateJobPort;
   } | null> {
@@ -105,7 +137,11 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
     const job = await this.queue.getJob(jobId);
     if (job) {
       this.verify(ref, job.data);
-      if (expectedGeneration !== undefined && job.data.generation !== expectedGeneration) return null;
+      if (
+        expectedGeneration !== undefined &&
+        job.data.generation !== expectedGeneration
+      )
+        return null;
       return { jobId, job };
     }
     if (indexedId && indexedId !== baseId) {
@@ -119,7 +155,10 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
     return null;
   }
 
-  async getPending(ref: WooCheckoutRef, expectedGeneration?: number): Promise<WooPendingCandidate | null> {
+  async getPending(
+    ref: WooCheckoutRef,
+    expectedGeneration?: number,
+  ): Promise<WooPendingCandidate | null> {
     const found = await this.resolve(ref, expectedGeneration);
     if (!found) return null;
     const state = await found.job.getState();
@@ -128,7 +167,10 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
     throw new WooCandidateMutationBlocked("job_not_mutable");
   }
 
-  async cancelPending(ref: WooCheckoutRef, expectedGeneration?: number): Promise<"cancelled" | "absent"> {
+  async cancelPending(
+    ref: WooCheckoutRef,
+    expectedGeneration?: number,
+  ): Promise<"cancelled" | "absent"> {
     const found = await this.resolve(ref, expectedGeneration);
     if (!found) {
       // Remove a stale Woo index (e.g. removeOnComplete) without touching jobs.
@@ -154,7 +196,10 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
     retentionMs: number;
   }): Promise<"scheduled" | "rescheduled"> {
     const { candidate, delayMinutes, dueAtMs, retentionMs } = input;
-    const ref = { shopId: candidate.shopId, checkoutToken: candidate.checkoutToken };
+    const ref = {
+      shopId: candidate.shopId,
+      checkoutToken: candidate.checkoutToken,
+    };
     this.verify(ref, candidate); // Reject malformed source before any queue mutation.
     const generation = candidate.generation!;
     const found = await this.resolve(ref, generation);
@@ -162,7 +207,7 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
     const jobId = found?.jobId ?? wooCandidateJobId(ref, generation);
 
     if (found) {
-      if (await found.job.getState() !== "delayed") {
+      if ((await found.job.getState()) !== "delayed") {
         // Never rewrite an active/waiting/finished job: maturity may already
         // have been claimed. BullMQ retries the capture event on this error.
         throw new WooCandidateMutationBlocked("job_not_mutable");
@@ -170,10 +215,14 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
       await found.job.updateData(candidate);
       await found.job.changeDelay(delay);
     } else {
-      await this.queue.add(EVALUATE_PENDING_RECOVERY_JOB, candidate, { jobId, delay });
+      await this.queue.add(EVALUATE_PENDING_RECOVERY_JOB, candidate, {
+        jobId,
+        delay,
+      });
       // A concurrent insertion or conflicting source is not success.
       const added = await this.queue.getJob(jobId);
-      if (!added) throw new WooCandidateMutationBlocked("job_identity_conflict");
+      if (!added)
+        throw new WooCandidateMutationBlocked("job_identity_conflict");
       this.verify(ref, added.data);
     }
 

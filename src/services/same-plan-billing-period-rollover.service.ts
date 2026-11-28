@@ -31,9 +31,22 @@ export type SamePlanRolloverPlan = {
 
 export type SamePlanRolloverResult =
   | { kind: "not-applicable" }
-  | { kind: "provider-cycle-lag"; billingPeriodId: string; nextReconcileAt: Date | null }
-  | { kind: "unchanged"; billingPeriodId: string | null; nextReconcileAt: Date | null }
-  | { kind: "transitioned"; billingPeriodId: string; nextReconcileAt: Date | null; planKind: BillingPlanKind };
+  | {
+      kind: "provider-cycle-lag";
+      billingPeriodId: string;
+      nextReconcileAt: Date | null;
+    }
+  | {
+      kind: "unchanged";
+      billingPeriodId: string | null;
+      nextReconcileAt: Date | null;
+    }
+  | {
+      kind: "transitioned";
+      billingPeriodId: string;
+      nextReconcileAt: Date | null;
+      planKind: BillingPlanKind;
+    };
 
 export type SamePlanRolloverInput = {
   shopId: string;
@@ -43,7 +56,10 @@ export type SamePlanRolloverInput = {
   now: Date;
 };
 
-type AfterTransitionCommitted = (input: SamePlanRolloverInput, result: Extract<SamePlanRolloverResult, { kind: "transitioned" }>) => Promise<void> | void;
+type AfterTransitionCommitted = (
+  input: SamePlanRolloverInput,
+  result: Extract<SamePlanRolloverResult, { kind: "transitioned" }>,
+) => Promise<void> | void;
 
 export class SamePlanBillingPeriodRolloverService {
   constructor(
@@ -51,11 +67,14 @@ export class SamePlanBillingPeriodRolloverService {
     private readonly afterTransitionCommitted?: AfterTransitionCommitted,
   ) {}
 
-  async transition(input: SamePlanRolloverInput): Promise<SamePlanRolloverResult> {
+  async transition(
+    input: SamePlanRolloverInput,
+  ): Promise<SamePlanRolloverResult> {
     const result = await this.database.$transaction(async (transaction) =>
       this.transitionInTransaction(transaction, input),
     );
-    if (result.kind === "transitioned") await this.afterTransitionCommitted?.(input, result);
+    if (result.kind === "transitioned")
+      await this.afterTransitionCommitted?.(input, result);
     return result;
   }
 
@@ -68,36 +87,71 @@ export class SamePlanBillingPeriodRolloverService {
     if (!providerStart || !providerEnd || providerStart >= providerEnd) {
       return { kind: "not-applicable" };
     }
-    if (!input.plan.active || input.provider.planHandle !== input.plan.shopifyPlanHandle) {
+    if (
+      !input.plan.active ||
+      input.provider.planHandle !== input.plan.shopifyPlanHandle
+    ) {
       return { kind: "not-applicable" };
     }
-    if (input.plan.kind === BillingPlanKind.FREE && input.plan.recoveryCreditPackEnabled) {
-      if (!input.plan.shopifyRecoveryCreditPackEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyRecoveryCreditPackEventHandle)) {
+    if (
+      input.plan.kind === BillingPlanKind.FREE &&
+      input.plan.recoveryCreditPackEnabled
+    ) {
+      if (
+        !input.plan.shopifyRecoveryCreditPackEventHandle ||
+        !input.provider.usageEventHandles.includes(
+          input.plan.shopifyRecoveryCreditPackEventHandle,
+        )
+      ) {
         return { kind: "not-applicable" };
       }
     }
 
-    if (input.subscriptionId) await lockSubscription(transaction, input.subscriptionId);
+    if (input.subscriptionId)
+      await lockSubscription(transaction, input.subscriptionId);
     const subscription = await transaction.subscription.findUnique({
-      where: input.subscriptionId ? { id: input.subscriptionId } : { shopId: input.shopId },
+      where: input.subscriptionId
+        ? { id: input.subscriptionId }
+        : { shopId: input.shopId },
       include: { billingPeriod: true },
     });
-    if (!subscription || subscription.shopId !== input.shopId || subscription.planId !== input.plan.id) {
+    if (
+      !subscription ||
+      subscription.shopId !== input.shopId ||
+      subscription.planId !== input.plan.id
+    ) {
       return { kind: "not-applicable" };
     }
-    if (subscription.status !== "ACTIVE" && subscription.status !== "TRIALING") {
+    if (
+      subscription.status !== "ACTIVE" &&
+      subscription.status !== "TRIALING"
+    ) {
       return { kind: "not-applicable" };
     }
 
-    const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, input.provider.planHandle, input.provider.usageEventHandles);
+    const usageEventMapping = await resolveShopifyUsageEventMapping(
+      transaction,
+      input.provider.planHandle,
+      input.provider.usageEventHandles,
+    );
     const currentPeriod = subscription.billingPeriod;
-    if (!currentPeriod || !subscription.currentPeriodStart || !subscription.currentPeriodEnd) {
+    if (
+      !currentPeriod ||
+      !subscription.currentPeriodStart ||
+      !subscription.currentPeriodEnd
+    ) {
       return { kind: "not-applicable" };
     }
-    if (subscription.currentPeriodStart.getTime() === providerStart.getTime() && subscription.currentPeriodEnd.getTime() === providerEnd.getTime()) {
+    if (
+      subscription.currentPeriodStart.getTime() === providerStart.getTime() &&
+      subscription.currentPeriodEnd.getTime() === providerEnd.getTime()
+    ) {
       await transaction.subscription.update({
         where: { id: subscription.id },
-        data: { unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles },
+        data: {
+          unmappedShopifyUsageEventHandles:
+            usageEventMapping.unmappedProviderHandles,
+        },
       });
       if (input.now.getTime() >= currentPeriod.periodEnd.getTime()) {
         return {
@@ -112,8 +166,13 @@ export class SamePlanBillingPeriodRolloverService {
         nextReconcileAt: subscription.nextReconcileAt,
       };
     }
-    if (providerStart < currentPeriod.periodEnd || providerEnd <= providerStart) {
-      throw new Error("Provider billing cycle overlaps the current local billing period");
+    if (
+      providerStart < currentPeriod.periodEnd ||
+      providerEnd <= providerStart
+    ) {
+      throw new Error(
+        "Provider billing cycle overlaps the current local billing period",
+      );
     }
 
     const successorInput = {
@@ -123,19 +182,29 @@ export class SamePlanBillingPeriodRolloverService {
       shopifyPlanHandleSnapshot: input.provider.planHandle,
       planNameSnapshot: input.plan.name,
       planKindSnapshot: input.plan.kind,
-      includedRecoveryCreditsGranted: input.plan.kind === BillingPlanKind.PAID_METERED
-        ? input.plan.includedRecoveryConversationAllowance ?? 0
-        : null,
+      includedRecoveryCreditsGranted:
+        input.plan.kind === BillingPlanKind.PAID_METERED
+          ? (input.plan.includedRecoveryConversationAllowance ?? 0)
+          : null,
       periodStart: providerStart,
       periodEnd: providerEnd,
       errors: {
-        closedPeriod: "Provider billing cycle already has a closed successor period",
-        incompatiblePeriod: "Provider billing cycle has an incompatible successor period",
-        incompatibleIncludedCounter: "Successor included-credit counter has an incompatible grant",
+        closedPeriod:
+          "Provider billing cycle already has a closed successor period",
+        incompatiblePeriod:
+          "Provider billing cycle has an incompatible successor period",
+        incompatibleIncludedCounter:
+          "Successor included-credit counter has an incompatible grant",
       },
     };
-    const existingSuccessor = await findCompatibleSuccessorBillingPeriod(transaction, successorInput);
-    if (existingSuccessor && subscription.billingPeriodId === existingSuccessor.id) {
+    const existingSuccessor = await findCompatibleSuccessorBillingPeriod(
+      transaction,
+      successorInput,
+    );
+    if (
+      existingSuccessor &&
+      subscription.billingPeriodId === existingSuccessor.id
+    ) {
       return {
         kind: "unchanged",
         billingPeriodId: existingSuccessor.id,
@@ -149,19 +218,31 @@ export class SamePlanBillingPeriodRolloverService {
       closedAt: currentPeriod.periodEnd,
       closeReason: BillingPeriodCloseReason.RENEWED_SAME_PLAN,
       openPeriodFailureMessage: "Billing period was not open while closing",
-      providerResponseSummary: "Billing period closed before Shopify App Event report",
+      providerResponseSummary:
+        "Billing period closed before Shopify App Event report",
     });
-    const successor = await ensureSuccessorBillingPeriod(transaction, successorInput, existingSuccessor);
+    const successor = await ensureSuccessorBillingPeriod(
+      transaction,
+      successorInput,
+      existingSuccessor,
+    );
 
-    const nextReconcileAt = input.plan.kind === BillingPlanKind.FREE && !input.plan.recoveryCreditPackEnabled
-      ? null
-      : new Date(
-          Math.max(input.now.getTime(), providerEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS),
-        );
+    const nextReconcileAt =
+      input.plan.kind === BillingPlanKind.FREE &&
+      !input.plan.recoveryCreditPackEnabled
+        ? null
+        : new Date(
+            Math.max(
+              input.now.getTime(),
+              providerEnd.getTime() -
+                APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS,
+            ),
+          );
     await transaction.subscription.update({
       where: { id: subscription.id },
       data: {
-        unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
+        unmappedShopifyUsageEventHandles:
+          usageEventMapping.unmappedProviderHandles,
         observedShopifyPlanHandle: input.provider.planHandle,
         status: input.provider.status === "TRIALING" ? "TRIALING" : "ACTIVE",
         billingPeriodId: successor.id,
@@ -177,11 +258,19 @@ export class SamePlanBillingPeriodRolloverService {
       },
     });
 
-    return { kind: "transitioned", billingPeriodId: successor.id, nextReconcileAt, planKind: input.plan.kind };
+    return {
+      kind: "transitioned",
+      billingPeriodId: successor.id,
+      nextReconcileAt,
+      planKind: input.plan.kind,
+    };
   }
 }
 
-async function lockSubscription(transaction: RolloverTransaction, subscriptionId: string): Promise<void> {
+async function lockSubscription(
+  transaction: RolloverTransaction,
+  subscriptionId: string,
+): Promise<void> {
   await transaction.$queryRaw(Prisma.sql`
     SELECT "id"
     FROM "billing"."Subscription"

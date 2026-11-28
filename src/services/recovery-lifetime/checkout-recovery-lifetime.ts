@@ -21,22 +21,32 @@ export function parseCheckoutRecoveryLifetimeDays(value: unknown): number {
   return value;
 }
 
-export function isCheckoutRecoveryWithinLifetime(input: Readonly<{
-  lastExternalActivityAt: Date;
-  now: Date;
-  checkoutRecoveryLifetimeDays: number;
-}>): boolean {
+export function isCheckoutRecoveryWithinLifetime(
+  input: Readonly<{
+    lastExternalActivityAt: Date;
+    now: Date;
+    checkoutRecoveryLifetimeDays: number;
+  }>,
+): boolean {
   const { lastExternalActivityAt, now, checkoutRecoveryLifetimeDays } = input;
-  if (!(lastExternalActivityAt instanceof Date) || !(now instanceof Date) ||
-      !Number.isSafeInteger(lastExternalActivityAt.getTime()) || !Number.isSafeInteger(now.getTime()) ||
-      !Number.isSafeInteger(checkoutRecoveryLifetimeDays) || checkoutRecoveryLifetimeDays < 0) {
+  if (
+    !(lastExternalActivityAt instanceof Date) ||
+    !(now instanceof Date) ||
+    !Number.isSafeInteger(lastExternalActivityAt.getTime()) ||
+    !Number.isSafeInteger(now.getTime()) ||
+    !Number.isSafeInteger(checkoutRecoveryLifetimeDays) ||
+    checkoutRecoveryLifetimeDays < 0
+  ) {
     return false;
   }
 
   const activityAtMs = BigInt(lastExternalActivityAt.getTime());
   const nowMs = BigInt(now.getTime());
   if (activityAtMs > nowMs) return false;
-  return nowMs - activityAtMs < BigInt(checkoutRecoveryLifetimeDays) * MILLISECONDS_PER_DAY;
+  return (
+    nowMs - activityAtMs <
+    BigInt(checkoutRecoveryLifetimeDays) * MILLISECONDS_PER_DAY
+  );
 }
 
 type LifetimePolicyDatabase = Pick<PrismaClient, "backgroundRuntimeConfig">;
@@ -49,9 +59,12 @@ export class PersistedCheckoutRecoveryLifetimeReader implements CheckoutRecovery
       where: { id: "default" },
       select: { checkoutRecoveryLifetimeDays: true },
     });
-    if (!row) throw new CheckoutRecoveryLifetimePolicyUnavailableError("missing");
+    if (!row)
+      throw new CheckoutRecoveryLifetimePolicyUnavailableError("missing");
     try {
-      return parseCheckoutRecoveryLifetimeDays(row.checkoutRecoveryLifetimeDays);
+      return parseCheckoutRecoveryLifetimeDays(
+        row.checkoutRecoveryLifetimeDays,
+      );
     } catch {
       throw new CheckoutRecoveryLifetimePolicyUnavailableError("invalid");
     }

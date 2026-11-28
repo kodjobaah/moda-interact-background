@@ -2,9 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 // Unit-only trusted credential fixture. Production must always read the Commerce row;
 // deliberately setting OPENAI_API_KEY in these tests is NOT an allowed fallback.
-vi.mock("../../../src/services/platform-configuration/support-translation.js", () => ({
-  readSupportTranslationCredential: vi.fn(async () => "unit-test-commerce-credential"),
-}));
+vi.mock(
+  "../../../src/services/platform-configuration/support-translation.js",
+  () => ({
+    readSupportTranslationCredential: vi.fn(
+      async () => "unit-test-commerce-credential",
+    ),
+  }),
+);
 
 process.env.REDIS_URL ??= "redis://localhost:6379/translation-results-tests";
 process.env.OPENAI_API_KEY ??= "test-key";
@@ -28,42 +33,52 @@ function sqlText(query: { strings: readonly string[] }): string {
 }
 
 function runtimeConfig(overrides: Record<string, number> = {}) {
-  return { current: vi.fn(() => ({
-    translationResultRetrySeconds: 660,
-    translationMaxAutoRetries: 3,
-    ...overrides,
-  })) } as any;
+  return {
+    current: vi.fn(() => ({
+      translationResultRetrySeconds: 660,
+      translationMaxAutoRetries: 3,
+      ...overrides,
+    })),
+  } as any;
 }
 
-function createDatabase(options: {
-  kind?: "ADMINISTRATIVE" | "SYSTEM" | "MERCHANT";
-  translationStatus?: "PENDING" | "AVAILABLE" | "FAILED";
-  currentBatchId?: string | null;
-  targetLanguageTag?: string;
-  displayLanguageTag?: string;
-  retryCount?: number;
-} = {}) {
+function createDatabase(
+  options: {
+    kind?: "ADMINISTRATIVE" | "SYSTEM" | "MERCHANT";
+    translationStatus?: "PENDING" | "AVAILABLE" | "FAILED";
+    currentBatchId?: string | null;
+    targetLanguageTag?: string;
+    displayLanguageTag?: string;
+    retryCount?: number;
+  } = {},
+) {
   let queryCount = 0;
   let translationStatus = options.translationStatus ?? "PENDING";
   const query = vi.fn(async () => {
     queryCount += 1;
     if (queryCount % 4 === 1) return [batch];
-    if (queryCount % 4 === 2) return [{ providerCustomId: "custom-1", translationId: "translation-1" }];
+    if (queryCount % 4 === 2)
+      return [{ providerCustomId: "custom-1", translationId: "translation-1" }];
     if (queryCount % 4 === 3) {
-      return [{
-        translationId: "translation-1",
-        messageId: "message-1",
-        threadId: "thread-1",
-        kind: options.kind ?? "ADMINISTRATIVE",
-        translationStatus,
-        currentBatchId: options.currentBatchId === undefined ? "batch-1" : options.currentBatchId,
-        targetLanguageTag: options.targetLanguageTag ?? "fr-FR",
-        displayLanguageTag: options.displayLanguageTag ?? "fr-FR",
-        retryCount: options.retryCount ?? 0,
-        messageState: "PROCESSING",
-        messageCreatedAt: new Date("2026-09-06T18:00:00Z"),
-        respondsThroughMerchantVersion: 4,
-      }];
+      return [
+        {
+          translationId: "translation-1",
+          messageId: "message-1",
+          threadId: "thread-1",
+          kind: options.kind ?? "ADMINISTRATIVE",
+          translationStatus,
+          currentBatchId:
+            options.currentBatchId === undefined
+              ? "batch-1"
+              : options.currentBatchId,
+          targetLanguageTag: options.targetLanguageTag ?? "fr-FR",
+          displayLanguageTag: options.displayLanguageTag ?? "fr-FR",
+          retryCount: options.retryCount ?? 0,
+          messageState: "PROCESSING",
+          messageCreatedAt: new Date("2026-09-06T18:00:00Z"),
+          respondsThroughMerchantVersion: 4,
+        },
+      ];
     }
     return [{ count: 0n }];
   });
@@ -71,8 +86,10 @@ function createDatabase(options: {
     translationStatus = "AVAILABLE";
     return 1;
   });
-  const transaction = vi.fn(async (callback: (transaction: unknown) => Promise<unknown>) =>
-    callback({ $queryRaw: query, $executeRaw: execute }));
+  const transaction = vi.fn(
+    async (callback: (transaction: unknown) => Promise<unknown>) =>
+      callback({ $queryRaw: query, $executeRaw: execute }),
+  );
   return { database: { $transaction: transaction }, query, execute };
 }
 
@@ -98,7 +115,9 @@ describe("TranslationBatchResultsService", () => {
       providerFactory: vi.fn(() => provider({}) as never),
     });
 
-    await expect(service.apply({ translationBatchId: "batch-1" })).resolves.toEqual({
+    await expect(
+      service.apply({ translationBatchId: "batch-1" }),
+    ).resolves.toEqual({
       status: "completed",
       batchId: "batch-1",
       applied: 1,
@@ -108,9 +127,11 @@ describe("TranslationBatchResultsService", () => {
       query.strings.join("").includes('"merchantMessageVersion"'),
     );
     expect(threadUpdate?.[0].values).toContain(4);
-    expect(database.execute.mock.calls.every(([query]) =>
-      !query.strings.join("").includes('"originalBody" ='),
-    )).toBe(true);
+    expect(
+      database.execute.mock.calls.every(
+        ([query]) => !query.strings.join("").includes('"originalBody" ='),
+      ),
+    ).toBe(true);
   });
 
   it("preserves SYSTEM pending support semantics while applying its translation", async () => {
@@ -125,13 +146,18 @@ describe("TranslationBatchResultsService", () => {
   });
 
   it("replays an already available result without duplicating the business transition", async () => {
-    const database = createDatabase({ kind: "MERCHANT", translationStatus: "AVAILABLE" });
+    const database = createDatabase({
+      kind: "MERCHANT",
+      translationStatus: "AVAILABLE",
+    });
     const service = new TranslationBatchResultsService({
       database: database.database,
       providerFactory: vi.fn(() => provider({}) as never),
     });
 
-    await expect(service.apply({ translationBatchId: "batch-1" })).resolves.toMatchObject({
+    await expect(
+      service.apply({ translationBatchId: "batch-1" }),
+    ).resolves.toMatchObject({
       status: "completed",
       applied: 0,
     });
@@ -141,19 +167,23 @@ describe("TranslationBatchResultsService", () => {
   it("rejects output custom IDs that are not historical Batch members", async () => {
     const database = createDatabase();
     const currentProvider = {
-      readOutputFile: vi.fn(async () => [{
-        providerCustomId: "foreign-custom-id",
-        status: "completed" as const,
-        translatedText: "bad mapping",
-        failureCode: null,
-      }]),
+      readOutputFile: vi.fn(async () => [
+        {
+          providerCustomId: "foreign-custom-id",
+          status: "completed" as const,
+          translatedText: "bad mapping",
+          failureCode: null,
+        },
+      ]),
     };
     const service = new TranslationBatchResultsService({
       database: database.database,
       providerFactory: vi.fn(() => currentProvider as never),
     });
 
-    await expect(service.apply({ translationBatchId: "batch-1" })).rejects.toThrow("Unknown translation Batch provider custom ID");
+    await expect(
+      service.apply({ translationBatchId: "batch-1" }),
+    ).rejects.toThrow("Unknown translation Batch provider custom ID");
     expect(database.execute).not.toHaveBeenCalled();
   });
 
@@ -170,13 +200,17 @@ describe("TranslationBatchResultsService", () => {
       runtimeConfig: runtimeConfig({ translationMaxAutoRetries: 2 }),
     });
 
-    await expect(service.apply({ translationBatchId: "batch-1" })).resolves.toMatchObject({
+    await expect(
+      service.apply({ translationBatchId: "batch-1" }),
+    ).resolves.toMatchObject({
       status: "completed",
       applied: 1,
     });
     expect(database.execute).toHaveBeenCalledTimes(2);
     const update = database.execute.mock.calls[0]?.[0];
-    expect(sqlText(update)).toContain('AS "support"."MerchantMessageTranslationStatus"');
+    expect(sqlText(update)).toContain(
+      'AS "support"."MerchantMessageTranslationStatus"',
+    );
     expect(update.values).toContain("PENDING");
   });
 
@@ -199,9 +233,7 @@ describe("TranslationBatchResultsService", () => {
 
   it("does not mutate the message when a failed-result ownership update affects no rows", async () => {
     const database = createDatabase({ kind: "ADMINISTRATIVE", retryCount: 0 });
-    database.execute
-      .mockResolvedValueOnce(0)
-      .mockResolvedValueOnce(1);
+    database.execute.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
     const currentProvider = provider({
       status: "failed" as const,
       translatedText: null,
@@ -213,14 +245,18 @@ describe("TranslationBatchResultsService", () => {
       runtimeConfig: runtimeConfig({ translationMaxAutoRetries: 0 }),
     });
 
-    await expect(service.apply({ translationBatchId: "batch-1" })).resolves.toEqual({
+    await expect(
+      service.apply({ translationBatchId: "batch-1" }),
+    ).resolves.toEqual({
       status: "completed",
       batchId: "batch-1",
       applied: 0,
     });
-    expect(database.execute.mock.calls.some(([query]) =>
-      query.strings.join("").includes('"support"."MerchantSupportMessage"'),
-    )).toBe(false);
+    expect(
+      database.execute.mock.calls.some(([query]) =>
+        query.strings.join("").includes('"support"."MerchantSupportMessage"'),
+      ),
+    ).toBe(false);
   });
 
   it("does not replay an old Batch into a translation assigned to a newer Batch", async () => {
@@ -230,7 +266,9 @@ describe("TranslationBatchResultsService", () => {
       providerFactory: vi.fn(() => provider({}) as never),
     });
 
-    await expect(service.apply({ translationBatchId: "batch-1" })).resolves.toMatchObject({
+    await expect(
+      service.apply({ translationBatchId: "batch-1" }),
+    ).resolves.toMatchObject({
       status: "completed",
       applied: 0,
     });
@@ -250,23 +288,40 @@ describe("TranslationBatchResultsService", () => {
 
     await service.apply({ translationBatchId: "batch-1" });
     expect(database.execute).toHaveBeenCalledTimes(2);
-    expect(database.execute.mock.calls.some(([query]) =>
-      query.strings.join("").includes('"merchantMessageVersion"'),
-    )).toBe(false);
+    expect(
+      database.execute.mock.calls.some(([query]) =>
+        query.strings.join("").includes('"merchantMessageVersion"'),
+      ),
+    ).toBe(false);
   });
 
   it("classifies HTTP result failures explicitly", () => {
-    expect(translationBatchResultsTestInternals.resultFailureIsRetryable("http-429")).toBe(true);
-    expect(translationBatchResultsTestInternals.resultFailureIsRetryable("http-500")).toBe(true);
+    expect(
+      translationBatchResultsTestInternals.resultFailureIsRetryable("http-429"),
+    ).toBe(true);
+    expect(
+      translationBatchResultsTestInternals.resultFailureIsRetryable("http-500"),
+    ).toBe(true);
     for (const status of [400, 401, 403, 404, 422]) {
-      expect(translationBatchResultsTestInternals.resultFailureIsRetryable(`http-${status}`)).toBe(false);
+      expect(
+        translationBatchResultsTestInternals.resultFailureIsRetryable(
+          `http-${status}`,
+        ),
+      ).toBe(false);
     }
   });
 
   it("uses result retry seconds separately from the poll interval", () => {
-    const config = runtimeConfig({ translationResultRetrySeconds: 90, translationMaxAutoRetries: 4 });
+    const config = runtimeConfig({
+      translationResultRetrySeconds: 90,
+      translationMaxAutoRetries: 4,
+    });
     expect(config.current().translationResultRetrySeconds).toBe(90);
     expect(config.current().translationMaxAutoRetries).toBe(4);
-    expect(translationBatchResultsTestInternals.resultFailureIsRetryable("rate_limit")).toBe(true);
+    expect(
+      translationBatchResultsTestInternals.resultFailureIsRetryable(
+        "rate_limit",
+      ),
+    ).toBe(true);
   });
 });

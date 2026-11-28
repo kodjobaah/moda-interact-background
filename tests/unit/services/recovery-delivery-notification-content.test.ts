@@ -6,11 +6,23 @@ import {
 
 describe("ARCH-028-BACKGROUND-008 merchant notification content", () => {
   it("uses the exact durable Shop/recovery/message identity without unbounded content", () => {
-    const source = recoveryDeliveryNoticeSourceKey("shop-1", "recovery-1", "message-1");
-    expect(source).toBe(recoveryDeliveryNoticeSourceKey("shop-1", "recovery-1", "message-1"));
-    expect(source).not.toBe(recoveryDeliveryNoticeSourceKey("shop-2", "recovery-1", "message-1"));
-    expect(source).not.toBe(recoveryDeliveryNoticeSourceKey("shop-1", "recovery-2", "message-1"));
-    expect(source).not.toBe(recoveryDeliveryNoticeSourceKey("shop-1", "recovery-1", "message-2"));
+    const source = recoveryDeliveryNoticeSourceKey(
+      "shop-1",
+      "recovery-1",
+      "message-1",
+    );
+    expect(source).toBe(
+      recoveryDeliveryNoticeSourceKey("shop-1", "recovery-1", "message-1"),
+    );
+    expect(source).not.toBe(
+      recoveryDeliveryNoticeSourceKey("shop-2", "recovery-1", "message-1"),
+    );
+    expect(source).not.toBe(
+      recoveryDeliveryNoticeSourceKey("shop-1", "recovery-2", "message-1"),
+    );
+    expect(source).not.toBe(
+      recoveryDeliveryNoticeSourceKey("shop-1", "recovery-1", "message-2"),
+    );
     expect(source.length).toBeLessThan(255);
     expect(source).not.toContain("shop-1");
   });
@@ -31,7 +43,11 @@ describe("ARCH-028-BACKGROUND-008 merchant notification content", () => {
   });
 
   it("only mentions recipient pause when suppression actually occurred", () => {
-    expect(recoveryDeliveryNoticeBody("released", true)).toContain("temporarily paused");
-    expect(recoveryDeliveryNoticeBody("released", false)).not.toContain("temporarily paused");
+    expect(recoveryDeliveryNoticeBody("released", true)).toContain(
+      "temporarily paused",
+    );
+    expect(recoveryDeliveryNoticeBody("released", false)).not.toContain(
+      "temporarily paused",
+    );
   });
 });

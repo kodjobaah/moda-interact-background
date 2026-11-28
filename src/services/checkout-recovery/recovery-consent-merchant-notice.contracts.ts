@@ -6,8 +6,7 @@ export type RecoveryConsentNoticeReason =
   | "RECIPIENT_AMBIGUOUS"
   | "VERIFICATION_UNAVAILABLE";
 export type RecoveryConsentBlockedOperation =
-  | "CREATE_FIRST_RECOVERY"
-  | "SEND_INITIAL_RECOVERY";
+  "CREATE_FIRST_RECOVERY" | "SEND_INITIAL_RECOVERY";
 
 export type RecoveryConsentCheckoutContext = Readonly<{
   customerName?: string;
@@ -29,5 +28,7 @@ export type RecoveryConsentNoticeInput = Readonly<{
 
 export type RecoveryConsentNoticeResult = "created" | "duplicate";
 export interface RecoveryConsentMerchantNotifier {
-  notify(input: RecoveryConsentNoticeInput): Promise<RecoveryConsentNoticeResult>;
+  notify(
+    input: RecoveryConsentNoticeInput,
+  ): Promise<RecoveryConsentNoticeResult>;
 }

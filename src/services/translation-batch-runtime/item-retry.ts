@@ -15,8 +15,8 @@ export function translationItemRetryDisposition(input: {
   nowMs?: number;
 }): TranslationItemRetryDisposition {
   const shouldRetry =
-    isTranslationProviderFailureRetryable(input.failureCode)
-    && input.retryCount < input.maxAutoRetries;
+    isTranslationProviderFailureRetryable(input.failureCode) &&
+    input.retryCount < input.maxAutoRetries;
   return {
     shouldRetry,
     status: shouldRetry ? "PENDING" : "FAILED",

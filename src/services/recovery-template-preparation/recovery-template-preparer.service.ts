@@ -1,21 +1,42 @@
-import { readMetaCommonReference,currentMetaCommonReference } from "./recovery-template-common.js";
-import { renderInitialOutreachPreview, InitialOutreachRenderInputSchema, type InitialOutreachRenderInput } from "@modainteract/moda-interact-shared/commerce/outreach";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  readMetaCommonReference,
+  currentMetaCommonReference,
+} from "./recovery-template-common.js";
+import {
+  renderInitialOutreachPreview,
+  InitialOutreachRenderInputSchema,
+  type InitialOutreachRenderInput,
+} from "@modainteract/moda-interact-shared/commerce/outreach";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { whatsAppService } from "../whatsapp.service.js";
-import { BindingUnavailable, RecoveryVariableResolver } from "./recovery-template-brand.js";
+import {
+  BindingUnavailable,
+  RecoveryVariableResolver,
+} from "./recovery-template-brand.js";
 import { createProductionShopBrandMediaAdapter } from "../shop-brand-media-runtime/resolver.js";
 import {
   createProductionRecoveryProductImageResolver,
   type PreparedOutreachProductMedia,
   type RecoveryProductImageResolver,
 } from "../recovery-product-media/recovery-product-image-resolver.js";
-import { prepareFrozenComponents, verifyFrozenTemplate } from "./recovery-template-bindings.js";
+import {
+  prepareFrozenComponents,
+  verifyFrozenTemplate,
+} from "./recovery-template-bindings.js";
 import { decideInitialCheckoutItemsBinding } from "./initial-checkout-items-policy.js";
 import { PrismaRecoveryTemplateRepository } from "./recovery-template-repository.js";
-import { purposeFor, recoveryAssignmentFormat, selectRecoveryAssignment } from "./recovery-template-selection.js";
+import {
+  purposeFor,
+  recoveryAssignmentFormat,
+  selectRecoveryAssignment,
+} from "./recovery-template-selection.js";
 import type {
-  BrandMediaResolver, MediaApprovedHosts,
+  BrandMediaResolver,
+  MediaApprovedHosts,
   PreparedRecoveryTemplate,
   PreparationResult,
   RecoveryTemplatePreparationInput,
@@ -26,9 +47,14 @@ import type {
 } from "./recovery-template.types.js";
 
 export type {
-  RecoveryTemplatePreparationInput, PreparationResult, PreparedRecoveryTemplate,
-  TemplateUnavailable, TemplateUnavailableReason, RecoveryTemplateRepository,
-  ReadyBrandMedia, BrandMediaResolver,
+  RecoveryTemplatePreparationInput,
+  PreparationResult,
+  PreparedRecoveryTemplate,
+  TemplateUnavailable,
+  TemplateUnavailableReason,
+  RecoveryTemplateRepository,
+  ReadyBrandMedia,
+  BrandMediaResolver,
 } from "./recovery-template.types.js";
 
 const defaultLogger = createLogger({
@@ -44,21 +70,31 @@ const defaultLogger = createLogger({
 export class RecoveryTemplatePreparer {
   constructor(
     private readonly repository: RecoveryTemplateRepository = new PrismaRecoveryTemplateRepository(),
-    private readonly resolveConfiguredSenderWaba: () => Promise<string | null> =
-      () => whatsAppService.getProviderAccountId(),
+    private readonly resolveConfiguredSenderWaba: () => Promise<
+      string | null
+    > = () => whatsAppService.getProviderAccountId(),
     private readonly resolveReadyShopBrandMedia?: BrandMediaResolver,
     /** Test-injectable allowlist; production derives hosts from Admin publicMedia. */
     private readonly approvedMediaHosts?: MediaApprovedHosts,
     private readonly clock: () => Date = () => new Date(),
-    private readonly logger: Pick<StructuredLogger, "warn" | "error"> = defaultLogger,
-    private readonly createProductImageResolver: () => Pick<RecoveryProductImageResolver, "prepareForBinding"> =
-      createProductionRecoveryProductImageResolver,
-    private readonly commonReferenceCurrent:typeof currentMetaCommonReference=currentMetaCommonReference,
+    private readonly logger: Pick<
+      StructuredLogger,
+      "warn" | "error"
+    > = defaultLogger,
+    private readonly createProductImageResolver: () => Pick<
+      RecoveryProductImageResolver,
+      "prepareForBinding"
+    > = createProductionRecoveryProductImageResolver,
+    private readonly commonReferenceCurrent: typeof currentMetaCommonReference = currentMetaCommonReference,
   ) {}
 
-  async prepare(input: RecoveryTemplatePreparationInput): Promise<PreparationResult> {
+  async prepare(
+    input: RecoveryTemplatePreparationInput,
+  ): Promise<PreparationResult> {
     let purpose: RecoveryTemplatePurpose | null = null;
-    const unavailable = (reason: TemplateUnavailableReason): TemplateUnavailable => {
+    const unavailable = (
+      reason: TemplateUnavailableReason,
+    ): TemplateUnavailable => {
       this.logger.warn("recovery_template.prepare.unavailable", {
         shopId: typeof input?.shopId === "string" ? input.shopId : "unknown",
         purpose: purpose ?? "unknown",
@@ -68,216 +104,459 @@ export class RecoveryTemplatePreparer {
     };
 
     try {
-      if (!input || typeof input.shopId !== "string" || !input.shopId.trim() ||
-          typeof input.senderWabaId !== "string" || !input.senderWabaId.trim() ||
-          !["INITIAL", "FOLLOW_UP"].includes(input.stage) ||
-          !["NO_OFFER", "CODE_OFFER", "AUTOMATIC_OFFER"].includes(input.offerPresentation) ||
-          (input.stage === "INITIAL" && !["CHECKOUT", "ALTERNATIVE_PRODUCT"].includes(String(input.promotionTarget)))) {
+      if (
+        !input ||
+        typeof input.shopId !== "string" ||
+        !input.shopId.trim() ||
+        typeof input.senderWabaId !== "string" ||
+        !input.senderWabaId.trim() ||
+        !["INITIAL", "FOLLOW_UP"].includes(input.stage) ||
+        !["NO_OFFER", "CODE_OFFER", "AUTOMATIC_OFFER"].includes(
+          input.offerPresentation,
+        ) ||
+        (input.stage === "INITIAL" &&
+          !["CHECKOUT", "ALTERNATIVE_PRODUCT"].includes(
+            String(input.promotionTarget),
+          ))
+      ) {
         return unavailable("INVALID_REQUEST");
       }
-      if (input.selection && !(input.selection.kind === "TEXT_ONLY" && input.stage === "INITIAL" ||
-          input.selection.kind === "EXACT" && input.stage === "FOLLOW_UP" &&
-          typeof input.selection.templateName === "string" && input.selection.templateName.trim() &&
-          typeof input.selection.languageCode === "string" && input.selection.languageCode.trim())) {
+      if (
+        input.selection &&
+        !(
+          (input.selection.kind === "TEXT_ONLY" && input.stage === "INITIAL") ||
+          (input.selection.kind === "EXACT" &&
+            input.stage === "FOLLOW_UP" &&
+            typeof input.selection.templateName === "string" &&
+            input.selection.templateName.trim() &&
+            typeof input.selection.languageCode === "string" &&
+            input.selection.languageCode.trim())
+        )
+      ) {
         return unavailable("INVALID_REQUEST");
       }
-      if (input.stage === "INITIAL" && input.promotionTarget !== "CHECKOUT") return unavailable("OUTSIDE_CHECKOUT");
+      if (input.stage === "INITIAL" && input.promotionTarget !== "CHECKOUT")
+        return unavailable("OUTSIDE_CHECKOUT");
       purpose = purposeFor(input.stage, input.offerPresentation);
       // This trust check is required even though the caller passes a resolved
       // WABA. No request-supplied string can select another provider account.
       const configuredSender = await this.resolveConfiguredSenderWaba();
       if (!configuredSender) return unavailable("SENDER_UNAVAILABLE");
-      if (configuredSender !== input.senderWabaId) return unavailable("SENDER_MISMATCH");
+      if (configuredSender !== input.senderWabaId)
+        return unavailable("SENDER_MISMATCH");
 
       const catalogue = await this.repository.readCatalogue({
-        shopId: input.shopId, senderWabaId: configuredSender, purpose,
+        shopId: input.shopId,
+        senderWabaId: configuredSender,
+        purpose,
       });
-      if (!catalogue.shop || catalogue.shop.status !== "ACTIVE") return unavailable("SHOP_UNAVAILABLE");
+      if (!catalogue.shop || catalogue.shop.status !== "ACTIVE")
+        return unavailable("SHOP_UNAVAILABLE");
 
-      const shopDomain=catalogue.shop.domain;
+      const shopDomain = catalogue.shop.domain;
       const selectionInput = {
-        shop: catalogue.shop, shopId: input.shopId, senderWabaId: configuredSender,
-        purpose, variants: catalogue.variants,
-        stage: input.stage, offer: input.offerPresentation,
+        shop: catalogue.shop,
+        shopId: input.shopId,
+        senderWabaId: configuredSender,
+        purpose,
+        variants: catalogue.variants,
+        stage: input.stage,
+        offer: input.offerPresentation,
         hasCustomerFirstName: Boolean(input.customerFirstName?.trim()),
         offerCount: input.verifiedOffer?.codes?.length ?? 1,
-        ...(input.promotionTarget ? { promotionTarget: input.promotionTarget } : {}),
+        ...(input.promotionTarget
+          ? { promotionTarget: input.promotionTarget }
+          : {}),
         conversationLanguageTag: input.conversationLanguageTag,
         merchantLanguageTag: input.merchantLanguageTag,
         platformFallbackEnabled: input.platformFallbackEnabled ?? false,
         platformFallbackLanguageTag: input.platformFallbackLanguageTag ?? null,
         logger: this.logger,
       } as const;
-      const select = (headerFormat: "TEXT" | "IMAGE") => selectRecoveryAssignment({
-        ...selectionInput, headerFormat, checkoutProductHeaderAvailable: Boolean(input.productImage),
-      });
+      const select = (headerFormat: "TEXT" | "IMAGE") =>
+        selectRecoveryAssignment({
+          ...selectionInput,
+          headerFormat,
+          checkoutProductHeaderAvailable: Boolean(input.productImage),
+        });
       // An explicit merchant selection chooses a format, but does not bypass
       // the shared tenant, language, greeting, approval or ambiguity checks.
-      const requested = input.selection?.kind === "EXACT" ? input.selection : undefined;
+      const requested =
+        input.selection?.kind === "EXACT" ? input.selection : undefined;
       const automatic = input.selection === undefined;
-      let selectedFormat: "TEXT" | "IMAGE" = input.selection?.kind === "TEXT_ONLY" ? "TEXT" : "IMAGE";
+      let selectedFormat: "TEXT" | "IMAGE" =
+        input.selection?.kind === "TEXT_ONLY" ? "TEXT" : "IMAGE";
       if (requested) {
-        if (catalogue.shop.id !== input.shopId || catalogue.variants.some(row =>
-          row.shopId !== input.shopId || row.providerAccountId !== configuredSender ||
-          row.purpose !== purpose || row.status !== "APPROVED" || !row.enabled)) {
+        if (
+          catalogue.shop.id !== input.shopId ||
+          catalogue.variants.some(
+            (row) =>
+              row.shopId !== input.shopId ||
+              row.providerAccountId !== configuredSender ||
+              row.purpose !== purpose ||
+              row.status !== "APPROVED" ||
+              !row.enabled,
+          )
+        ) {
           return unavailable("IDENTITY_MISMATCH");
         }
-        const matches = catalogue.variants.filter(row => row.providerTemplateName === requested.templateName &&
-          row.providerLanguageCode === requested.languageCode);
-        if (matches.length !== 1) return unavailable(matches.length ? "AMBIGUOUS_ASSIGNMENT" : "NO_APPROVED_ASSIGNMENT");
+        const matches = catalogue.variants.filter(
+          (row) =>
+            row.providerTemplateName === requested.templateName &&
+            row.providerLanguageCode === requested.languageCode,
+        );
+        if (matches.length !== 1)
+          return unavailable(
+            matches.length ? "AMBIGUOUS_ASSIGNMENT" : "NO_APPROVED_ASSIGNMENT",
+          );
         const format = recoveryAssignmentFormat(matches[0]!);
-        if (!format) return unavailable(matches[0]!.metaRegistration ? "BINDINGS_INVALID" : "LEGACY_ASSIGNMENT");
+        if (!format)
+          return unavailable(
+            matches[0]!.metaRegistration
+              ? "BINDINGS_INVALID"
+              : "LEGACY_ASSIGNMENT",
+          );
         selectedFormat = format;
       }
       let selected = select(selectedFormat);
       let imageSelectionFailure: TemplateUnavailableReason | undefined;
       if (automatic && selected.outcome === "unavailable") {
-        if (selected.reason === "IDENTITY_MISMATCH") return unavailable(selected.reason);
+        if (selected.reason === "IDENTITY_MISMATCH")
+          return unavailable(selected.reason);
         imageSelectionFailure = selected.reason;
         selected = select("TEXT");
         selectedFormat = "TEXT";
       }
-      if (selected.outcome === "unavailable") return unavailable(selected.reason);
-      if (requested && (selected.value.variant.providerTemplateName !== requested.templateName ||
-          selected.value.variant.providerLanguageCode !== requested.languageCode)) return unavailable("NO_APPROVED_ASSIGNMENT");
+      if (selected.outcome === "unavailable")
+        return unavailable(selected.reason);
+      if (
+        requested &&
+        (selected.value.variant.providerTemplateName !==
+          requested.templateName ||
+          selected.value.variant.providerLanguageCode !==
+            requested.languageCode)
+      )
+        return unavailable("NO_APPROVED_ASSIGNMENT");
       let productMedia: PreparedOutreachProductMedia | undefined;
 
       let selectedAssignment = selected.value;
       let registration = selectedAssignment.variant.metaRegistration!;
       let checkoutItemsDecision = decideInitialCheckoutItemsBinding({
-        stage: input.stage, parameterBindingsSnapshot: registration.parameterBindingsSnapshot,
+        stage: input.stage,
+        parameterBindingsSnapshot: registration.parameterBindingsSnapshot,
       });
-      if (!checkoutItemsDecision.ok) return unavailable(checkoutItemsDecision.reason);
+      if (!checkoutItemsDecision.ok)
+        return unavailable(checkoutItemsDecision.reason);
       // Lazy operation-scoped adapter: TEXT-only messages never read publicMedia,
       // and no platform config is cached across separate preparations.
-      const productionMedia = !this.resolveReadyShopBrandMedia || !this.approvedMediaHosts
-        ? createProductionShopBrandMediaAdapter() : null;
-      const variablesFor = (readyProduct?: PreparedOutreachProductMedia) => new RecoveryVariableResolver(
-        input, (shopId) => this.repository.readShopBrand(shopId),
-        this.resolveReadyShopBrandMedia ?? productionMedia!.resolve,
-        this.approvedMediaHosts ?? productionMedia!.approvedHosts, this.clock,
-        (shopId, languageTag) => this.repository.readShopCategory(shopId, languageTag),
-        selectedAssignment.canonicalLanguageTag,
-        readyProduct?.result.kind === "READY" ? readyProduct.result.publicImageUrl : undefined,
-        readyProduct?.result.kind === "READY" ? readyProduct.validateBeforeBinding : undefined,
-        shopDomain,
-      );
-      let commonLayout: import("./recovery-template-common.js").MetaCommonIdentity|undefined;
+      const productionMedia =
+        !this.resolveReadyShopBrandMedia || !this.approvedMediaHosts
+          ? createProductionShopBrandMediaAdapter()
+          : null;
+      const variablesFor = (readyProduct?: PreparedOutreachProductMedia) =>
+        new RecoveryVariableResolver(
+          input,
+          (shopId) => this.repository.readShopBrand(shopId),
+          this.resolveReadyShopBrandMedia ?? productionMedia!.resolve,
+          this.approvedMediaHosts ?? productionMedia!.approvedHosts,
+          this.clock,
+          (shopId, languageTag) =>
+            this.repository.readShopCategory(shopId, languageTag),
+          selectedAssignment.canonicalLanguageTag,
+          readyProduct?.result.kind === "READY"
+            ? readyProduct.result.publicImageUrl
+            : undefined,
+          readyProduct?.result.kind === "READY"
+            ? readyProduct.validateBeforeBinding
+            : undefined,
+          shopDomain,
+        );
+      let commonLayout:
+        import("./recovery-template-common.js").MetaCommonIdentity | undefined;
       let renderedText: string | undefined;
       let headerAvailabilityFailure = false;
-      const prepareSelected = async (readyProduct?: PreparedOutreachProductMedia) => {
+      const prepareSelected = async (
+        readyProduct?: PreparedOutreachProductMedia,
+      ) => {
         headerAvailabilityFailure = false;
         const variables = variablesFor(readyProduct);
-        const common=readMetaCommonReference(registration.locale.localeAst);
-        if(common.kind==='invalid'||common.kind==='present'&&!(await this.commonReferenceCurrent(common.reference)))throw new BindingUnavailable("BINDINGS_INVALID");
-        commonLayout=undefined;
-        if(common.kind==='present')variables.useCommonLayout();
-        const captureCommon=async(components:readonly import("./recovery-template.types.js").PreparedMetaComponent[])=>{
-          if(common.kind==='present')commonLayout={reference:common.reference,variables:{'shop.name':await variables.resolve('shop.name'),'shop.websiteUrl':await variables.resolve('shop.websiteUrl'),'checkout.url':variables.checkout()},parameters:{header:components.filter(c=>c.type==='header').flatMap(c=>c.parameters.filter(p=>p.type==='text').map(p=>(p as {text:string}).text)),body:components.filter(c=>c.type==='body').flatMap(c=>c.parameters.map(p=>p.text))}};
+        const common = readMetaCommonReference(registration.locale.localeAst);
+        if (
+          common.kind === "invalid" ||
+          (common.kind === "present" &&
+            !(await this.commonReferenceCurrent(common.reference)))
+        )
+          throw new BindingUnavailable("BINDINGS_INVALID");
+        commonLayout = undefined;
+        if (common.kind === "present") variables.useCommonLayout();
+        const captureCommon = async (
+          components: readonly import("./recovery-template.types.js").PreparedMetaComponent[],
+        ) => {
+          if (common.kind === "present")
+            commonLayout = {
+              reference: common.reference,
+              variables: {
+                "shop.name": await variables.resolve("shop.name"),
+                "shop.websiteUrl": await variables.resolve("shop.websiteUrl"),
+                "checkout.url": variables.checkout(),
+              },
+              parameters: {
+                header: components
+                  .filter((c) => c.type === "header")
+                  .flatMap((c) =>
+                    c.parameters
+                      .filter((p) => p.type === "text")
+                      .map((p) => (p as { text: string }).text),
+                  ),
+                body: components
+                  .filter((c) => c.type === "body")
+                  .flatMap((c) => c.parameters.map((p) => p.text)),
+              },
+            };
         };
         if (input.stage !== "INITIAL") {
-          const prepared = await prepareFrozenComponents({ registration, variables,
-            onImageHeaderUnavailable: () => { headerAvailabilityFailure = true; } });
+          const prepared = await prepareFrozenComponents({
+            registration,
+            variables,
+            onImageHeaderUnavailable: () => {
+              headerAvailabilityFailure = true;
+            },
+          });
           await captureCommon(prepared.components);
           return prepared;
         }
         // Shared still renders and verifies the final initial projection. This
         // local immutable check precedes optional IMAGE availability decisions.
         if (selectedFormat === "IMAGE") verifyFrozenTemplate(registration);
-        if (!input.outreachEvaluation || input.outreachEvaluation.shopId !== input.shopId) throw new BindingUnavailable("INVALID_REQUEST");
-        if (!input.checkoutItems || input.checkoutItems.shopId !== input.shopId || !Array.isArray(input.checkoutItems.lineItems) || input.checkoutItems.lineItems.length === 0) throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
-        if (input.checkoutItems.lineItems.length !== input.outreachEvaluation.lines.length || input.checkoutItems.lineItems.some((raw, index) => {
-          const line = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
-          const verified = input.outreachEvaluation!.lines[index]!;
-          return !line || !Number.isSafeInteger(line.quantity) || Number(line.quantity) <= 0 || line.quantity !== verified.quantity ||
-            typeof line.productId === "string" && line.productId !== verified.productId ||
-            (typeof line.variantId === "string" || line.variantId === null) && line.variantId !== verified.variantId;
-        })) throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+        if (
+          !input.outreachEvaluation ||
+          input.outreachEvaluation.shopId !== input.shopId
+        )
+          throw new BindingUnavailable("INVALID_REQUEST");
+        if (
+          !input.checkoutItems ||
+          input.checkoutItems.shopId !== input.shopId ||
+          !Array.isArray(input.checkoutItems.lineItems) ||
+          input.checkoutItems.lineItems.length === 0
+        )
+          throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+        if (
+          input.checkoutItems.lineItems.length !==
+            input.outreachEvaluation.lines.length ||
+          input.checkoutItems.lineItems.some((raw, index) => {
+            const line =
+              raw && typeof raw === "object"
+                ? (raw as Record<string, unknown>)
+                : null;
+            const verified = input.outreachEvaluation!.lines[index]!;
+            return (
+              !line ||
+              !Number.isSafeInteger(line.quantity) ||
+              Number(line.quantity) <= 0 ||
+              line.quantity !== verified.quantity ||
+              (typeof line.productId === "string" &&
+                line.productId !== verified.productId) ||
+              ((typeof line.variantId === "string" ||
+                line.variantId === null) &&
+                line.variantId !== verified.variantId)
+            );
+          })
+        )
+          throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         // Preserve host-owned mandatory saved-brand/media validation. Shared's
         // generic shopName cannot supply a missing required semantic binding.
-        const bindings = registration.parameterBindingsSnapshot as { header?: { variable: string }[]; body?: { variable: string }[] };
-        for (const binding of [...(bindings.header ?? []), ...(bindings.body ?? [])]) {
-          if (binding.variable !== "checkout.itemsSummary") await variables.resolve(binding.variable as Parameters<typeof variables.resolve>[0]);
+        const bindings = registration.parameterBindingsSnapshot as {
+          header?: { variable: string }[];
+          body?: { variable: string }[];
+        };
+        for (const binding of [
+          ...(bindings.header ?? []),
+          ...(bindings.body ?? []),
+        ]) {
+          if (binding.variable !== "checkout.itemsSummary")
+            await variables.resolve(
+              binding.variable as Parameters<typeof variables.resolve>[0],
+            );
         }
         const checkoutUrl = variables.checkout();
-        if (!URL.canParse(checkoutUrl) || new URL(checkoutUrl).protocol !== "https:") throw new BindingUnavailable("CHECKOUT_UNTRUSTED");
+        if (
+          !URL.canParse(checkoutUrl) ||
+          new URL(checkoutUrl).protocol !== "https:"
+        )
+          throw new BindingUnavailable("CHECKOUT_UNTRUSTED");
         const preparedBrand = await variables.preparedBrand();
-        const textKeys = new Set([...(bindings.header ?? []), ...(bindings.body ?? [])].map(binding => binding.variable));
+        const textKeys = new Set(
+          [...(bindings.header ?? []), ...(bindings.body ?? [])].map(
+            (binding) => binding.variable,
+          ),
+        );
         const preparedBrandMedia = {
-          logo: textKeys.has("shopBrand.logoUrl") ? await variables.preparedBrandMedia("LOGO") : null,
-          squareLogo: textKeys.has("shopBrand.squareLogoUrl") ? await variables.preparedBrandMedia("SQUARE_LOGO") : null,
-          coverImage: textKeys.has("shopBrand.coverImageUrl") ? await variables.preparedBrandMedia("COVER_IMAGE") : null,
+          logo: textKeys.has("shopBrand.logoUrl")
+            ? await variables.preparedBrandMedia("LOGO")
+            : null,
+          squareLogo: textKeys.has("shopBrand.squareLogoUrl")
+            ? await variables.preparedBrandMedia("SQUARE_LOGO")
+            : null,
+          coverImage: textKeys.has("shopBrand.coverImageUrl")
+            ? await variables.preparedBrandMedia("COVER_IMAGE")
+            : null,
         };
-        const role = (registration.parameterBindingsSnapshot as { headerMediaRole?: "LOGO" | "SQUARE_LOGO" | "COVER_IMAGE" | "CHECKOUT_PRODUCT" }).headerMediaRole;
+        const role = (
+          registration.parameterBindingsSnapshot as {
+            headerMediaRole?:
+              "LOGO" | "SQUARE_LOGO" | "COVER_IMAGE" | "CHECKOUT_PRODUCT";
+          }
+        ).headerMediaRole;
         let headerMedia: InitialOutreachRenderInput["headerMedia"] = null;
         try {
-          if (selectedFormat === "IMAGE" && role) headerMedia = { shopId: input.shopId, role,
-            status: "READY", kind: "R2_DERIVATIVE", httpsUrl: await variables.imageHeader(role) };
+          if (selectedFormat === "IMAGE" && role)
+            headerMedia = {
+              shopId: input.shopId,
+              role,
+              status: "READY",
+              kind: "R2_DERIVATIVE",
+              httpsUrl: await variables.imageHeader(role),
+            };
         } catch (error) {
-          headerAvailabilityFailure = error instanceof BindingUnavailable && error.reason === "MEDIA_NOT_READY";
+          headerAvailabilityFailure =
+            error instanceof BindingUnavailable &&
+            error.reason === "MEDIA_NOT_READY";
           throw error;
         }
         const projection = JSON.parse(JSON.stringify(selectedAssignment));
         // Local authoring provenance is validated separately; the published
         // provider projection remains its exact existing strict contract.
         delete projection.variant.metaRegistration.locale.localeAst;
-        const renderInput = { schemaVersion: 1, evaluation: input.outreachEvaluation,
-          preparedProjection: projection as InitialOutreachRenderInput["preparedProjection"],
-          preparedBrand, preparedBrandMedia,
-          variables: { shopName: await variables.resolve("shop.name"), ...(textKeys.has("shop.websiteUrl")?{shopWebsiteUrl:await variables.resolve("shop.websiteUrl")}:{}), customerFirstName: input.customerFirstName ?? null,
-            checkoutUrl, shopCategory: JSON.stringify(registration.parameterBindingsSnapshot).includes("shop.categoryName")
-              ? await variables.resolve("shop.categoryName") : null }, headerMedia } as const;
-        const checkedInput = InitialOutreachRenderInputSchema.safeParse(renderInput);
-        if (!checkedInput.success) throw new BindingUnavailable(checkedInput.error.issues.some(issue => issue.path.includes("componentsSnapshot") || issue.path.includes("parameterBindingsSnapshot")) ? "BINDINGS_INVALID" : "INVALID_REQUEST");
+        const renderInput = {
+          schemaVersion: 1,
+          evaluation: input.outreachEvaluation,
+          preparedProjection:
+            projection as InitialOutreachRenderInput["preparedProjection"],
+          preparedBrand,
+          preparedBrandMedia,
+          variables: {
+            shopName: await variables.resolve("shop.name"),
+            ...(textKeys.has("shop.websiteUrl")
+              ? { shopWebsiteUrl: await variables.resolve("shop.websiteUrl") }
+              : {}),
+            customerFirstName: input.customerFirstName ?? null,
+            checkoutUrl,
+            shopCategory: JSON.stringify(
+              registration.parameterBindingsSnapshot,
+            ).includes("shop.categoryName")
+              ? await variables.resolve("shop.categoryName")
+              : null,
+          },
+          headerMedia,
+        } as const;
+        const checkedInput =
+          InitialOutreachRenderInputSchema.safeParse(renderInput);
+        if (!checkedInput.success)
+          throw new BindingUnavailable(
+            checkedInput.error.issues.some(
+              (issue) =>
+                issue.path.includes("componentsSnapshot") ||
+                issue.path.includes("parameterBindingsSnapshot"),
+            )
+              ? "BINDINGS_INVALID"
+              : "INVALID_REQUEST",
+          );
         const rendered = renderInitialOutreachPreview(checkedInput.data);
-        if (rendered.kind !== "ready") throw new BindingUnavailable(rendered.reasonCode);
+        if (rendered.kind !== "ready")
+          throw new BindingUnavailable(rendered.reasonCode);
         await captureCommon(rendered.parameters);
         renderedText = rendered.renderedText;
-        return { components: rendered.parameters, bindingFingerprint: rendered.templateProvenance.bindingFingerprint };
+        return {
+          components: rendered.parameters,
+          bindingFingerprint: rendered.templateProvenance.bindingFingerprint,
+        };
       };
       let preparedBindings: Awaited<ReturnType<typeof prepareFrozenComponents>>;
       try {
-        if (selectedFormat === "IMAGE" && input.stage === "INITIAL" && input.productImage &&
-            (registration.parameterBindingsSnapshot as { headerMediaRole?: string }).headerMediaRole === "CHECKOUT_PRODUCT") {
+        if (
+          selectedFormat === "IMAGE" &&
+          input.stage === "INITIAL" &&
+          input.productImage &&
+          (
+            registration.parameterBindingsSnapshot as {
+              headerMediaRole?: string;
+            }
+          ).headerMediaRole === "CHECKOUT_PRODUCT"
+        ) {
           verifyFrozenTemplate(registration);
-          productMedia = await this.createProductImageResolver().prepareForBinding(input.productImage);
+          productMedia =
+            await this.createProductImageResolver().prepareForBinding(
+              input.productImage,
+            );
         }
         preparedBindings = await prepareSelected(productMedia);
       } catch (error) {
-        if (!automatic || selectedFormat !== "IMAGE" || !(error instanceof BindingUnavailable) ||
-            error.reason !== "MEDIA_NOT_READY" || !headerAvailabilityFailure) throw error;
+        if (
+          !automatic ||
+          selectedFormat !== "IMAGE" ||
+          !(error instanceof BindingUnavailable) ||
+          error.reason !== "MEDIA_NOT_READY" ||
+          !headerAvailabilityFailure
+        )
+          throw error;
         const imageVariantId = selectedAssignment.variant.id;
         const textFallback = select("TEXT");
         if (textFallback.outcome !== "selected") {
-          this.logger.warn("recovery_template.prepare.text_fallback_unavailable", {
-            shopId: input.shopId, purpose, imageVariantId, imageReason: error.reason,
-            textReason: textFallback.reason,
-          });
-          return unavailable(textFallback.reason === "NO_APPROVED_ASSIGNMENT" ? error.reason : textFallback.reason);
+          this.logger.warn(
+            "recovery_template.prepare.text_fallback_unavailable",
+            {
+              shopId: input.shopId,
+              purpose,
+              imageVariantId,
+              imageReason: error.reason,
+              textReason: textFallback.reason,
+            },
+          );
+          return unavailable(
+            textFallback.reason === "NO_APPROVED_ASSIGNMENT"
+              ? error.reason
+              : textFallback.reason,
+          );
         }
         selectedAssignment = textFallback.value;
         selectedFormat = "TEXT";
         registration = selectedAssignment.variant.metaRegistration!;
         checkoutItemsDecision = decideInitialCheckoutItemsBinding({
-          stage: input.stage, parameterBindingsSnapshot: registration.parameterBindingsSnapshot,
+          stage: input.stage,
+          parameterBindingsSnapshot: registration.parameterBindingsSnapshot,
         });
-        if (!checkoutItemsDecision.ok) return unavailable(checkoutItemsDecision.reason);
+        if (!checkoutItemsDecision.ok)
+          return unavailable(checkoutItemsDecision.reason);
         preparedBindings = await prepareSelected(undefined);
         this.logger.warn("recovery_template.prepare.text_fallback_selected", {
-          shopId: input.shopId, purpose, imageVariantId, imageReason: error.reason,
-          textVariantId: selectedAssignment.variant.id, languageTag: selectedAssignment.canonicalLanguageTag,
+          shopId: input.shopId,
+          purpose,
+          imageVariantId,
+          imageReason: error.reason,
+          textVariantId: selectedAssignment.variant.id,
+          languageTag: selectedAssignment.canonicalLanguageTag,
         });
       }
-      if (imageSelectionFailure && imageSelectionFailure !== "NO_APPROVED_ASSIGNMENT") {
+      if (
+        imageSelectionFailure &&
+        imageSelectionFailure !== "NO_APPROVED_ASSIGNMENT"
+      ) {
         this.logger.warn("recovery_template.prepare.text_fallback_selected", {
-          shopId: input.shopId, purpose, imageReason: imageSelectionFailure,
-          textVariantId: selectedAssignment.variant.id, languageTag: selectedAssignment.canonicalLanguageTag,
+          shopId: input.shopId,
+          purpose,
+          imageReason: imageSelectionFailure,
+          textVariantId: selectedAssignment.variant.id,
+          languageTag: selectedAssignment.canonicalLanguageTag,
         });
       }
       return {
         ...(renderedText !== undefined ? { renderedText } : {}),
-        outcome: "prepared", shopId: input.shopId, senderWabaId: configuredSender,
-        purpose, variantId: selectedAssignment.variant.id, registrationId: registration.id,
+        outcome: "prepared",
+        shopId: input.shopId,
+        senderWabaId: configuredSender,
+        purpose,
+        variantId: selectedAssignment.variant.id,
+        registrationId: registration.id,
         definitionId: registration.locale.definition.id,
         providerTemplateId: registration.providerTemplateId!,
         providerTemplateName: registration.providerTemplateName,
@@ -286,7 +565,7 @@ export class RecoveryTemplatePreparer {
         selectionSource: selectedAssignment.selectionSource,
         submittedContentHash: registration.submittedContentHash,
         bindingFingerprint: preparedBindings.bindingFingerprint,
-        ...(commonLayout?{commonLayout}:{}),
+        ...(commonLayout ? { commonLayout } : {}),
         initialCheckoutItemsBodyPosition: checkoutItemsDecision.bodyPosition,
         template: {
           name: registration.providerTemplateName,

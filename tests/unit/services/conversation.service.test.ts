@@ -1,42 +1,57 @@
 // This suite owns scheduling/transcription fixtures; actual sender/identity SQL is covered by ARCH076 disposable PostgreSQL.
-vi.mock("../../../src/services/recovery-sender-pool/inbound-authority.js",()=>({lockInboundProviderIdentity:vi.fn(async()=>{}),assertNoRoutingTurn:vi.fn(async()=>{}),canProcessConversation:vi.fn(async()=>true)}));
+vi.mock(
+  "../../../src/services/recovery-sender-pool/inbound-authority.js",
+  () => ({
+    lockInboundProviderIdentity: vi.fn(async () => {}),
+    assertNoRoutingTurn: vi.fn(async () => {}),
+    canProcessConversation: vi.fn(async () => true),
+  }),
+);
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
-import {
-  ConversationLanguageService,
-} from "../../../src/services/conversation-language.service.js";
+import { ConversationLanguageService } from "../../../src/services/conversation-language.service.js";
 import { ConversationService } from "../../../src/services/conversation.service.js";
 
-const { prismaMock, txConversationUpdate, txConversationUpdateMany, operationReader, markEngaged } =
-  vi.hoisted(() => ({
-    operationReader: vi.fn(async () => ({ moderation: { value: { modelId: "omni-moderation-latest" } } })),
-    markEngaged: vi.fn(),
-    txConversationUpdate: vi.fn(),
-    txConversationUpdateMany: vi.fn(),
-    prismaMock: {
-      conversationMessage: {
-        findUnique: vi.fn(),
-        create: vi.fn(),
-        findMany: vi.fn(),
-      },
-      checkoutRecovery: { findUniqueOrThrow: vi.fn() },
-      conversationModerationAssessment: { findMany: vi.fn() },
-      merchantConversationSendCommand: { findMany: vi.fn() },
-      conversation: {
-        upsert: vi.fn(),
-        findUniqueOrThrow: vi.fn(),
-        update: vi.fn(),
-        updateMany: vi.fn(),
-      },
-      $transaction: vi.fn(),
+const {
+  prismaMock,
+  txConversationUpdate,
+  txConversationUpdateMany,
+  operationReader,
+  markEngaged,
+} = vi.hoisted(() => ({
+  operationReader: vi.fn(async () => ({
+    moderation: { value: { modelId: "omni-moderation-latest" } },
+  })),
+  markEngaged: vi.fn(),
+  txConversationUpdate: vi.fn(),
+  txConversationUpdateMany: vi.fn(),
+  prismaMock: {
+    conversationMessage: {
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      findMany: vi.fn(),
     },
-  }));
+    checkoutRecovery: { findUniqueOrThrow: vi.fn() },
+    conversationModerationAssessment: { findMany: vi.fn() },
+    merchantConversationSendCommand: { findMany: vi.fn() },
+    conversation: {
+      upsert: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    $transaction: vi.fn(),
+  },
+}));
 
 vi.mock("../../../src/lib/db.js", () => ({ default: prismaMock }));
-vi.mock("../../../src/services/conversation-moderation/moderation-operation.js", () => ({
-  readModerationOperation: operationReader,
-}));
+vi.mock(
+  "../../../src/services/conversation-moderation/moderation-operation.js",
+  () => ({
+    readModerationOperation: operationReader,
+  }),
+);
 vi.mock("../../../src/services/recovery-outreach-attempt.service.js", () => ({
   recoveryOutreachAttemptService: { markEngagedForConversation: markEngaged },
 }));
@@ -57,14 +72,24 @@ describe("ConversationService language persistence", () => {
         languageSource: null,
       });
       const create = vi.fn();
-      const queryRaw = vi.fn().mockResolvedValue([{
-        id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
-        controlMode: "AI", controlRevision: 0, inboundVersion: 0,
-        lastProcessedVersion: 0, pendingTurnStartedAt: null,
-        recoveryId: null, recoveryShopId: null,
-      }]);
+      const queryRaw = vi.fn().mockResolvedValue([
+        {
+          id: "conversation-1",
+          type: "PRODUCT_SUPPORT",
+          checkoutRecoveryId: null,
+          controlMode: "AI",
+          controlRevision: 0,
+          inboundVersion: 0,
+          lastProcessedVersion: 0,
+          pendingTurnStartedAt: null,
+          recoveryId: null,
+          recoveryShopId: null,
+        },
+      ]);
       const executeRaw = vi.fn().mockResolvedValue(1);
-      const update = vi.fn().mockResolvedValue({ id: "conversation-1", inboundVersion: 1 });
+      const update = vi
+        .fn()
+        .mockResolvedValue({ id: "conversation-1", inboundVersion: 1 });
       const updateMany = vi.fn().mockResolvedValue({ count: 1 });
       prismaMock.$transaction.mockImplementation(async (callback) =>
         callback({
@@ -112,99 +137,136 @@ describe("ConversationService language persistence", () => {
   it.each([
     ["atomic-receive", false],
     ["post-commit-engagement", true],
-  ])("logs the original %s failure through Shared without changing the thrown error", async (stage, afterCommit) => {
-    const records: string[] = [];
-    const logger = createLogger({
-      serviceName: "moda-messaging-worker",
-      environment: "test",
-      sink: (record) => records.push(JSON.stringify(record)),
-    });
-    const sourceError = Object.assign(
-      new Error("arch056-inbound-fixture-source-failure email customer@example.com phone +447700900000 token=secret-value"),
-      { code: "P2002", clientVersion: "6.19.3" },
-    );
-    prismaMock.conversationMessage.findUnique.mockResolvedValueOnce(null);
-    if (afterCommit) {
-      prismaMock.conversation.findUniqueOrThrow.mockResolvedValueOnce({
-        inboundVersion: 0,
-        lastProcessedVersion: 0,
-        pendingTurnStartedAt: null,
-        languageTag: null,
-        languageSource: null,
-        checkoutRecoveryId: null,
+  ])(
+    "logs the original %s failure through Shared without changing the thrown error",
+    async (stage, afterCommit) => {
+      const records: string[] = [];
+      const logger = createLogger({
+        serviceName: "moda-messaging-worker",
+        environment: "test",
+        sink: (record) => records.push(JSON.stringify(record)),
       });
-      prismaMock.$transaction.mockImplementationOnce(async (callback) => callback({
-        conversationMessage: { create: vi.fn().mockResolvedValue({}) },
-        conversation: {
-          update: vi.fn().mockResolvedValue({ id: "conversation-1", inboundVersion: 1 }),
-          updateMany: vi.fn(),
+      const sourceError = Object.assign(
+        new Error(
+          "arch056-inbound-fixture-source-failure email customer@example.com phone +447700900000 token=secret-value",
+        ),
+        { code: "P2002", clientVersion: "6.19.3" },
+      );
+      prismaMock.conversationMessage.findUnique.mockResolvedValueOnce(null);
+      if (afterCommit) {
+        prismaMock.conversation.findUniqueOrThrow.mockResolvedValueOnce({
+          inboundVersion: 0,
+          lastProcessedVersion: 0,
+          pendingTurnStartedAt: null,
+          languageTag: null,
+          languageSource: null,
+          checkoutRecoveryId: null,
+        });
+        prismaMock.$transaction.mockImplementationOnce(async (callback) =>
+          callback({
+            conversationMessage: { create: vi.fn().mockResolvedValue({}) },
+            conversation: {
+              update: vi
+                .fn()
+                .mockResolvedValue({ id: "conversation-1", inboundVersion: 1 }),
+              updateMany: vi.fn(),
+            },
+            $queryRaw: vi.fn().mockResolvedValue([
+              {
+                id: "conversation-1",
+                type: "PRODUCT_SUPPORT",
+                checkoutRecoveryId: null,
+                controlMode: "AI",
+                controlRevision: 0,
+                inboundVersion: 0,
+                lastProcessedVersion: 0,
+                pendingTurnStartedAt: null,
+                recoveryId: null,
+                recoveryShopId: null,
+              },
+            ]),
+            shopSettings: { findUnique: vi.fn() },
+            $executeRaw: vi.fn().mockResolvedValue(1),
+          } as any),
+        );
+        markEngaged.mockRejectedValueOnce(sourceError);
+      } else {
+        prismaMock.conversation.findUniqueOrThrow.mockResolvedValueOnce({
+          inboundVersion: 0,
+          lastProcessedVersion: 0,
+          pendingTurnStartedAt: null,
+          languageTag: null,
+          languageSource: null,
+          checkoutRecoveryId: null,
+        });
+        prismaMock.$transaction.mockImplementationOnce(async (callback) =>
+          callback({
+            conversationMessage: {
+              create: vi.fn().mockRejectedValue(sourceError),
+            },
+            conversation: {
+              update: vi.fn().mockResolvedValue({ inboundVersion: 1 }),
+              updateMany: vi.fn(),
+            },
+            $queryRaw: vi.fn().mockResolvedValue([
+              {
+                id: "conversation-1",
+                type: "PRODUCT_SUPPORT",
+                checkoutRecoveryId: null,
+                controlMode: "AI",
+                controlRevision: 0,
+                inboundVersion: 0,
+                lastProcessedVersion: 0,
+                pendingTurnStartedAt: null,
+                recoveryId: null,
+                recoveryShopId: null,
+              },
+            ]),
+            shopSettings: { findUnique: vi.fn() },
+            $executeRaw: vi.fn(),
+          } as any),
+        );
+      }
+
+      await expect(
+        new ConversationService(undefined, logger).receiveMessage({
+          conversationId: "conversation-1",
+          providerMessageId: "wamid.arch056-safe-id",
+          inReplyToProviderId: null,
+          content: "not logged",
+        }),
+      ).rejects.toBe(sourceError);
+
+      const record = JSON.parse(
+        records.find(
+          (line) =>
+            JSON.parse(line).event === "whatsapp.inbound.persistence_failed",
+        )!,
+      );
+      expect(record).toMatchObject({
+        level: "error",
+        event: "whatsapp.inbound.persistence_failed",
+        "service.name": "moda-messaging-worker",
+        "deployment.environment.name": "test",
+        data: {
+          conversationId: "conversation-1",
+          providerMessageId: "wamid.arch056-safe-id",
+          stage: afterCommit ? "post-commit-engagement" : "atomic-receive",
+          error: {
+            name: "Error",
+            message:
+              "arch056-inbound-fixture-source-failure email [REDACTED] phone [REDACTED] token=[REDACTED]",
+          },
+          prismaCode: "P2002",
+          prismaClientVersion: "6.19.3",
+          redactionApplied: true,
         },
-        $queryRaw: vi.fn().mockResolvedValue([{
-          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
-          controlMode: "AI", controlRevision: 0, inboundVersion: 0,
-          lastProcessedVersion: 0, pendingTurnStartedAt: null,
-          recoveryId: null, recoveryShopId: null,
-        }]),
-        shopSettings: { findUnique: vi.fn() },
-        $executeRaw: vi.fn().mockResolvedValue(1),
-      } as any));
-      markEngaged.mockRejectedValueOnce(sourceError);
-    } else {
-      prismaMock.conversation.findUniqueOrThrow.mockResolvedValueOnce({
-        inboundVersion: 0,
-        lastProcessedVersion: 0,
-        pendingTurnStartedAt: null,
-        languageTag: null,
-        languageSource: null,
-        checkoutRecoveryId: null,
       });
-      prismaMock.$transaction.mockImplementationOnce(async (callback) => callback({
-        conversationMessage: { create: vi.fn().mockRejectedValue(sourceError) },
-        conversation: {
-          update: vi.fn().mockResolvedValue({ inboundVersion: 1 }),
-          updateMany: vi.fn(),
-        },
-        $queryRaw: vi.fn().mockResolvedValue([{
-          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
-          controlMode: "AI", controlRevision: 0, inboundVersion: 0,
-          lastProcessedVersion: 0, pendingTurnStartedAt: null,
-          recoveryId: null, recoveryShopId: null,
-        }]),
-        shopSettings: { findUnique: vi.fn() },
-        $executeRaw: vi.fn(),
-      } as any));
-    }
-
-    await expect(new ConversationService(undefined, logger).receiveMessage({
-      conversationId: "conversation-1",
-      providerMessageId: "wamid.arch056-safe-id",
-      inReplyToProviderId: null,
-      content: "not logged",
-    })).rejects.toBe(sourceError);
-
-    const record = JSON.parse(records.find((line) => JSON.parse(line).event === "whatsapp.inbound.persistence_failed")!);
-    expect(record).toMatchObject({
-      level: "error",
-      event: "whatsapp.inbound.persistence_failed",
-      "service.name": "moda-messaging-worker",
-      "deployment.environment.name": "test",
-      data: {
-        conversationId: "conversation-1",
-        providerMessageId: "wamid.arch056-safe-id",
-        stage: afterCommit ? "post-commit-engagement" : "atomic-receive",
-        error: {
-          name: "Error",
-          message: "arch056-inbound-fixture-source-failure email [REDACTED] phone [REDACTED] token=[REDACTED]",
-        },
-        prismaCode: "P2002",
-        prismaClientVersion: "6.19.3",
-        redactionApplied: true,
-      },
-    });
-    expect(JSON.stringify(record)).not.toContain("customer@example.com");
-    expect(JSON.stringify(record)).not.toContain("+447700900000");
-    expect(JSON.stringify(record)).not.toContain("secret-value");
-  });
+      expect(JSON.stringify(record)).not.toContain("customer@example.com");
+      expect(JSON.stringify(record)).not.toContain("+447700900000");
+      expect(JSON.stringify(record)).not.toContain("secret-value");
+    },
+  );
 
   it("keeps the original receive error when the Shared logging sink throws", async () => {
     const sourceError = new Error("arch056-inbound-fixture-source-failure");
@@ -217,33 +279,47 @@ describe("ConversationService language persistence", () => {
       languageSource: null,
       checkoutRecoveryId: null,
     });
-    prismaMock.$transaction.mockImplementationOnce(async (callback) => callback({
-      conversationMessage: { create: vi.fn().mockRejectedValue(sourceError) },
-      conversation: {
-        update: vi.fn().mockResolvedValue({ inboundVersion: 1 }),
-        updateMany: vi.fn(),
-      },
-      $queryRaw: vi.fn().mockResolvedValue([{
-        id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
-        controlMode: "AI", controlRevision: 0, inboundVersion: 0,
-        lastProcessedVersion: 0, pendingTurnStartedAt: null,
-        recoveryId: null, recoveryShopId: null,
-      }]),
-      shopSettings: { findUnique: vi.fn() },
-      $executeRaw: vi.fn(),
-    } as any));
+    prismaMock.$transaction.mockImplementationOnce(async (callback) =>
+      callback({
+        conversationMessage: { create: vi.fn().mockRejectedValue(sourceError) },
+        conversation: {
+          update: vi.fn().mockResolvedValue({ inboundVersion: 1 }),
+          updateMany: vi.fn(),
+        },
+        $queryRaw: vi.fn().mockResolvedValue([
+          {
+            id: "conversation-1",
+            type: "PRODUCT_SUPPORT",
+            checkoutRecoveryId: null,
+            controlMode: "AI",
+            controlRevision: 0,
+            inboundVersion: 0,
+            lastProcessedVersion: 0,
+            pendingTurnStartedAt: null,
+            recoveryId: null,
+            recoveryShopId: null,
+          },
+        ]),
+        shopSettings: { findUnique: vi.fn() },
+        $executeRaw: vi.fn(),
+      } as any),
+    );
     const logger = createLogger({
       serviceName: "moda-messaging-worker",
       environment: "test",
-      sink: () => { throw new Error("sink failure"); },
+      sink: () => {
+        throw new Error("sink failure");
+      },
     });
 
-    await expect(new ConversationService(undefined, logger).receiveMessage({
-      conversationId: "conversation-1",
-      providerMessageId: "wamid.sink-failure",
-      inReplyToProviderId: null,
-      content: "not logged",
-    })).rejects.toBe(sourceError);
+    await expect(
+      new ConversationService(undefined, logger).receiveMessage({
+        conversationId: "conversation-1",
+        providerMessageId: "wamid.sink-failure",
+        inReplyToProviderId: null,
+        content: "not logged",
+      }),
+    ).rejects.toBe(sourceError);
   });
 
   it("persists initial language during receipt and applies detection after the agent", async () => {
@@ -268,12 +344,20 @@ describe("ConversationService language persistence", () => {
           updateMany: txConversationUpdateMany.mockResolvedValue({ count: 1 }),
           update: txConversationUpdate,
         },
-        $queryRaw: vi.fn().mockResolvedValue([{
-          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
-          controlMode: "AI", controlRevision: 0, inboundVersion: 1,
-          lastProcessedVersion: 1, pendingTurnStartedAt: null,
-          recoveryId: null, recoveryShopId: null,
-        }]),
+        $queryRaw: vi.fn().mockResolvedValue([
+          {
+            id: "conversation-1",
+            type: "PRODUCT_SUPPORT",
+            checkoutRecoveryId: null,
+            controlMode: "AI",
+            controlRevision: 0,
+            inboundVersion: 1,
+            lastProcessedVersion: 1,
+            pendingTurnStartedAt: null,
+            recoveryId: null,
+            recoveryShopId: null,
+          },
+        ]),
         shopSettings: { findUnique: vi.fn() },
         $executeRaw: vi.fn().mockResolvedValue(1),
       }),
@@ -341,7 +425,12 @@ describe("ConversationService language persistence", () => {
       }),
     ).resolves.toBe(true);
     expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith({
-      where: { id: "conversation-1", inboundVersion: 2, processingInboundVersion: 2, processingStartedAt: { gt: expect.any(Date) } },
+      where: {
+        id: "conversation-1",
+        inboundVersion: 2,
+        processingInboundVersion: 2,
+        processingStartedAt: { gt: expect.any(Date) },
+      },
       data: { languageTag: "fr", languageSource: "DETECTED" },
     });
     expect(serviceLogger.info).toHaveBeenCalledWith(
@@ -426,12 +515,20 @@ describe("ConversationService language persistence", () => {
       callback({
         conversationMessage: { create },
         conversation: { updateMany, update },
-        $queryRaw: vi.fn().mockResolvedValue([{
-          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
-          controlMode: "AI", controlRevision: 0, inboundVersion: 1,
-          lastProcessedVersion: 1, pendingTurnStartedAt: null,
-          recoveryId: null, recoveryShopId: null,
-        }]),
+        $queryRaw: vi.fn().mockResolvedValue([
+          {
+            id: "conversation-1",
+            type: "PRODUCT_SUPPORT",
+            checkoutRecoveryId: null,
+            controlMode: "AI",
+            controlRevision: 0,
+            inboundVersion: 1,
+            lastProcessedVersion: 1,
+            pendingTurnStartedAt: null,
+            recoveryId: null,
+            recoveryShopId: null,
+          },
+        ]),
         shopSettings: { findUnique: vi.fn() },
         $executeRaw: vi.fn().mockResolvedValue(1),
       } as any),
@@ -474,20 +571,38 @@ describe("ConversationService standalone snapshots", () => {
       checkoutRecovery: null,
     });
     prismaMock.conversationMessage.findMany.mockResolvedValue([
-      { id: "customer-1", direction: "INBOUND", senderType: "CUSTOMER", content: "Need a black shirt" },
-      { id: "customer-2", direction: "INBOUND", senderType: "CUSTOMER", content: "moderation-fixture-block" },
+      {
+        id: "customer-1",
+        direction: "INBOUND",
+        senderType: "CUSTOMER",
+        content: "Need a black shirt",
+      },
+      {
+        id: "customer-2",
+        direction: "INBOUND",
+        senderType: "CUSTOMER",
+        content: "moderation-fixture-block",
+      },
     ]);
-    prismaMock.conversationModerationAssessment.findMany.mockResolvedValue([{
-      conversationMessageId: "customer-1",
-      contentSha256: createHash("sha256").update("Need a black shirt", "utf8").digest("hex"),
-    }]);
+    prismaMock.conversationModerationAssessment.findMany.mockResolvedValue([
+      {
+        conversationMessageId: "customer-1",
+        contentSha256: createHash("sha256")
+          .update("Need a black shirt", "utf8")
+          .digest("hex"),
+      },
+    ]);
     prismaMock.merchantConversationSendCommand.findMany.mockResolvedValue([]);
-    operationReader.mockResolvedValue({ moderation: { value: { modelId: "omni-moderation-latest" } } });
+    operationReader.mockResolvedValue({
+      moderation: { value: { modelId: "omni-moderation-latest" } },
+    });
   }
 
   it("uses the explicit shop but includes only an exact moderation ALLOW", async () => {
     setupStandaloneHistory();
-    const snapshot = await new ConversationService().getAgentSnapshot("conversation-1");
+    const snapshot = await new ConversationService().getAgentSnapshot(
+      "conversation-1",
+    );
     expect(snapshot).toMatchObject({
       conversationId: "conversation-1",
       shop: "example.myshopify.com",
@@ -495,10 +610,15 @@ describe("ConversationService standalone snapshots", () => {
       summary: null,
       messages: [{ role: "user", content: "Need a black shirt" }],
     });
-    expect(prismaMock.conversationModerationAssessment.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({
-        decision: "ALLOW", requestedModel: "omni-moderation-latest",
-      }) }),
+    expect(
+      prismaMock.conversationModerationAssessment.findMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          decision: "ALLOW",
+          requestedModel: "omni-moderation-latest",
+        }),
+      }),
     );
   });
 
@@ -506,28 +626,80 @@ describe("ConversationService standalone snapshots", () => {
     setupStandaloneHistory();
     const sentAt = new Date("2026-11-26T02:40:54Z");
     const rows = [
-      { id: "failed", direction: "OUTBOUND", senderType: "AUTOMATION", status: "FAILED", sentAt, content: "FAILED10" },
-      { id: "accepted", direction: "OUTBOUND", senderType: "AUTOMATION", status: "SENT", sentAt, content: "ACCEPTED15" },
-      { id: "delivered", direction: "OUTBOUND", senderType: "AUTOMATION", status: "DELIVERED", sentAt, deliveredAt: sentAt, content: "DELIVERED20" },
+      {
+        id: "failed",
+        direction: "OUTBOUND",
+        senderType: "AUTOMATION",
+        status: "FAILED",
+        sentAt,
+        content: "FAILED10",
+      },
+      {
+        id: "accepted",
+        direction: "OUTBOUND",
+        senderType: "AUTOMATION",
+        status: "SENT",
+        sentAt,
+        content: "ACCEPTED15",
+      },
+      {
+        id: "delivered",
+        direction: "OUTBOUND",
+        senderType: "AUTOMATION",
+        status: "DELIVERED",
+        sentAt,
+        deliveredAt: sentAt,
+        content: "DELIVERED20",
+      },
     ];
     prismaMock.conversationMessage.findMany.mockResolvedValue(rows);
-    prismaMock.conversationModerationAssessment.findMany.mockResolvedValue(rows.map(row => ({
-      conversationMessageId: row.id, contentSha256: createHash("sha256").update(row.content, "utf8").digest("hex"),
-    })));
-    const snapshot = await new ConversationService().getAgentSnapshot("conversation-1");
+    prismaMock.conversationModerationAssessment.findMany.mockResolvedValue(
+      rows.map((row) => ({
+        conversationMessageId: row.id,
+        contentSha256: createHash("sha256")
+          .update(row.content, "utf8")
+          .digest("hex"),
+      })),
+    );
+    const snapshot = await new ConversationService().getAgentSnapshot(
+      "conversation-1",
+    );
     expect(snapshot.messages).toHaveLength(2);
-    expect(snapshot.messages.some(row => row.content.includes("Delivery confirmed") && row.content.endsWith("DELIVERED20"))).toBe(true);
+    expect(
+      snapshot.messages.some(
+        (row) =>
+          row.content.includes("Delivery confirmed") &&
+          row.content.endsWith("DELIVERED20"),
+      ),
+    ).toBe(true);
     expect(JSON.stringify(snapshot)).not.toMatch(/FAILED10|ACCEPTED15/);
-    expect(prismaMock.conversationMessage.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 20, where: {
-      AND: [expect.objectContaining({OR: expect.arrayContaining([{direction:"OUTBOUND",sentAt:{not:null},status:{in:["SENT","DELIVERED","READ"]}}])}), {conversationId:"conversation-1"}],
-    } }));
+    expect(prismaMock.conversationMessage.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        take: 20,
+        where: {
+          AND: [
+            expect.objectContaining({
+              OR: expect.arrayContaining([
+                {
+                  direction: "OUTBOUND",
+                  sentAt: { not: null },
+                  status: { in: ["SENT", "DELIVERED", "READ"] },
+                },
+              ]),
+            }),
+            { conversationId: "conversation-1" },
+          ],
+        },
+      }),
+    );
   });
 
   it("fails closed when moderation configuration cannot be read", async () => {
     setupStandaloneHistory();
     operationReader.mockRejectedValueOnce(new Error("DB_UNAVAILABLE"));
-    await expect(new ConversationService().getAgentSnapshot("conversation-1"))
-      .rejects.toThrow("DB_UNAVAILABLE");
+    await expect(
+      new ConversationService().getAgentSnapshot("conversation-1"),
+    ).rejects.toThrow("DB_UNAVAILABLE");
   });
 });
 
@@ -576,66 +748,81 @@ describe("ConversationService turn state", () => {
   });
 
   it("atomically claims a recovery turn only for its frozen AI control revision", async () => {
-    prismaMock.conversation.updateMany.mockClear().mockResolvedValue({ count: 1 });
+    prismaMock.conversation.updateMany
+      .mockClear()
+      .mockResolvedValue({ count: 1 });
     const now = new Date("2026-09-08T12:00:00.000Z");
 
-    await expect(new ConversationService().claimTurn("conversation-1", 3, now, 7))
-      .resolves.toBe(true);
+    await expect(
+      new ConversationService().claimTurn("conversation-1", 3, now, 7),
+    ).resolves.toBe(true);
 
-    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        controlMode: "AI",
-        controlRevision: 7,
-        pendingAiControlRevision: 7,
+    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          controlMode: "AI",
+          controlRevision: 7,
+          pendingAiControlRevision: 7,
+        }),
       }),
-    }));
+    );
   });
 
   it("completes only when the original control revision remains current", async () => {
-    prismaMock.conversation.updateMany.mockClear().mockResolvedValue({ count: 1 });
+    prismaMock.conversation.updateMany
+      .mockClear()
+      .mockResolvedValue({ count: 1 });
 
-    await expect(new ConversationService().completeTurn("conversation-1", 3, 7))
-      .resolves.toBe(true);
+    await expect(
+      new ConversationService().completeTurn("conversation-1", 3, 7),
+    ).resolves.toBe(true);
 
-    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        inboundVersion: 3,
-        processingInboundVersion: 3,
-        controlMode: "AI",
-        controlRevision: 7,
-        pendingAiControlRevision: 7,
+    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          inboundVersion: 3,
+          processingInboundVersion: 3,
+          controlMode: "AI",
+          controlRevision: 7,
+          pendingAiControlRevision: 7,
+        }),
+        data: expect.objectContaining({
+          pendingTurnStartedAt: null,
+          pendingAiNotBeforeAt: null,
+          pendingAiControlRevision: null,
+          pendingAiDelayMinutes: null,
+        }),
       }),
-      data: expect.objectContaining({
-        pendingTurnStartedAt: null,
-        pendingAiNotBeforeAt: null,
-        pendingAiControlRevision: null,
-        pendingAiDelayMinutes: null,
-      }),
-    }));
+    );
   });
 
   it("acknowledges an obsolete revision without touching a newer inbound version", async () => {
-    prismaMock.conversation.updateMany.mockClear().mockResolvedValue({ count: 1 });
+    prismaMock.conversation.updateMany
+      .mockClear()
+      .mockResolvedValue({ count: 1 });
 
-    await expect(new ConversationService().suppressStaleTurn("conversation-1", 3, 7))
-      .resolves.toBe(true);
+    await expect(
+      new ConversationService().suppressStaleTurn("conversation-1", 3, 7),
+    ).resolves.toBe(true);
 
-    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        inboundVersion: 3,
-        lastProcessedVersion: { lt: 3 },
-        OR: expect.arrayContaining([
-          { controlMode: { not: "AI" } },
-          { controlRevision: { not: 7 } },
-          { pendingAiControlRevision: { not: 7 } },
-        ]),
+    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          inboundVersion: 3,
+          lastProcessedVersion: { lt: 3 },
+          OR: expect.arrayContaining([
+            { controlMode: { not: "AI" } },
+            { controlRevision: { not: 7 } },
+            { pendingAiControlRevision: { not: 7 } },
+          ]),
+        }),
+        data: expect.objectContaining({
+          lastProcessedVersion: 3,
+          pendingAiNotBeforeAt: null,
+          pendingAiControlRevision: null,
+        }),
       }),
-      data: expect.objectContaining({
-        lastProcessedVersion: 3,
-        pendingAiNotBeforeAt: null,
-        pendingAiControlRevision: null,
-      }),
-    }));
+    );
   });
 
   it("keeps the first pending-turn timestamp when concurrent receipts race", async () => {
@@ -663,12 +850,20 @@ describe("ConversationService turn state", () => {
           updateMany: conditionalUpdate,
           update,
         },
-        $queryRaw: vi.fn().mockResolvedValue([{
-          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
-          controlMode: "AI", controlRevision: 0, inboundVersion: 1,
-          lastProcessedVersion: 1, pendingTurnStartedAt: null,
-          recoveryId: null, recoveryShopId: null,
-        }]),
+        $queryRaw: vi.fn().mockResolvedValue([
+          {
+            id: "conversation-1",
+            type: "PRODUCT_SUPPORT",
+            checkoutRecoveryId: null,
+            controlMode: "AI",
+            controlRevision: 0,
+            inboundVersion: 1,
+            lastProcessedVersion: 1,
+            pendingTurnStartedAt: null,
+            recoveryId: null,
+            recoveryShopId: null,
+          },
+        ]),
         shopSettings: { findUnique: vi.fn() },
         $executeRaw: vi.fn().mockResolvedValue(1),
       }),
@@ -692,7 +887,9 @@ describe("ConversationService turn state", () => {
 
     expect(conditionalUpdate).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledTimes(4);
-    expect(update.mock.calls.filter(([call]) => call.data.pendingTurnStartedAt)).toHaveLength(2);
+    expect(
+      update.mock.calls.filter(([call]) => call.data.pendingTurnStartedAt),
+    ).toHaveLength(2);
   });
 
   it("clears pending and processing state only for the claimed version", async () => {
@@ -727,19 +924,76 @@ describe("ConversationService turn state", () => {
 });
 
 describe("A1 shop language recovery initialization", () => {
- it.each(["en-GB", "fr"])("initializes %s from shared Shop context without ShopSettings", async (languageTag) => {
-  prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({shop:{id:"shop-1",defaultLanguageTag:languageTag}});
-  prismaMock.conversation.upsert.mockClear();
-  await new ConversationService().getOrCreateRecoveryConversation("recovery-1",{languageTag:"fr-FR",languageSource:"shopify",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"});
-  expect(prismaMock.checkoutRecovery.findUniqueOrThrow).toHaveBeenCalledWith({where:{id:"recovery-1"},select:{shop:{select:{id:true,defaultLanguageTag:true}}}});
-  expect(prismaMock.conversation.upsert).toHaveBeenCalledWith({where:{checkoutRecoveryId:"recovery-1"},create:{shopId:"shop-1",checkoutRecoveryId:"recovery-1",type:"RECOVERY",languageTag,languageSource:"MERCHANT_DEFAULT",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"},update:{}});
- });
- it.each([null,"invalid_@@"])("L02 missing/invalid shop has no invented locale (%s)", async(defaultLanguageTag)=>{
-  prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({shop:{id:"shop-1",defaultLanguageTag}});
-  await new ConversationService().getOrCreateRecoveryConversation("recovery-1");
-  expect(prismaMock.conversation.upsert).toHaveBeenLastCalledWith(expect.objectContaining({create:expect.objectContaining({languageTag:null,languageSource:null}),update:{}}));
- });
- it("L03 preserves established French on the next initial-resolution pass",async()=>{
-  expect(new ConversationLanguageService().resolveInitialLanguage({currentLanguageTag:"fr",currentLanguageSource:"detected",merchantLanguageTag:"en-GB"})).toMatchObject({languageTag:"fr",languageSource:"detected",changed:false});
- });
+  it.each(["en-GB", "fr"])(
+    "initializes %s from shared Shop context without ShopSettings",
+    async (languageTag) => {
+      prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({
+        shop: { id: "shop-1", defaultLanguageTag: languageTag },
+      });
+      prismaMock.conversation.upsert.mockClear();
+      await new ConversationService().getOrCreateRecoveryConversation(
+        "recovery-1",
+        {
+          languageTag: "fr-FR",
+          languageSource: "shopify",
+          countryCode: "FR",
+          currencyCode: "GBP",
+          timeZone: "Europe/London",
+        },
+      );
+      expect(
+        prismaMock.checkoutRecovery.findUniqueOrThrow,
+      ).toHaveBeenCalledWith({
+        where: { id: "recovery-1" },
+        select: { shop: { select: { id: true, defaultLanguageTag: true } } },
+      });
+      expect(prismaMock.conversation.upsert).toHaveBeenCalledWith({
+        where: { checkoutRecoveryId: "recovery-1" },
+        create: {
+          shopId: "shop-1",
+          checkoutRecoveryId: "recovery-1",
+          type: "RECOVERY",
+          languageTag,
+          languageSource: "MERCHANT_DEFAULT",
+          countryCode: "FR",
+          currencyCode: "GBP",
+          timeZone: "Europe/London",
+        },
+        update: {},
+      });
+    },
+  );
+  it.each([null, "invalid_@@"])(
+    "L02 missing/invalid shop has no invented locale (%s)",
+    async (defaultLanguageTag) => {
+      prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({
+        shop: { id: "shop-1", defaultLanguageTag },
+      });
+      await new ConversationService().getOrCreateRecoveryConversation(
+        "recovery-1",
+      );
+      expect(prismaMock.conversation.upsert).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          create: expect.objectContaining({
+            languageTag: null,
+            languageSource: null,
+          }),
+          update: {},
+        }),
+      );
+    },
+  );
+  it("L03 preserves established French on the next initial-resolution pass", async () => {
+    expect(
+      new ConversationLanguageService().resolveInitialLanguage({
+        currentLanguageTag: "fr",
+        currentLanguageSource: "detected",
+        merchantLanguageTag: "en-GB",
+      }),
+    ).toMatchObject({
+      languageTag: "fr",
+      languageSource: "detected",
+      changed: false,
+    });
+  });
 });

@@ -1,6 +1,16 @@
 import type { PrismaClient } from "@prisma/client";
-import { normalizeRecipientPhone, parseShopifyCustomerIdentity } from "@modainteract/moda-interact-shared/identity";
-import { ambiguous, notAuthorised, type Identity, type ScopedCustomer, type ScopedResult, type RecipientResult } from "./types.js";
+import {
+  normalizeRecipientPhone,
+  parseShopifyCustomerIdentity,
+} from "@modainteract/moda-interact-shared/identity";
+import {
+  ambiguous,
+  notAuthorised,
+  type Identity,
+  type ScopedCustomer,
+  type ScopedResult,
+  type RecipientResult,
+} from "./types.js";
 
 /** Resolves only shop-owned, linked Shopify customers and unambiguous active recipients. */
 export class ShopifyConsentRecipientResolver {
@@ -15,11 +25,20 @@ export class ShopifyConsentRecipientResolver {
     try {
       identity = parseShopifyCustomerIdentity(shopifyCustomerId);
     } catch {
-      return { ok: false, failure: notAuthorised("UNVERIFIED_SHOPIFY_IDENTITY") };
+      return {
+        ok: false,
+        failure: notAuthorised("UNVERIFIED_SHOPIFY_IDENTITY"),
+      };
     }
     const shop = await this.database.shop.findUnique({
       where: { id: shopId },
-      select: { id: true, domain: true, platform: true, status: true, defaultCountryCode: true },
+      select: {
+        id: true,
+        domain: true,
+        platform: true,
+        status: true,
+        defaultCountryCode: true,
+      },
     });
     if (!shop || shop.platform !== "SHOPIFY" || shop.status !== "ACTIVE") {
       return { ok: false, failure: notAuthorised("SHOP_NOT_ELIGIBLE") };
@@ -27,25 +46,41 @@ export class ShopifyConsentRecipientResolver {
     // Numeric and GraphQL GID are accepted ONLY when already linked to an
     // existing shop-owned Customer. Never merge a phone-only legacy Customer.
     const customers = await this.database.customer.findMany({
-      where: { shopId, shopifyCustomerId: { in: [identity.numericId, identity.gid] } },
+      where: {
+        shopId,
+        shopifyCustomerId: { in: [identity.numericId, identity.gid] },
+      },
       select: { id: true },
       take: 2,
     });
-    if (customers.length > 1) return { ok: false, failure: ambiguous("DUPLICATE_SHOPIFY_IDENTITY") };
+    if (customers.length > 1)
+      return { ok: false, failure: ambiguous("DUPLICATE_SHOPIFY_IDENTITY") };
     const customer = customers[0];
-    if (!customer || (expectedCustomerId !== undefined && customer.id !== expectedCustomerId)) {
-      return { ok: false, failure: notAuthorised("CUSTOMER_IDENTITY_NOT_LINKED") };
+    if (
+      !customer ||
+      (expectedCustomerId !== undefined && customer.id !== expectedCustomerId)
+    ) {
+      return {
+        ok: false,
+        failure: notAuthorised("CUSTOMER_IDENTITY_NOT_LINKED"),
+      };
     }
     return { ok: true, value: { shop, customerId: customer.id, identity } };
   }
 
-  async resolveCustomerById(shopId: string, customerId: string): Promise<ScopedResult> {
+  async resolveCustomerById(
+    shopId: string,
+    customerId: string,
+  ): Promise<ScopedResult> {
     const customer = await this.database.customer.findFirst({
       where: { id: customerId, shopId },
       select: { shopifyCustomerId: true },
     });
     if (!customer?.shopifyCustomerId) {
-      return { ok: false, failure: notAuthorised("CUSTOMER_IDENTITY_NOT_LINKED") };
+      return {
+        ok: false,
+        failure: notAuthorised("CUSTOMER_IDENTITY_NOT_LINKED"),
+      };
     }
     return this.resolveCustomer(shopId, customer.shopifyCustomerId, customerId);
   }
@@ -53,23 +88,42 @@ export class ShopifyConsentRecipientResolver {
   canonical(phone: string, shop: ScopedCustomer["shop"]): string | null {
     // Never derive a national prefix from a language tag or locale.
     const country = shop.defaultCountryCode?.toUpperCase();
-    const context = phone.trim().startsWith("+") ? {} :
-      country ? { verifiedCountryCode: country } : {};
+    const context = phone.trim().startsWith("+")
+      ? {}
+      : country
+        ? { verifiedCountryCode: country }
+        : {};
     const normalized = normalizeRecipientPhone(phone, context);
     return normalized.ok ? normalized.e164 : null;
   }
 
-  async findRecipient(scoped: ScopedCustomer, recipient: string): Promise<RecipientResult> {
+  async findRecipient(
+    scoped: ScopedCustomer,
+    recipient: string,
+  ): Promise<RecipientResult> {
     const canonical = this.canonical(recipient, scoped.shop);
-    if (!canonical) return { ok: false, failure: notAuthorised("INVALID_RECIPIENT") };
+    if (!canonical)
+      return { ok: false, failure: notAuthorised("INVALID_RECIPIENT") };
     const phones = await this.database.customerPhone.findMany({
-      where: { customerId: scoped.customerId, endedAt: null, customer: { shopId: scoped.shop.id } },
+      where: {
+        customerId: scoped.customerId,
+        endedAt: null,
+        customer: { shopId: scoped.shop.id },
+      },
     });
-    const matching = phones.filter((phone) =>
-      this.canonical(phone.phone, scoped.shop) === canonical &&
-      (phone.whatsappCanonicalPhone === null || phone.whatsappCanonicalPhone === canonical.slice(1)));
-    if (matching.length === 0) return { ok: false, failure: notAuthorised("ACTIVE_RECIPIENT_NOT_FOUND") };
-    if (matching.length !== 1) return { ok: false, failure: ambiguous("MULTIPLE_ACTIVE_RECIPIENTS") };
+    const matching = phones.filter(
+      (phone) =>
+        this.canonical(phone.phone, scoped.shop) === canonical &&
+        (phone.whatsappCanonicalPhone === null ||
+          phone.whatsappCanonicalPhone === canonical.slice(1)),
+    );
+    if (matching.length === 0)
+      return {
+        ok: false,
+        failure: notAuthorised("ACTIVE_RECIPIENT_NOT_FOUND"),
+      };
+    if (matching.length !== 1)
+      return { ok: false, failure: ambiguous("MULTIPLE_ACTIVE_RECIPIENTS") };
     const phone = matching[0]!;
     // Do not treat another customer with the same recipient as the verified
     // principal, even if the Shopify customer ID uniquely identifies this one.
@@ -93,18 +147,26 @@ export class ShopifyConsentRecipientResolver {
     // and fail closed if the merchant has too many unverified legacy numbers;
     // a subsequent canonical backfill can remove this legacy ambiguity.
     const unverified = await this.database.customerPhone.findMany({
-      where: { endedAt: null, whatsappCanonicalPhone: null, customer: { shopId: scoped.shop.id } },
+      where: {
+        endedAt: null,
+        whatsappCanonicalPhone: null,
+        customer: { shopId: scoped.shop.id },
+      },
       select: { id: true, phone: true },
       take: 251,
     });
     if (unverified.length > 250) {
       return { ok: false, failure: ambiguous("UNVERIFIED_LEGACY_RECIPIENTS") };
     }
-    if (unverified.some((other) => other.id !== phone.id &&
-        this.canonical(other.phone, scoped.shop) === canonical)) {
+    if (
+      unverified.some(
+        (other) =>
+          other.id !== phone.id &&
+          this.canonical(other.phone, scoped.shop) === canonical,
+      )
+    ) {
       return { ok: false, failure: ambiguous("RECIPIENT_SHARED_BY_CUSTOMERS") };
     }
     return { ok: true, phone, canonical };
   }
-
 }

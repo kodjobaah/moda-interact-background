@@ -5,12 +5,18 @@ const mocks = vi.hoisted(() => ({
   settle: vi.fn(),
 }));
 
-vi.mock("../../../../src/services/woocommerce-billing/charge-receipt-correlation.js", () => ({
-  correlateAndLockChargePurchase: mocks.correlate,
-}));
-vi.mock("../../../../src/services/woocommerce-billing/charge-refund-settlement.js", () => ({
-  settleWooRefundReceipt: mocks.settle,
-}));
+vi.mock(
+  "../../../../src/services/woocommerce-billing/charge-receipt-correlation.js",
+  () => ({
+    correlateAndLockChargePurchase: mocks.correlate,
+  }),
+);
+vi.mock(
+  "../../../../src/services/woocommerce-billing/charge-refund-settlement.js",
+  () => ({
+    settleWooRefundReceipt: mocks.settle,
+  }),
+);
 
 import { processNextWooRefundReceipt } from "../../../../src/services/woocommerce-billing/charge-refund-receipt-processor.js";
 
@@ -30,7 +36,9 @@ function harness() {
     wooCommerceBillingWebhookReceipt: { updateMany: receiptUpdate },
   };
   const database = {
-    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(transaction)),
+    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback(transaction),
+    ),
   };
   return { receipt, database, transaction, queryRaw, receiptUpdate };
 }
@@ -38,28 +46,45 @@ function harness() {
 describe("processNextWooRefundReceipt", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.correlate.mockResolvedValue({ errorCode: "CHARGE_CORRELATION_NOT_READY" });
+    mocks.correlate.mockResolvedValue({
+      errorCode: "CHARGE_CORRELATION_NOT_READY",
+    });
     mocks.settle.mockResolvedValue(null);
   });
 
   it("leaves an unmatched provider refund retryable and creates no local refund", async () => {
     const test = harness();
 
-    await expect(processNextWooRefundReceipt(test.database as never, new Date(), null)).resolves
-      .toMatchObject({ outcome: "retryable", processingError: "WOO_REFUND_REQUEST_NOT_FOUND" });
-    expect(test.receiptUpdate).toHaveBeenCalledWith(expect.objectContaining({
-      data: { processingError: "WOO_REFUND_REQUEST_NOT_FOUND" },
-    }));
+    await expect(
+      processNextWooRefundReceipt(test.database as never, new Date(), null),
+    ).resolves.toMatchObject({
+      outcome: "retryable",
+      processingError: "WOO_REFUND_REQUEST_NOT_FOUND",
+    });
+    expect(test.receiptUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { processingError: "WOO_REFUND_REQUEST_NOT_FOUND" },
+      }),
+    );
     expect(mocks.settle).not.toHaveBeenCalled();
   });
 
   it("correlates the exact contract and operation before settling a refunded receipt", async () => {
     const test = harness();
-    const link = { shop: { id: "shop-1" }, operation: { id: "operation-1" }, purchase: { id: "purchase-1" } };
+    const link = {
+      shop: { id: "shop-1" },
+      operation: { id: "operation-1" },
+      purchase: { id: "purchase-1" },
+    };
     mocks.correlate.mockResolvedValueOnce({ link });
 
-    await expect(processNextWooRefundReceipt(test.database as never, new Date("2026-10-11T00:00:01Z"), null))
-      .resolves.toMatchObject({ outcome: "processed" });
+    await expect(
+      processNextWooRefundReceipt(
+        test.database as never,
+        new Date("2026-10-11T00:00:01Z"),
+        null,
+      ),
+    ).resolves.toMatchObject({ outcome: "processed" });
     expect(mocks.correlate).toHaveBeenCalledWith(
       test.transaction,
       "charge-1",
@@ -77,19 +102,30 @@ describe("processNextWooRefundReceipt", () => {
 
   it("settles an exact refund receipt when optional provider money is malformed", async () => {
     const test = harness();
-    const link = { shop: { id: "shop-1" }, operation: { id: "operation-1" }, purchase: { id: "purchase-1" } };
+    const link = {
+      shop: { id: "shop-1" },
+      operation: { id: "operation-1" },
+      purchase: { id: "purchase-1" },
+    };
     mocks.correlate.mockResolvedValueOnce({ link });
     test.receipt.normalizedPayload = {
       charge: {
         id: "charge-1",
         status: "refunded",
-        transactions: [{ completed_at: "2026-10-10T00:00:00Z", amount_refunded: "NaN" }],
+        transactions: [
+          { completed_at: "2026-10-10T00:00:00Z", amount_refunded: "NaN" },
+        ],
       },
     };
 
-    await expect(processNextWooRefundReceipt(test.database as never, new Date(), null)).resolves
-      .toMatchObject({ outcome: "processed" });
-    expect(mocks.correlate).toHaveBeenCalledWith(test.transaction, "charge-1", "operation-1");
+    await expect(
+      processNextWooRefundReceipt(test.database as never, new Date(), null),
+    ).resolves.toMatchObject({ outcome: "processed" });
+    expect(mocks.correlate).toHaveBeenCalledWith(
+      test.transaction,
+      "charge-1",
+      "operation-1",
+    );
     expect(mocks.settle).toHaveBeenCalledWith(
       test.transaction,
       link,

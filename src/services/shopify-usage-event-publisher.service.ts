@@ -1,8 +1,4 @@
-import {
-  Prisma,
-  ShopifyReportState,
-  UsageMetric,
-} from "@prisma/client";
+import { Prisma, ShopifyReportState, UsageMetric } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../lib/db.js";
@@ -29,7 +25,11 @@ type UsageEventRecord = {
   reportAttemptCount: number;
   nextReportAt: Date | null;
   lastReportAttemptAt: Date | null;
-  shop: { shopifyShopId: string | null; status: "ACTIVE" | "UNINSTALLED" | "SUSPENDED"; uninstalledAt: Date | null };
+  shop: {
+    shopifyShopId: string | null;
+    status: "ACTIVE" | "UNINSTALLED" | "SUSPENDED";
+    uninstalledAt: Date | null;
+  };
 };
 
 type PublisherDatabase = Pick<PrismaClient, "$transaction" | "usageEvent">;
@@ -45,35 +45,45 @@ export type ShopifyUsageEventPublisherResult = {
 
 export type ShopifyUsageEventPublishOptions = {
   billingPeriodId?: string;
-  runtimeConfig?: Pick<BackgroundRuntimeConfigSnapshot, "shopifyUsagePublishBatchSize" | "shopifyUsageRetryBaseSeconds" | "shopifyUsageRetryMaxSeconds">;
+  runtimeConfig?: Pick<
+    BackgroundRuntimeConfigSnapshot,
+    | "shopifyUsagePublishBatchSize"
+    | "shopifyUsageRetryBaseSeconds"
+    | "shopifyUsageRetryMaxSeconds"
+  >;
 };
 
 export class ShopifyUsageEventPublisherService {
-
   constructor(
     private readonly database: PublisherDatabase = prisma,
     private readonly provider: BillingEventClient | undefined = undefined,
     private readonly now: () => Date = () => new Date(),
     private readonly pageSize = DEFAULT_PAGE_SIZE,
-    private readonly createProvider: () => BillingEventClient | Promise<BillingEventClient> = createDefaultClient,
+    private readonly createProvider: () =>
+      BillingEventClient | Promise<BillingEventClient> = createDefaultClient,
   ) {}
 
-  async publishDue(options: ShopifyUsageEventPublishOptions = {}): Promise<ShopifyUsageEventPublisherResult> {
+  async publishDue(
+    options: ShopifyUsageEventPublishOptions = {},
+  ): Promise<ShopifyUsageEventPublisherResult> {
     const now = this.now();
-    const pageSize = boundedPageSize(options.runtimeConfig?.shopifyUsagePublishBatchSize ?? this.pageSize);
-    const retryBaseMs = (options.runtimeConfig?.shopifyUsageRetryBaseSeconds ?? 60) * 1000;
-    const retryMaxMs = (options.runtimeConfig?.shopifyUsageRetryMaxSeconds ?? 3600) * 1000;
+    const pageSize = boundedPageSize(
+      options.runtimeConfig?.shopifyUsagePublishBatchSize ?? this.pageSize,
+    );
+    const retryBaseMs =
+      (options.runtimeConfig?.shopifyUsageRetryBaseSeconds ?? 60) * 1000;
+    const retryMaxMs =
+      (options.runtimeConfig?.shopifyUsageRetryMaxSeconds ?? 3600) * 1000;
     await this.recoverStaleClaims(now, options);
 
     const dueWhere = {
-      ...(options.billingPeriodId ? { billingPeriodId: options.billingPeriodId } : {}),
+      ...(options.billingPeriodId
+        ? { billingPeriodId: options.billingPeriodId }
+        : {}),
       shopifyReportState: {
         in: [ShopifyReportState.PENDING, ShopifyReportState.RETRYABLE],
       },
-      OR: [
-        { nextReportAt: null },
-        { nextReportAt: { lte: now } },
-      ],
+      OR: [{ nextReportAt: null }, { nextReportAt: { lte: now } }],
     };
     const select = {
       id: true,
@@ -87,30 +97,29 @@ export class ShopifyUsageEventPublisherService {
       reportAttemptCount: true,
       nextReportAt: true,
       lastReportAttemptAt: true,
-      shop: { select: { shopifyShopId: true, status: true, uninstalledAt: true } },
+      shop: {
+        select: { shopifyShopId: true, status: true, uninstalledAt: true },
+      },
     } as const;
     const uninstallRows = await this.database.usageEvent.findMany({
       where: { ...dueWhere, shop: { status: "UNINSTALLED" } },
-      orderBy: [
-        { nextReportAt: "asc" },
-        { occurredAt: "asc" },
-        { id: "asc" },
-      ],
+      orderBy: [{ nextReportAt: "asc" }, { occurredAt: "asc" }, { id: "asc" }],
       take: pageSize,
       select,
     });
-    const ordinaryRows = uninstallRows.length >= pageSize
-      ? []
-      : await this.database.usageEvent.findMany({
-      where: { ...dueWhere, shop: { status: { not: "UNINSTALLED" } } },
-      orderBy: [
-        { nextReportAt: "asc" },
-        { occurredAt: "asc" },
-        { id: "asc" },
-      ],
-      take: pageSize - uninstallRows.length,
-      select,
-    });
+    const ordinaryRows =
+      uninstallRows.length >= pageSize
+        ? []
+        : await this.database.usageEvent.findMany({
+            where: { ...dueWhere, shop: { status: { not: "UNINSTALLED" } } },
+            orderBy: [
+              { nextReportAt: "asc" },
+              { occurredAt: "asc" },
+              { id: "asc" },
+            ],
+            take: pageSize - uninstallRows.length,
+            select,
+          });
     const rows = [...uninstallRows, ...ordinaryRows];
 
     const result: ShopifyUsageEventPublisherResult = {
@@ -128,7 +137,11 @@ export class ShopifyUsageEventPublisherService {
 
       const invalidReason = validateReportableUsage(row);
       if (invalidReason) {
-        await this.markNeedsAttention(row.id, "invalid-reportable-usage", invalidReason);
+        await this.markNeedsAttention(
+          row.id,
+          "invalid-reportable-usage",
+          invalidReason,
+        );
         result.needsAttention += 1;
         continue;
       }
@@ -141,9 +154,10 @@ export class ShopifyUsageEventPublisherService {
           eventHandle: row.shopifyEventHandle!,
           occurredAt: row.occurredAt.toISOString(),
           idempotencyKey: row.shopifyIdempotencyKey!,
-          value: quantity.isInteger() && quantity.abs().lte(Number.MAX_SAFE_INTEGER)
-            ? quantity.toNumber()
-            : quantity.toString(),
+          value:
+            quantity.isInteger() && quantity.abs().lte(Number.MAX_SAFE_INTEGER)
+              ? quantity.toNumber()
+              : quantity.toString(),
         });
         await this.markReported(row.id, now);
         result.reported += 1;
@@ -152,7 +166,11 @@ export class ShopifyUsageEventPublisherService {
           await this.markRetryable(row, error, now, retryBaseMs, retryMaxMs);
           result.retryable += 1;
         } else {
-          await this.markNeedsAttention(row.id, errorCode(error), errorSummary(error));
+          await this.markNeedsAttention(
+            row.id,
+            errorCode(error),
+            errorSummary(error),
+          );
           result.needsAttention += 1;
         }
       }
@@ -168,10 +186,7 @@ export class ShopifyUsageEventPublisherService {
         shopifyReportState: {
           in: [ShopifyReportState.PENDING, ShopifyReportState.RETRYABLE],
         },
-        OR: [
-          { nextReportAt: null },
-          { nextReportAt: { lte: now } },
-        ],
+        OR: [{ nextReportAt: null }, { nextReportAt: { lte: now } }],
       },
       data: {
         shopifyReportState: ShopifyReportState.IN_FLIGHT,
@@ -190,10 +205,15 @@ export class ShopifyUsageEventPublisherService {
     return this.createProvider();
   }
 
-  private async recoverStaleClaims(now: Date, options: ShopifyUsageEventPublishOptions = {}): Promise<void> {
+  private async recoverStaleClaims(
+    now: Date,
+    options: ShopifyUsageEventPublishOptions = {},
+  ): Promise<void> {
     await this.database.usageEvent.updateMany({
       where: {
-        ...(options.billingPeriodId ? { billingPeriodId: options.billingPeriodId } : {}),
+        ...(options.billingPeriodId
+          ? { billingPeriodId: options.billingPeriodId }
+          : {}),
         shopifyReportState: ShopifyReportState.IN_FLIGHT,
         lastReportAttemptAt: {
           lte: new Date(now.getTime() - IN_FLIGHT_RECOVERY_MS),
@@ -220,7 +240,9 @@ export class ShopifyUsageEventPublisherService {
       },
     });
     if (updated.count !== 1) {
-      throw new Error("UsageEvent report state changed before it was marked reported");
+      throw new Error(
+        "UsageEvent report state changed before it was marked reported",
+      );
     }
   }
 
@@ -263,25 +285,35 @@ export class ShopifyUsageEventPublisherService {
 }
 
 async function createDefaultClient(): Promise<BillingEventClient> {
-  const value = (await platformConsumerConfiguration.read("shopify.appEvents")).value;
+  const value = (await platformConsumerConfiguration.read("shopify.appEvents"))
+    .value;
   // A new client per operation cannot reuse a token from an older credential revision.
-  return new ShopifyAppEventsClient({ clientId: value.clientId, clientSecret: value.clientSecret });
+  return new ShopifyAppEventsClient({
+    clientId: value.clientId,
+    clientSecret: value.clientSecret,
+  });
 }
 
 function boundedPageSize(value: number): number {
   if (!Number.isInteger(value) || value < 1 || value > MAX_PAGE_SIZE) {
-    throw new Error("Shopify usage publish batch size is outside the database range.");
+    throw new Error(
+      "Shopify usage publish batch size is outside the database range.",
+    );
   }
   return value;
 }
 
 function validateReportableUsage(row: UsageEventRecord): string | null {
-  if (row.shop.status !== "ACTIVE" && (!row.shop.uninstalledAt || row.occurredAt > row.shop.uninstalledAt)) {
+  if (
+    row.shop.status !== "ACTIVE" &&
+    (!row.shop.uninstalledAt || row.occurredAt > row.shop.uninstalledAt)
+  ) {
     return "Usage event is after the shop uninstall cutoff";
   }
   if (!row.shop.shopifyShopId?.trim()) return "Shop has no Shopify shop GID";
   if (!row.shopifyEventHandle?.trim()) return "Usage event handle is missing";
-  if (!row.shopifyIdempotencyKey?.trim()) return "Shopify idempotency key is missing";
+  if (!row.shopifyIdempotencyKey?.trim())
+    return "Shopify idempotency key is missing";
   const quantity = new Prisma.Decimal(row.quantity);
   if (!quantity.isFinite() || quantity.isZero()) {
     return "Usage quantity must be a finite non-zero decimal";
@@ -290,9 +322,7 @@ function validateReportableUsage(row: UsageEventRecord): string | null {
 }
 
 function isRetryable(error: unknown): boolean {
-  return error instanceof ShopifyAppEventsError
-    ? error.retryable
-    : true;
+  return error instanceof ShopifyAppEventsError ? error.retryable : true;
 }
 
 function errorCode(error: unknown): string {

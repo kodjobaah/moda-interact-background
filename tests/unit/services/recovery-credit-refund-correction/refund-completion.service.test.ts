@@ -51,9 +51,10 @@ function harness() {
     },
     $transaction: vi.fn(),
   };
-  database.$transaction.mockImplementation(async (callback: (transaction: typeof database) => unknown) => (
-    callback(database)
-  ));
+  database.$transaction.mockImplementation(
+    async (callback: (transaction: typeof database) => unknown) =>
+      callback(database),
+  );
   return {
     database,
     service: new RefundCompletionService(database as never, () => now),
@@ -66,7 +67,9 @@ describe("RefundCompletionService", () => {
 
     await expect(test.service.complete(refundRow(), "USD")).resolves.toBe(true);
 
-    expect(test.database.recoveryCreditPurchase.updateMany).toHaveBeenCalledWith({
+    expect(
+      test.database.recoveryCreditPurchase.updateMany,
+    ).toHaveBeenCalledWith({
       where: {
         id: "purchase-1",
         status: "WITHDRAWN",
@@ -80,7 +83,9 @@ describe("RefundCompletionService", () => {
         version: { increment: 1 },
       },
     });
-    expect(test.database.shopEntitlementCounter.updateMany).toHaveBeenCalledWith({
+    expect(
+      test.database.shopEntitlementCounter.updateMany,
+    ).toHaveBeenCalledWith({
       where: {
         id: "counter-1",
         version: 4,
@@ -139,17 +144,27 @@ describe("RefundCompletionService", () => {
       version: 3,
     });
 
-    await expect(test.service.complete(refundRow(), "USD")).resolves.toBe(false);
+    await expect(test.service.complete(refundRow(), "USD")).resolves.toBe(
+      false,
+    );
 
-    expect(test.database.recoveryCreditPurchase.updateMany).not.toHaveBeenCalled();
-    expect(test.database.shopEntitlementCounter.updateMany).not.toHaveBeenCalled();
-    expect(test.database.recoveryCreditRefund.updateMany).not.toHaveBeenCalled();
+    expect(
+      test.database.recoveryCreditPurchase.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      test.database.shopEntitlementCounter.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      test.database.recoveryCreditRefund.updateMany,
+    ).not.toHaveBeenCalled();
     expect(test.database.merchantSupportMessage.upsert).not.toHaveBeenCalled();
   });
 
   it("fails the transaction before publishing the merchant message when a financial CAS loses", async () => {
     const test = harness();
-    test.database.shopEntitlementCounter.updateMany.mockResolvedValue({ count: 0 });
+    test.database.shopEntitlementCounter.updateMany.mockResolvedValue({
+      count: 0,
+    });
 
     await expect(test.service.complete(refundRow(), "USD")).rejects.toThrow(
       "automatic refund completion CAS failed",
@@ -162,7 +177,9 @@ describe("RefundCompletionService", () => {
   it("rejects incomplete frozen completion evidence without opening a transaction", async () => {
     const test = harness();
 
-    await expect(test.service.complete(refundRow({ finalCreditQuantity: null }), "USD")).resolves.toBe(false);
+    await expect(
+      test.service.complete(refundRow({ finalCreditQuantity: null }), "USD"),
+    ).resolves.toBe(false);
 
     expect(test.database.$transaction).not.toHaveBeenCalled();
   });

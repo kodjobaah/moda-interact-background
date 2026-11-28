@@ -3,9 +3,12 @@ import { Prisma } from "@prisma/client";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { freeRecoveryReservationService } from "../../../../src/services/free-recovery-reservation.service.js";
-vi.mock("../../../../src/services/free-recovery-reservation.service.js", () => ({
-  freeRecoveryReservationService: { commitInExistingTransaction: vi.fn() },
-}));
+vi.mock(
+  "../../../../src/services/free-recovery-reservation.service.js",
+  () => ({
+    freeRecoveryReservationService: { commitInExistingTransaction: vi.fn() },
+  }),
+);
 import { InitialOutreachCreditService } from "../../../../src/services/recovery-billing/initial-outreach-credit.service.js";
 import {
   attemptEvidence,
@@ -19,7 +22,10 @@ import type { LogRecord } from "@modainteract/moda-interact-shared/logging";
 describe("InitialOutreachCreditService", () => {
   it("commits the exact free source only after durable positive message evidence", async () => {
     const records: LogRecord[] = [];
-    const sourceKey = createRecoveryIdempotencyKey(input.shopId, `recovery-outreach:${input.outreachAttemptId}`);
+    const sourceKey = createRecoveryIdempotencyKey(
+      input.shopId,
+      `recovery-outreach:${input.outreachAttemptId}`,
+    );
     const usageId = "usage-credit-1";
     let reservation = {
       id: "reservation-1",
@@ -83,23 +89,40 @@ describe("InitialOutreachCreditService", () => {
       },
       merchantConversationSendCommand: { findFirst: async () => null },
       usageReservation: { findMany: async () => [reservation] },
-      shopEntitlementCounter: { findUnique: async () => ({ shopId: input.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" }) },
+      shopEntitlementCounter: {
+        findUnique: async () => ({
+          shopId: input.shopId,
+          counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+        }),
+      },
       usageEvent: {
         findMany: async () => [],
-        findUnique: async ({ where }: { where: { id?: string } }) => where.id === usageId ? usage : null,
+        findUnique: async ({ where }: { where: { id?: string } }) =>
+          where.id === usageId ? usage : null,
         count: async () => 0,
       },
     };
-    vi.mocked(freeRecoveryReservationService.commitInExistingTransaction).mockImplementationOnce(async () => {
-      reservation = { ...reservation, status: "COMMITTED", committedUsageEventId: usageId };
+    vi.mocked(
+      freeRecoveryReservationService.commitInExistingTransaction,
+    ).mockImplementationOnce(async () => {
+      reservation = {
+        ...reservation,
+        status: "COMMITTED",
+        committedUsageEventId: usageId,
+      };
       return { kind: "committed", reservation } as never;
     });
-    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+    const service = new InitialOutreachCreditService(
+      databaseFor(tx) as never,
+      captureLogger(records),
+    );
 
-    await expect(service.settleConfirmedInitialOutreach({
-      ...input,
-      outboundMessageId: message.id,
-    })).resolves.toEqual({
+    await expect(
+      service.settleConfirmedInitialOutreach({
+        ...input,
+        outboundMessageId: message.id,
+      }),
+    ).resolves.toEqual({
       kind: "settled",
       disposition: "committed",
       sourceKind: "free",
@@ -109,7 +132,9 @@ describe("InitialOutreachCreditService", () => {
       outboundMessageId: message.id,
       sentAt: message.sentAt,
     });
-    expect(freeRecoveryReservationService.commitInExistingTransaction).toHaveBeenCalledWith(tx, {
+    expect(
+      freeRecoveryReservationService.commitInExistingTransaction,
+    ).toHaveBeenCalledWith(tx, {
       shopId: input.shopId,
       sourceKey,
     });
@@ -119,7 +144,10 @@ describe("InitialOutreachCreditService", () => {
   it("returns and emits a pure message-not-confirmed hold without invented error data", async () => {
     const records: LogRecord[] = [];
     const tx = transactionForAttempt();
-    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+    const service = new InitialOutreachCreditService(
+      databaseFor(tx) as never,
+      captureLogger(records),
+    );
 
     const result = await service.settleConfirmedInitialOutreach({
       ...input,
@@ -127,9 +155,17 @@ describe("InitialOutreachCreditService", () => {
     });
 
     expect(result).toEqual({ kind: "held", reason: "message-not-confirmed" });
-    const record = JSON.parse(JSON.stringify(records[0])) as Record<string, unknown>;
-    expect(record).toMatchObject({ level: "warn", event: "recovery.initial_outreach_credit.held" });
-    expect(JSON.stringify(record)).toContain('"reason":"message-not-confirmed"');
+    const record = JSON.parse(JSON.stringify(records[0])) as Record<
+      string,
+      unknown
+    >;
+    expect(record).toMatchObject({
+      level: "warn",
+      event: "recovery.initial_outreach_credit.held",
+    });
+    expect(JSON.stringify(record)).toContain(
+      '"reason":"message-not-confirmed"',
+    );
     expect(JSON.stringify(record)).not.toContain('"error"');
     expect(JSON.stringify(record)).not.toContain('"databaseError"');
     expect(JSON.stringify(record)).not.toContain('"providerCode"');
@@ -140,12 +176,17 @@ describe("InitialOutreachCreditService", () => {
     const tx = transactionForAttempt({
       usageReservation: { findMany: async () => [] },
     });
-    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+    const service = new InitialOutreachCreditService(
+      databaseFor(tx) as never,
+      captureLogger(records),
+    );
 
-    await expect(service.revalidateExistingInitialOutreach({
-      ...input,
-      outboundMessageId: null,
-    })).resolves.toEqual({ kind: "absent" });
+    await expect(
+      service.revalidateExistingInitialOutreach({
+        ...input,
+        outboundMessageId: null,
+      }),
+    ).resolves.toEqual({ kind: "absent" });
     expect(records).toHaveLength(0);
   });
 
@@ -155,20 +196,32 @@ describe("InitialOutreachCreditService", () => {
       cause: new Error("known nested transport cause"),
     });
     const tx = transactionForAttempt({
-      recoveryOutreachAttempt: { findUnique: async () => { throw original; } },
+      recoveryOutreachAttempt: {
+        findUnique: async () => {
+          throw original;
+        },
+      },
     });
-    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+    const service = new InitialOutreachCreditService(
+      databaseFor(tx) as never,
+      captureLogger(records),
+    );
 
-    await expect(service.settleConfirmedInitialOutreach({
-      ...input,
-      outboundMessageId: "message-1",
-    })).rejects.toBe(original);
+    await expect(
+      service.settleConfirmedInitialOutreach({
+        ...input,
+        outboundMessageId: "message-1",
+      }),
+    ).rejects.toBe(original);
     expect(records).toHaveLength(1);
     const emitted = JSON.stringify(records[0]);
     expect(emitted).toContain("recovery.initial_outreach_credit.failed");
     expect(emitted).toContain("credit identity read failed");
     expect(emitted).toContain('"stage":"identity"');
-    const record = JSON.parse(JSON.stringify(records[0])) as Record<string, unknown>;
+    const record = JSON.parse(JSON.stringify(records[0])) as Record<
+      string,
+      unknown
+    >;
     expect(record).toMatchObject({
       level: "error",
       event: "recovery.initial_outreach_credit.failed",
@@ -188,16 +241,27 @@ describe("InitialOutreachCreditService", () => {
 
   it("redacts supported secret forms and truncates oversized emitted error messages", async () => {
     const records: LogRecord[] = [];
-    const original = new Error(`source failure Bearer secret-bearer and ?token=secret-query ${"x".repeat(5000)}`);
+    const original = new Error(
+      `source failure Bearer secret-bearer and ?token=secret-query ${"x".repeat(5000)}`,
+    );
     const tx = transactionForAttempt({
-      recoveryOutreachAttempt: { findUnique: async () => { throw original; } },
+      recoveryOutreachAttempt: {
+        findUnique: async () => {
+          throw original;
+        },
+      },
     });
-    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+    const service = new InitialOutreachCreditService(
+      databaseFor(tx) as never,
+      captureLogger(records),
+    );
 
-    await expect(service.settleConfirmedInitialOutreach({
-      ...input,
-      outboundMessageId: "message-1",
-    })).rejects.toBe(original);
+    await expect(
+      service.settleConfirmedInitialOutreach({
+        ...input,
+        outboundMessageId: "message-1",
+      }),
+    ).rejects.toBe(original);
 
     const record = JSON.parse(JSON.stringify(records[0])) as {
       data: { error: { message: string } };
@@ -211,20 +275,37 @@ describe("InitialOutreachCreditService", () => {
 
   it("emits bounded Prisma metadata while excluding arbitrary metadata", async () => {
     const records: LogRecord[] = [];
-    const original = new Prisma.PrismaClientKnownRequestError("unique conflict sentinel", {
-      code: "P2002",
-      clientVersion: Prisma.prismaVersion.client,
-      meta: { modelName: "UsageReservation", target: ["sourceKey"], unsafe: "do-not-log", query: "arbitrary-query-sentinel" },
-    });
+    const original = new Prisma.PrismaClientKnownRequestError(
+      "unique conflict sentinel",
+      {
+        code: "P2002",
+        clientVersion: Prisma.prismaVersion.client,
+        meta: {
+          modelName: "UsageReservation",
+          target: ["sourceKey"],
+          unsafe: "do-not-log",
+          query: "arbitrary-query-sentinel",
+        },
+      },
+    );
     const tx = transactionForAttempt({
-      recoveryOutreachAttempt: { findUnique: async () => { throw original; } },
+      recoveryOutreachAttempt: {
+        findUnique: async () => {
+          throw original;
+        },
+      },
     });
-    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+    const service = new InitialOutreachCreditService(
+      databaseFor(tx) as never,
+      captureLogger(records),
+    );
 
-    await expect(service.settleConfirmedInitialOutreach({
-      ...input,
-      outboundMessageId: "message-1",
-    })).rejects.toBe(original);
+    await expect(
+      service.settleConfirmedInitialOutreach({
+        ...input,
+        outboundMessageId: "message-1",
+      }),
+    ).rejects.toBe(original);
     const emitted = JSON.stringify(records);
     expect(emitted).toContain("unique conflict sentinel");
     expect(emitted).toContain('"code":"P2002"');
@@ -235,18 +316,30 @@ describe("InitialOutreachCreditService", () => {
 
   it("emits a supplied SQLSTATE without inventing or leaking query metadata", async () => {
     const records: LogRecord[] = [];
-    const original = Object.assign(new Error("serialization failure sentinel"), {
-      meta: { code: "40001", query: "unsafe-query-sentinel" },
-    });
+    const original = Object.assign(
+      new Error("serialization failure sentinel"),
+      {
+        meta: { code: "40001", query: "unsafe-query-sentinel" },
+      },
+    );
     const tx = transactionForAttempt({
-      recoveryOutreachAttempt: { findUnique: async () => { throw original; } },
+      recoveryOutreachAttempt: {
+        findUnique: async () => {
+          throw original;
+        },
+      },
     });
-    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+    const service = new InitialOutreachCreditService(
+      databaseFor(tx) as never,
+      captureLogger(records),
+    );
 
-    await expect(service.settleConfirmedInitialOutreach({
-      ...input,
-      outboundMessageId: "message-1",
-    })).rejects.toBe(original);
+    await expect(
+      service.settleConfirmedInitialOutreach({
+        ...input,
+        outboundMessageId: "message-1",
+      }),
+    ).rejects.toBe(original);
 
     const emitted = JSON.stringify(records);
     expect(emitted).toContain('"meta":{"code":"40001"}');
@@ -260,19 +353,37 @@ describe("InitialOutreachCreditService", () => {
       clientVersion: Prisma.prismaVersion.client,
     });
     const database = {
-      $transaction: async () => { throw original; },
+      $transaction: async () => {
+        throw original;
+      },
     };
-    const service = new InitialOutreachCreditService(database as never, captureLogger(records), 3);
+    const service = new InitialOutreachCreditService(
+      database as never,
+      captureLogger(records),
+      3,
+    );
 
-    await expect(service.settleConfirmedInitialOutreach({
-      ...input,
-      outboundMessageId: "message-1",
-    })).rejects.toBe(original);
+    await expect(
+      service.settleConfirmedInitialOutreach({
+        ...input,
+        outboundMessageId: "message-1",
+      }),
+    ).rejects.toBe(original);
 
-    const emitted = records.map((record) => JSON.parse(JSON.stringify(record)) as Record<string, unknown>);
+    const emitted = records.map(
+      (record) => JSON.parse(JSON.stringify(record)) as Record<string, unknown>,
+    );
     const serialized = JSON.stringify(emitted);
-    expect(emitted.filter((record) => record.event === "recovery.initial_outreach_credit.retry")).toHaveLength(2);
-    expect(emitted.filter((record) => record.event === "recovery.initial_outreach_credit.failed")).toHaveLength(1);
+    expect(
+      emitted.filter(
+        (record) => record.event === "recovery.initial_outreach_credit.retry",
+      ),
+    ).toHaveLength(2);
+    expect(
+      emitted.filter(
+        (record) => record.event === "recovery.initial_outreach_credit.failed",
+      ),
+    ).toHaveLength(1);
     expect(serialized).toContain('"attempt":1');
     expect(serialized).toContain('"attempt":2');
     expect(serialized).toContain('"attempt":3');
@@ -287,36 +398,59 @@ describe("InitialOutreachCreditService", () => {
     const logger = createLogger({
       serviceName: "initial-outreach-credit-test",
       environment: "test",
-      sink: () => { throw new Error("sink unavailable"); },
+      sink: () => {
+        throw new Error("sink unavailable");
+      },
     });
     const tx = transactionForAttempt({
-      recoveryOutreachAttempt: { findUnique: async () => { throw original; } },
+      recoveryOutreachAttempt: {
+        findUnique: async () => {
+          throw original;
+        },
+      },
     });
-    const service = new InitialOutreachCreditService(databaseFor(tx) as never, logger);
+    const service = new InitialOutreachCreditService(
+      databaseFor(tx) as never,
+      logger,
+    );
 
-    await expect(service.settleConfirmedInitialOutreach({
-      ...input,
-      outboundMessageId: "message-1",
-    })).rejects.toBe(original);
+    await expect(
+      service.settleConfirmedInitialOutreach({
+        ...input,
+        outboundMessageId: "message-1",
+      }),
+    ).rejects.toBe(original);
   });
 
   it("rejects null-message absence when attempt evidence is already linked", async () => {
     const records: LogRecord[] = [];
-    const attempt = { ...attemptEvidence(), outboundMessageId: "message-existing" };
+    const attempt = {
+      ...attemptEvidence(),
+      outboundMessageId: "message-existing",
+    };
     const tx = transactionForAttempt({
       recoveryOutreachAttempt: { findUnique: async () => attempt },
       usageReservation: { findMany: async () => [] },
     });
-    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+    const service = new InitialOutreachCreditService(
+      databaseFor(tx) as never,
+      captureLogger(records),
+    );
 
-    await expect(service.revalidateExistingInitialOutreach({
-      ...input,
-      outboundMessageId: null,
-    })).resolves.toMatchObject({ kind: "held", reason: "lineage-conflict" });
+    await expect(
+      service.revalidateExistingInitialOutreach({
+        ...input,
+        outboundMessageId: null,
+      }),
+    ).resolves.toMatchObject({ kind: "held", reason: "lineage-conflict" });
     const record = JSON.parse(JSON.stringify(records[0])) as {
       level: string;
       event: string;
-      data: { reason: string; stage: string; error: { name: string; message: string } };
+      data: {
+        reason: string;
+        stage: string;
+        error: { name: string; message: string };
+      };
     };
     expect(record).toMatchObject({
       level: "warn",
@@ -326,7 +460,9 @@ describe("InitialOutreachCreditService", () => {
         stage: "message_evidence",
         error: {
           name: "RecoveryCompensationLineageError",
-          message: expect.stringContaining("initial attempt has existing message or send evidence"),
+          message: expect.stringContaining(
+            "initial attempt has existing message or send evidence",
+          ),
         },
       },
     });
@@ -336,28 +472,64 @@ describe("InitialOutreachCreditService", () => {
     const records: LogRecord[] = [];
     const expired = new Prisma.PrismaClientKnownRequestError(
       `${"Prisma source excerpt ".repeat(40)}Transaction API error: Transaction already closed: A query cannot be executed on an expired transaction. The timeout for this transaction was 5000 ms, however 5268 ms passed since the start of the transaction.`,
-      { code: "P2028", clientVersion: Prisma.prismaVersion.client });
-    const tx = transactionForAttempt({ usageReservation: { findMany: async () => [] } });
-    const transaction = vi.fn(databaseFor(tx).$transaction).mockRejectedValueOnce(expired);
-    const service = new InitialOutreachCreditService({ $transaction: transaction } as never, captureLogger(records));
-    await expect(service.revalidateExistingInitialOutreach({ ...input, outboundMessageId: null })).resolves.toEqual({ kind: "absent" });
+      { code: "P2028", clientVersion: Prisma.prismaVersion.client },
+    );
+    const tx = transactionForAttempt({
+      usageReservation: { findMany: async () => [] },
+    });
+    const transaction = vi
+      .fn(databaseFor(tx).$transaction)
+      .mockRejectedValueOnce(expired);
+    const service = new InitialOutreachCreditService(
+      { $transaction: transaction } as never,
+      captureLogger(records),
+    );
+    await expect(
+      service.revalidateExistingInitialOutreach({
+        ...input,
+        outboundMessageId: null,
+      }),
+    ).resolves.toEqual({ kind: "absent" });
     expect(transaction).toHaveBeenCalledTimes(2);
-    expect(records[0]).toMatchObject({ event: "recovery.initial_outreach_credit.retry", data: {
-      reasonCode: "P2028", transactionFailureKind: "expired", prismaTimeoutMs: 5000, prismaElapsedMs: 5268,
-      transactionErrorMessage: expect.stringContaining("expired transaction"), transactionElapsedMs: expect.any(Number), retryBackoffMs: expect.any(Number),
-    } });
-    expect(records.at(-1)).toMatchObject({ event: "recovery.initial_outreach_credit.transaction_completed", data: { attempt: 2, outcome: "absent" } });
+    expect(records[0]).toMatchObject({
+      event: "recovery.initial_outreach_credit.retry",
+      data: {
+        reasonCode: "P2028",
+        transactionFailureKind: "expired",
+        prismaTimeoutMs: 5000,
+        prismaElapsedMs: 5268,
+        transactionErrorMessage: expect.stringContaining("expired transaction"),
+        transactionElapsedMs: expect.any(Number),
+        retryBackoffMs: expect.any(Number),
+      },
+    });
+    expect(records.at(-1)).toMatchObject({
+      event: "recovery.initial_outreach_credit.transaction_completed",
+      data: { attempt: 2, outcome: "absent" },
+    });
   });
 
   it("does not replay an unrelated transaction API error", async () => {
     const records: LogRecord[] = [];
-    const error = new Prisma.PrismaClientKnownRequestError("Transaction API error: unsupported interactive transaction operation",
-      { code: "P2028", clientVersion: Prisma.prismaVersion.client });
+    const error = new Prisma.PrismaClientKnownRequestError(
+      "Transaction API error: unsupported interactive transaction operation",
+      { code: "P2028", clientVersion: Prisma.prismaVersion.client },
+    );
     const transaction = vi.fn().mockRejectedValue(error);
-    const service = new InitialOutreachCreditService({ $transaction: transaction } as never, captureLogger(records));
-    await expect(service.revalidateExistingInitialOutreach({ ...input, outboundMessageId: null })).rejects.toBe(error);
+    const service = new InitialOutreachCreditService(
+      { $transaction: transaction } as never,
+      captureLogger(records),
+    );
+    await expect(
+      service.revalidateExistingInitialOutreach({
+        ...input,
+        outboundMessageId: null,
+      }),
+    ).rejects.toBe(error);
     expect(transaction).toHaveBeenCalledTimes(1);
-    expect(records.at(-1)).toMatchObject({ event: "recovery.initial_outreach_credit.failed", data: { retryExhausted: false } });
+    expect(records.at(-1)).toMatchObject({
+      event: "recovery.initial_outreach_credit.failed",
+      data: { retryExhausted: false },
+    });
   });
-
 });

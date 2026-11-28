@@ -9,7 +9,10 @@ export type OutboundAdmissionInput = {
   recoveryCreditSourceKey?: string;
   initialOutreach?: InitialOutreachAdmissionScope;
   /** Only the authenticated current settled AI turn can request renewal. */
-  continuation?: { expectedControlRevision: number; expectedInboundVersion: number };
+  continuation?: {
+    expectedControlRevision: number;
+    expectedInboundVersion: number;
+  };
   clarification?: true;
 };
 
@@ -65,11 +68,23 @@ export type InitialOutreachMessageEvidence = Readonly<{
 export type InitialOutreachAdmissionLookup =
   | { kind: "absent" }
   | { kind: "prepared"; message: InitialOutreachMessageEvidence }
-  | { kind: "confirmed"; message: InitialOutreachMessageEvidence & { sentAt: Date } }
-  | { kind: "failed"; message: InitialOutreachMessageEvidence;
-      disposition: "pre-permit-refused" | "provider-rejected" | "recipient-unreachable" }
+  | {
+      kind: "confirmed";
+      message: InitialOutreachMessageEvidence & { sentAt: Date };
+    }
+  | {
+      kind: "failed";
+      message: InitialOutreachMessageEvidence;
+      disposition:
+        "pre-permit-refused" | "provider-rejected" | "recipient-unreachable";
+    }
   | { kind: "held"; reason: "provider-outcome-unknown" | "lineage-conflict" };
 
 /** Server-owned empty reservation identity, private to Background cleanup. */
-export const PENDING_AUTOMATED_WHATSAPP_CONTENT = "[Pending automated WhatsApp message]";
-export type UntouchedReservationIdentity = Readonly<{shopId: string; conversationId: string; unpreparedOnly: true}>;
+export const PENDING_AUTOMATED_WHATSAPP_CONTENT =
+  "[Pending automated WhatsApp message]";
+export type UntouchedReservationIdentity = Readonly<{
+  shopId: string;
+  conversationId: string;
+  unpreparedOnly: true;
+}>;

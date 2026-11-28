@@ -5,19 +5,31 @@ import { deliverableWooCode } from "../providers/woo-coupon-normalization.js";
 import { readRecoveryExecutionPolicy } from "./platform-configuration/consumers.js";
 import type { RecoveryExecutionPolicy } from "./platform-configuration/contracts.js";
 
-export type RecoveryPolicySnapshot = ReturnType<typeof parseEffectiveRecoveryPolicy> & {
+export type RecoveryPolicySnapshot = ReturnType<
+  typeof parseEffectiveRecoveryPolicy
+> & {
   authorisedDiscountIds?: string[];
   offerSnapshot: Record<string, unknown> | null;
 };
 
 export class RecoveryPolicyService {
-  constructor(private readonly database = prisma, private readonly readExecutionPolicy?: () => Promise<RecoveryExecutionPolicy>) {}
+  constructor(
+    private readonly database = prisma,
+    private readonly readExecutionPolicy?: () => Promise<RecoveryExecutionPolicy>,
+  ) {}
 
-  async resolve(shopId: string, now = new Date()): Promise<RecoveryPolicySnapshot> {
-    const defaultDelay = async () => this.readExecutionPolicy
-      ? (await this.readExecutionPolicy()).recoveryDelayMinutes
-      : 30;
-    if (!this.database.shopSettings || !this.database.shopRecoveryPolicyOverride) {
+  async resolve(
+    shopId: string,
+    now = new Date(),
+  ): Promise<RecoveryPolicySnapshot> {
+    const defaultDelay = async () =>
+      this.readExecutionPolicy
+        ? (await this.readExecutionPolicy()).recoveryDelayMinutes
+        : 30;
+    if (
+      !this.database.shopSettings ||
+      !this.database.shopRecoveryPolicyOverride
+    ) {
       return {
         recoveryDelayMinutes: await defaultDelay(),
         recoveryOfferMode: "NONE",
@@ -38,9 +50,10 @@ export class RecoveryPolicyService {
         include: { fixedShopifyDiscount: { include: { catalogue: true } } },
       }),
     ]);
-      const source = override && (!override.expiresAt || override.expiresAt > now)
-      ? override
-      : settings;
+    const source =
+      override && (!override.expiresAt || override.expiresAt > now)
+        ? override
+        : settings;
     if (!source) {
       return {
         recoveryDelayMinutes: await defaultDelay(),
@@ -57,63 +70,98 @@ export class RecoveryPolicyService {
     const discount = source.fixedShopifyDiscount;
     // Resolve the trusted Shop platform, never infer it from coupon metadata.
     // Shopify's established eligibility checks must remain unchanged.
-    const shop = configuredOfferMode === "FIXED"
-      ? await this.database.shop.findUnique({ where: { id: shopId }, select: { platform: true } })
-      : null;
-    const wooSelectedCode = shop?.platform === "WOOCOMMERCE" && discount !== null &&
+    const shop =
+      configuredOfferMode === "FIXED"
+        ? await this.database.shop.findUnique({
+            where: { id: shopId },
+            select: { platform: true },
+          })
+        : null;
+    const wooSelectedCode =
+      shop?.platform === "WOOCOMMERCE" &&
+      discount !== null &&
       discount.shopId === shopId &&
       discount.shopifyDiscountNodeId.startsWith("woo:coupon:") &&
-      discount.method === "CODE" && discount.isAvailable &&
-      discount.providerStatus !== "REMOVED" && discount.unavailableAt === null &&
+      discount.method === "CODE" &&
+      discount.isAvailable &&
+      discount.providerStatus !== "REMOVED" &&
+      discount.unavailableAt === null &&
       discount.catalogue.lastSuccessfulSyncAt !== null &&
       deliverableWooCode(discount.singleRedeemCode);
-    const shopifyFixedUsable = shop?.platform === "SHOPIFY" && discount !== null &&
-      discount.fixedSelectable && discount.isAvailable &&
+    const shopifyFixedUsable =
+      shop?.platform === "SHOPIFY" &&
+      discount !== null &&
+      discount.fixedSelectable &&
+      discount.isAvailable &&
       discount.providerStatus === "ACTIVE" &&
       discount.catalogue.status === "CURRENT" &&
       (discount.startsAt === null || discount.startsAt <= now) &&
       (discount.endsAt === null || discount.endsAt > now);
-    const fixedUsable = configuredOfferMode === "FIXED" &&
+    const fixedUsable =
+      configuredOfferMode === "FIXED" &&
       (wooSelectedCode || shopifyFixedUsable);
     const policy = parseEffectiveRecoveryPolicy({
       recoveryDelayMinutes: source.recoveryDelayMinutes,
       recoveryOfferMode: configuredOfferMode,
-      fixedShopifyDiscountId: configuredOfferMode === "FIXED" && discount ? discount.id : null,
+      fixedShopifyDiscountId:
+        configuredOfferMode === "FIXED" && discount ? discount.id : null,
       followUpEnabled: source.followUpEnabled,
-      followUpDelayMinutes: source.followUpEnabled ? source.followUpDelayMinutes : null,
+      followUpDelayMinutes: source.followUpEnabled
+        ? source.followUpDelayMinutes
+        : null,
       source: source === override ? "ADMIN_OVERRIDE" : "MERCHANT",
     });
 
     let authorisedDiscountIds: string[] | undefined;
     if (shop?.platform === "WOOCOMMERCE" && source !== override) {
-      const catalogue = await this.database.shopifyDiscountCatalogue.findUnique({ where: { shopId } });
-      const selected = catalogue?.status === "CURRENT" ? await this.database.shopifyDiscount.findMany({
-        where: { shopId, isAvailable: true, fixedSelectable: true, providerType: "WooCoupon:code",
-          unavailableAt: null, providerStatus: "ACTIVE", lastSeenSyncGeneration: catalogue.syncGeneration,
-          AND: [{ OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
-            { OR: [{ endsAt: null }, { endsAt: { gt: now } }] }] },
-        select: { id: true }, orderBy: { id: "asc" }, take: 50,
-      }) : [];
-      authorisedDiscountIds = selected.map(row => row.id);
+      const catalogue = await this.database.shopifyDiscountCatalogue.findUnique(
+        { where: { shopId } },
+      );
+      const selected =
+        catalogue?.status === "CURRENT"
+          ? await this.database.shopifyDiscount.findMany({
+              where: {
+                shopId,
+                isAvailable: true,
+                fixedSelectable: true,
+                providerType: "WooCoupon:code",
+                unavailableAt: null,
+                providerStatus: "ACTIVE",
+                lastSeenSyncGeneration: catalogue.syncGeneration,
+                AND: [
+                  { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
+                  { OR: [{ endsAt: null }, { endsAt: { gt: now } }] },
+                ],
+              },
+              select: { id: true },
+              orderBy: { id: "asc" },
+              take: 50,
+            })
+          : [];
+      authorisedDiscountIds = selected.map((row) => row.id);
     }
     return {
       ...policy,
       ...(authorisedDiscountIds ? { authorisedDiscountIds } : {}),
-      offerSnapshot: fixedUsable && discount
-        ? {
-            id: discount.id,
-            shopifyDiscountNodeId: discount.shopifyDiscountNodeId,
-            method: discount.method,
-            title: discount.title,
-            summary: discount.summary,
-            startsAt: discount.startsAt?.toISOString() ?? null,
-            endsAt: discount.endsAt?.toISOString() ?? null,
-            singleRedeemCode: discount.singleRedeemCode,
-            providerSnapshot: discount.providerSnapshot,
-          }
-        : null,
+      offerSnapshot:
+        fixedUsable && discount
+          ? {
+              id: discount.id,
+              shopifyDiscountNodeId: discount.shopifyDiscountNodeId,
+              method: discount.method,
+              title: discount.title,
+              summary: discount.summary,
+              startsAt: discount.startsAt?.toISOString() ?? null,
+              endsAt: discount.endsAt?.toISOString() ?? null,
+              singleRedeemCode: discount.singleRedeemCode,
+              providerSnapshot: discount.providerSnapshot,
+            }
+          : null,
     };
   }
 }
 
-export const recoveryPolicyService = new RecoveryPolicyService(prisma, readRecoveryExecutionPolicy);
+export const recoveryPolicyService = new RecoveryPolicyService(
+  prisma,
+  readRecoveryExecutionPolicy,
+);

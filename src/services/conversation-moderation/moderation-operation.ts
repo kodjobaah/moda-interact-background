@@ -5,9 +5,11 @@
 import { platformConsumerConfiguration } from "../platform-configuration/consumers.js";
 import type { BackgroundPlatformConfigurationService } from "../platform-configuration/service.js";
 
-export type ModerationOperation = Awaited<ReturnType<
-  BackgroundPlatformConfigurationService["requireModerationOperation"]
->>;
+export type ModerationOperation = Awaited<
+  ReturnType<
+    BackgroundPlatformConfigurationService["requireModerationOperation"]
+  >
+>;
 export type ModerationOperationReader = () => Promise<ModerationOperation>;
 
 export const readModerationOperation: ModerationOperationReader = () =>

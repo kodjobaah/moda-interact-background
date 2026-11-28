@@ -88,10 +88,13 @@ function createInstruments(): WorkerMetricInstruments {
         description: "Number of background job processing attempts",
         unit: "1",
       }),
-      duration: meter.createHistogram("moda.background.worker.job.duration_ms", {
-        description: "Background job processor execution duration",
-        unit: "ms",
-      }),
+      duration: meter.createHistogram(
+        "moda.background.worker.job.duration_ms",
+        {
+          description: "Background job processor execution duration",
+          unit: "ms",
+        },
+      ),
       processingAge: meter.createHistogram(
         "moda.background.worker.job.processing_age_ms",
         {

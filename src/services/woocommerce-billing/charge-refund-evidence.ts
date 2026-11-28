@@ -6,8 +6,16 @@ export type WooRefundMoneyEvidence = {
 };
 
 export type WooRefundEvidenceResult =
-  | { charge: Record<string, unknown>; money: WooRefundMoneyEvidence | null; errorCode?: never }
-  | { charge?: never; money?: never; errorCode: "WOO_REFUND_CHARGE_EVIDENCE_INVALID" };
+  | {
+      charge: Record<string, unknown>;
+      money: WooRefundMoneyEvidence | null;
+      errorCode?: never;
+    }
+  | {
+      charge?: never;
+      money?: never;
+      errorCode: "WOO_REFUND_CHARGE_EVIDENCE_INVALID";
+    };
 
 export function parseWooRefundEvidence(
   payload: unknown,
@@ -17,7 +25,10 @@ export function parseWooRefundEvidence(
     return { errorCode: "WOO_REFUND_CHARGE_EVIDENCE_INVALID" };
   }
   const charge = payload.charge;
-  if (charge.id !== providerContractId || !["canceled", "refunded"].includes(String(charge.status))) {
+  if (
+    charge.id !== providerContractId ||
+    !["canceled", "refunded"].includes(String(charge.status))
+  ) {
     return { errorCode: "WOO_REFUND_CHARGE_EVIDENCE_INVALID" };
   }
   const money = readLatestRefundAmount(charge.transactions);
@@ -30,12 +41,18 @@ function readLatestRefundAmount(
   transactionsValue: unknown,
 ): WooRefundMoneyEvidence | null | typeof INVALID_MONEY {
   if (!Array.isArray(transactionsValue)) return null;
-  const transactions = transactionsValue.filter(isRecord)
-    .filter((transaction) => typeof transaction.completed_at === "string"
-      && Number.isFinite(Date.parse(transaction.completed_at))
-      && Object.hasOwn(transaction, "amount_refunded"))
+  const transactions = transactionsValue
+    .filter(isRecord)
+    .filter(
+      (transaction) =>
+        typeof transaction.completed_at === "string" &&
+        Number.isFinite(Date.parse(transaction.completed_at)) &&
+        Object.hasOwn(transaction, "amount_refunded"),
+    )
     .sort((left, right) => {
-      const timeDifference = Date.parse(String(right.completed_at)) - Date.parse(String(left.completed_at));
+      const timeDifference =
+        Date.parse(String(right.completed_at)) -
+        Date.parse(String(left.completed_at));
       return timeDifference || compareTransactionIds(right.id, left.id);
     });
   const latest = transactions[0];
@@ -47,7 +64,8 @@ function readLatestRefundAmount(
 function parseBoundedMoney(value: unknown): Prisma.Decimal | null {
   try {
     const amount = new Prisma.Decimal(String(value));
-    if (!amount.isFinite() || amount.isNegative() || amount.gt("1000000000")) return null;
+    if (!amount.isFinite() || amount.isNegative() || amount.gt("1000000000"))
+      return null;
     return amount.toDecimalPlaces(2).equals(amount) ? amount : null;
   } catch {
     return null;
@@ -57,7 +75,8 @@ function parseBoundedMoney(value: unknown): Prisma.Decimal | null {
 function compareTransactionIds(left: unknown, right: unknown): number {
   const leftNumber = Number(left);
   const rightNumber = Number(right);
-  if (Number.isSafeInteger(leftNumber) && Number.isSafeInteger(rightNumber)) return leftNumber - rightNumber;
+  if (Number.isSafeInteger(leftNumber) && Number.isSafeInteger(rightNumber))
+    return leftNumber - rightNumber;
   return String(left).localeCompare(String(right));
 }
 

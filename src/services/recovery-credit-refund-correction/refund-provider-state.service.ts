@@ -47,7 +47,9 @@ export class RefundProviderStateService {
     private readonly partner: ShopifyPartnerBillingProvider,
   ) {}
 
-  async read(refund: RefundProviderStateInput): Promise<RefundProviderStateProof> {
+  async read(
+    refund: RefundProviderStateInput,
+  ): Promise<RefundProviderStateProof> {
     const shopifyShopId = refund.shop.shopifyShopId;
     if (!shopifyShopId) return unsafe("shop has no Shopify identifier");
 
@@ -79,13 +81,15 @@ export class RefundProviderStateService {
     }
 
     if (
-      context !== refund.providerSubscriptionIdSnapshot
-      || provider.planHandle !== refund.planHandleSnapshot
-      || provider.currentPeriodStart.getTime() !== period.periodStart.getTime()
-      || provider.currentPeriodEnd.getTime() !== period.periodEnd.getTime()
-      || !provider.usageEventHandles.includes(refund.eventHandleSnapshot)
+      context !== refund.providerSubscriptionIdSnapshot ||
+      provider.planHandle !== refund.planHandleSnapshot ||
+      provider.currentPeriodStart.getTime() !== period.periodStart.getTime() ||
+      provider.currentPeriodEnd.getTime() !== period.periodEnd.getTime() ||
+      !provider.usageEventHandles.includes(refund.eventHandleSnapshot)
     ) {
-      return unsafe("Shopify provider context does not match frozen refund provenance");
+      return unsafe(
+        "Shopify provider context does not match frozen refund provenance",
+      );
     }
 
     const usage = provider.providerUsageSnapshot.find(
@@ -95,7 +99,9 @@ export class RefundProviderStateService {
     const cost = parseDecimal(usage?.costAmount);
     const currency = usage?.costCurrency?.trim().toUpperCase();
     if (!quantity || !cost || cost.lt(0) || !currency) {
-      return unsafe("Shopify provider quantity, cost, or currency is unavailable");
+      return unsafe(
+        "Shopify provider quantity, cost, or currency is unavailable",
+      );
     }
 
     const pricing = provider.providerUsagePricingSnapshot?.find(
@@ -115,7 +121,10 @@ export class RefundProviderStateService {
   ): Promise<RefundProviderPreparationStateProof> {
     const state = await this.read(refund);
     if (!state.safe) return state;
-    if (!state.pricing || state.pricing.currency?.toUpperCase() !== state.currency) {
+    if (
+      !state.pricing ||
+      state.pricing.currency?.toUpperCase() !== state.currency
+    ) {
       return unsafe("Shopify provider pricing is unavailable or ambiguous");
     }
     return { ...state, pricing: state.pricing };

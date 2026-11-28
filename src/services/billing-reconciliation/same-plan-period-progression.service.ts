@@ -16,10 +16,19 @@ import type {
   SamePlanReconciliationInput,
 } from "./same-plan-reconciliation.types.js";
 
-type PeriodProgressionDatabase = Pick<PrismaClient, "$transaction" | "billingPlan" | "merchantPricingPlan" | "subscription">;
-type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "enqueue">;
+type PeriodProgressionDatabase = Pick<
+  PrismaClient,
+  "$transaction" | "billingPlan" | "merchantPricingPlan" | "subscription"
+>;
+type ReconciliationScheduler = Pick<
+  BillingReconciliationSchedulerService,
+  "enqueue"
+>;
 type CapacityResumeScheduler = Pick<RecoveryCapacityResumeService, "schedule">;
-type SamePlanRollover = Pick<SamePlanBillingPeriodRolloverService, "transition">;
+type SamePlanRollover = Pick<
+  SamePlanBillingPeriodRolloverService,
+  "transition"
+>;
 
 export class SamePlanPeriodProgressionService {
   constructor(
@@ -27,10 +36,14 @@ export class SamePlanPeriodProgressionService {
     private readonly scheduler: ReconciliationScheduler,
     private readonly logger: StructuredLogger,
     private readonly capacityResume: CapacityResumeScheduler = recoveryCapacityResumeService,
-    private readonly rollover: SamePlanRollover = new SamePlanBillingPeriodRolloverService(database),
+    private readonly rollover: SamePlanRollover = new SamePlanBillingPeriodRolloverService(
+      database,
+    ),
   ) {}
 
-  async reconcile(input: SamePlanReconciliationInput): Promise<SamePlanProjection> {
+  async reconcile(
+    input: SamePlanReconciliationInput,
+  ): Promise<SamePlanProjection> {
     const scheduledIntent = await this.persistFutureIntent(input);
     if (scheduledIntent) return scheduledIntent;
 
@@ -46,11 +59,15 @@ export class SamePlanPeriodProgressionService {
     if (result.kind === "transitioned") {
       if (result.planKind === BillingPlanKind.PAID_METERED) {
         try {
-          await this.capacityResume.schedule({ shopId, trigger: "billing-period-rollover" });
+          await this.capacityResume.schedule({
+            shopId,
+            trigger: "billing-period-rollover",
+          });
         } catch (error) {
           this.logger.warn("billing.recovery_capacity_resume.enqueue_failed", {
             shopId,
-            errorMessage: error instanceof Error ? error.message : "unknown failure",
+            errorMessage:
+              error instanceof Error ? error.message : "unknown failure",
             error: error,
           });
         }
@@ -68,13 +85,19 @@ export class SamePlanPeriodProgressionService {
       };
     }
 
-    if (result.kind === "provider-cycle-lag" && providerCycleLagIsRetryable(input)) {
+    if (
+      result.kind === "provider-cycle-lag" &&
+      providerCycleLagIsRetryable(input)
+    ) {
       const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
       const updated = await this.database.subscription.updateMany({
         where: {
           id: existing.id,
           status: {
-            in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING],
+            in: [
+              SubscriptionProjectionStatus.ACTIVE,
+              SubscriptionProjectionStatus.TRIALING,
+            ],
           },
           planId: existing.planId,
           billingPeriodId: existing.billingPeriodId,
@@ -111,11 +134,16 @@ export class SamePlanPeriodProgressionService {
     const currentPeriodStart = provider.currentPeriodStart;
     const currentPeriodEnd = provider.currentPeriodEnd;
     if (
-      !(provider.pendingPlanHandle !== null || provider.cancelAtPeriodEnd || existing.cancelAtPeriodEnd)
-      || !currentPeriodEnd
-      || currentPeriodEnd <= now
-      || currentPeriodStart?.getTime() !== existing.currentPeriodStart?.getTime()
-      || currentPeriodEnd.getTime() !== existing.currentPeriodEnd?.getTime()
+      !(
+        provider.pendingPlanHandle !== null ||
+        provider.cancelAtPeriodEnd ||
+        existing.cancelAtPeriodEnd
+      ) ||
+      !currentPeriodEnd ||
+      currentPeriodEnd <= now ||
+      currentPeriodStart?.getTime() !==
+        existing.currentPeriodStart?.getTime() ||
+      currentPeriodEnd.getTime() !== existing.currentPeriodEnd?.getTime()
     ) {
       return null;
     }
@@ -126,16 +154,33 @@ export class SamePlanPeriodProgressionService {
           select: { id: true, active: true },
         })
       : null;
-    const pendingPlan = existingPending ?? (provider.pendingPlanHandle
-      ? await new BillingPlanMaterializationService(this.database, this.logger).materializeIfMissing(provider.pendingPlanHandle)
-      : null);
-    const next = provider.pendingPlanHandle && provider.pendingEffectiveAt
-      ? provider.pendingEffectiveAt
-      : now < new Date(currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
-        ? new Date(currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
-        : currentPeriodEnd;
+    const pendingPlan =
+      existingPending ??
+      (provider.pendingPlanHandle
+        ? await new BillingPlanMaterializationService(
+            this.database,
+            this.logger,
+          ).materializeIfMissing(provider.pendingPlanHandle)
+        : null);
+    const next =
+      provider.pendingPlanHandle && provider.pendingEffectiveAt
+        ? provider.pendingEffectiveAt
+        : now <
+            new Date(
+              currentPeriodEnd.getTime() -
+                APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS,
+            )
+          ? new Date(
+              currentPeriodEnd.getTime() -
+                APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS,
+            )
+          : currentPeriodEnd;
     const updated = await this.database.$transaction(async (transaction) => {
-      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
+      const usageEventMapping = await resolveShopifyUsageEventMapping(
+        transaction,
+        provider.planHandle,
+        provider.usageEventHandles,
+      );
       return transaction.subscription.updateMany({
         where: {
           id: existing.id,
@@ -144,11 +189,14 @@ export class SamePlanPeriodProgressionService {
           nextReconcileAt: existing.nextReconcileAt,
         },
         data: {
-          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
+          unmappedShopifyUsageEventHandles:
+            usageEventMapping.unmappedProviderHandles,
           pendingShopifyPlanHandle: provider.pendingPlanHandle,
           pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
           pendingEffectiveAt: provider.pendingEffectiveAt,
-          cancelAtPeriodEnd: provider.pendingPlanHandle ? false : provider.cancelAtPeriodEnd,
+          cancelAtPeriodEnd: provider.pendingPlanHandle
+            ? false
+            : provider.cancelAtPeriodEnd,
           currentPeriodEnd,
           nextReconcileAt: next,
           lastSyncedAt: now,
@@ -165,15 +213,16 @@ export class SamePlanPeriodProgressionService {
   }
 }
 
-function providerCycleLagIsRetryable(input: SamePlanReconciliationInput): boolean {
+function providerCycleLagIsRetryable(
+  input: SamePlanReconciliationInput,
+): boolean {
   const { plan, existing } = input;
   return Boolean(
-    existing.billingPeriodId
-    && existing.currentPeriodStart
-    && existing.currentPeriodEnd
-    && (
-      plan.kind === BillingPlanKind.PAID_METERED
-      || (plan.kind === BillingPlanKind.FREE && plan.recoveryCreditPackEnabled === true)
-    )
+    existing.billingPeriodId &&
+    existing.currentPeriodStart &&
+    existing.currentPeriodEnd &&
+    (plan.kind === BillingPlanKind.PAID_METERED ||
+      (plan.kind === BillingPlanKind.FREE &&
+        plan.recoveryCreditPackEnabled === true)),
   );
 }

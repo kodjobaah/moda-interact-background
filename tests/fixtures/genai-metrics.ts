@@ -6,9 +6,7 @@ import {
   PeriodicExportingMetricReader,
 } from "@opentelemetry/sdk-metrics";
 
-const exporter = new InMemoryMetricExporter(
-  AggregationTemporality.CUMULATIVE,
-);
+const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
 const reader = new PeriodicExportingMetricReader({
   exporter,
   exportIntervalMillis: 60_000,
@@ -35,13 +33,8 @@ meter.createCounter = (...args) => {
   return counter;
 };
 
-const {
-  observeAgentInvocation,
-  observeAgentTool,
-  observeConversationTurn,
-} = await import(
-  "@modainteract/moda-interact-shared/observability/genai"
-);
+const { observeAgentInvocation, observeAgentTool, observeConversationTurn } =
+  await import("@modainteract/moda-interact-shared/observability/genai");
 
 const sensitiveValue = "SECRET_CUSTOMER_CONVERSATION_PAYLOAD";
 
@@ -63,18 +56,19 @@ for (let index = 0; index < 40; index += 1) {
 await observeConversationTurn("whatsapp", async () => "turn-result");
 
 for (const operation of [
-  () => observeAgentInvocation(
-    { agentName: `failed-agent-${sensitiveValue}` },
-    async () => Promise.reject(new Error("expected agent error")),
-  ),
-  () => observeAgentTool(
-    `failed-tool-${sensitiveValue}`,
-    async () => Promise.reject(new Error("expected tool error")),
-  ),
-  () => observeConversationTurn(
-    "other",
-    async () => Promise.reject(new Error("expected turn error")),
-  ),
+  () =>
+    observeAgentInvocation(
+      { agentName: `failed-agent-${sensitiveValue}` },
+      async () => Promise.reject(new Error("expected agent error")),
+    ),
+  () =>
+    observeAgentTool(`failed-tool-${sensitiveValue}`, async () =>
+      Promise.reject(new Error("expected tool error")),
+    ),
+  () =>
+    observeConversationTurn("other", async () =>
+      Promise.reject(new Error("expected turn error")),
+    ),
 ]) {
   try {
     await operation();
@@ -97,8 +91,8 @@ const collected = exporter.getMetrics().flatMap((resourceMetrics) =>
   ),
 );
 
-const originalHistogramRecords = histograms.map(
-  (histogram) => histogram.record.bind(histogram),
+const originalHistogramRecords = histograms.map((histogram) =>
+  histogram.record.bind(histogram),
 );
 for (const histogram of histograms) {
   histogram.record = () => {
@@ -113,9 +107,8 @@ const durationFailureResult = await observeAgentInvocation(
 const durationApplicationError = new Error("duration application error");
 let durationErrorIdentity = false;
 try {
-  await observeAgentTool(
-    "failure-isolation-tool",
-    async () => Promise.reject(durationApplicationError),
+  await observeAgentTool("failure-isolation-tool", async () =>
+    Promise.reject(durationApplicationError),
   );
 } catch (error) {
   durationErrorIdentity = error === durationApplicationError;
@@ -145,18 +138,20 @@ try {
   counterErrorIdentity = error === counterApplicationError;
 }
 
-console.log(`GENAI_METRICS ${JSON.stringify({
-  collected,
-  instruments: {
-    histograms: histograms.length,
-    counters: counters.length,
-  },
-  failureIsolation: {
-    durationFailureResult,
-    durationErrorIdentity,
-    counterFailureResult,
-    counterErrorIdentity,
-  },
-})}`);
+console.log(
+  `GENAI_METRICS ${JSON.stringify({
+    collected,
+    instruments: {
+      histograms: histograms.length,
+      counters: counters.length,
+    },
+    failureIsolation: {
+      durationFailureResult,
+      durationErrorIdentity,
+      counterFailureResult,
+      counterErrorIdentity,
+    },
+  })}`,
+);
 
 await provider.shutdown();

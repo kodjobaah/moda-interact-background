@@ -21,9 +21,14 @@ type HttpFault = { status: number; body: unknown };
  * *real SDK request bytes* and supplies one-shot HTTP fault responses only.
  * All ordinary moderation requests are forwarded unmodified to Aimock.
  */
-export async function startArch040ModerationAimock(options: { blockedTexts?: string[] } = {}) {
+export async function startArch040ModerationAimock(
+  options: { blockedTexts?: string[] } = {},
+) {
   const mock = new LLMock({ port: 0 });
-  for (const text of ["moderation-fixture-block", ...(options.blockedTexts ?? [])]) {
+  for (const text of [
+    "moderation-fixture-block",
+    ...(options.blockedTexts ?? []),
+  ]) {
     mock.onModerate(text, {
       flagged: true,
       categories: { harassment: true },
@@ -38,7 +43,10 @@ export async function startArch040ModerationAimock(options: { blockedTexts?: str
   await mock.start();
 
   const upstream = new URL(mock.url);
-  if (upstream.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(upstream.hostname)) {
+  if (
+    upstream.protocol !== "http:" ||
+    !["127.0.0.1", "localhost", "[::1]"].includes(upstream.hostname)
+  ) {
     await mock.stop();
     throw new Error("ARCH-040 moderation Aimock must bind loopback");
   }
@@ -71,8 +79,13 @@ export async function startArch040ModerationAimock(options: { blockedTexts?: str
       const fault = nextFault;
       nextFault = null;
       if (fault) {
-        requests.push({ path: req.url, input: body.input, model: body.model,
-          status: fault.status, forwardedToAimock: false });
+        requests.push({
+          path: req.url,
+          input: body.input,
+          model: body.model,
+          status: fault.status,
+          forwardedToAimock: false,
+        });
         send(fault.status, fault.body);
         return;
       }
@@ -85,14 +98,25 @@ export async function startArch040ModerationAimock(options: { blockedTexts?: str
         signal: AbortSignal.timeout(8_000),
       });
       const responseBody = await response.text();
-      requests.push({ path: req.url, input: body.input, model: body.model,
-        status: response.status, forwardedToAimock: true });
+      requests.push({
+        path: req.url,
+        input: body.input,
+        model: body.model,
+        status: response.status,
+        forwardedToAimock: true,
+      });
       res.writeHead(response.status, {
-        "content-type": response.headers.get("content-type") ?? "application/json",
+        "content-type":
+          response.headers.get("content-type") ?? "application/json",
       });
       res.end(responseBody);
     } catch {
-      send(502, { error: { message: "BG006 test relay unavailable", type: "test_relay_error" } });
+      send(502, {
+        error: {
+          message: "BG006 test relay unavailable",
+          type: "test_relay_error",
+        },
+      });
     }
   });
 
@@ -120,14 +144,18 @@ export async function startArch040ModerationAimock(options: { blockedTexts?: str
   // full /moderations URL, matching the ARCH-043 database contract.
   const endpoint = `http://127.0.0.1:${address.port}/v1/moderations`;
   const operation: ModerationOperation = {
-    moderation: { key: "omini.moderation", version: 1,
-      value: { baseUrl: endpoint, modelId: "omni-moderation-latest" } },
-    providerVersion: 1, openAiApiKey: "arch040-local-aimock-only",
+    moderation: {
+      key: "omini.moderation",
+      version: 1,
+      value: { baseUrl: endpoint, modelId: "omni-moderation-latest" },
+    },
+    providerVersion: 1,
+    openAiApiKey: "arch040-local-aimock-only",
   };
   const closeRelay = async () => {
     relay.closeAllConnections();
     await new Promise<void>((resolve, reject) => {
-      relay.close((error) => error ? reject(error) : resolve());
+      relay.close((error) => (error ? reject(error) : resolve()));
     });
   };
   return {
@@ -139,22 +167,42 @@ export async function startArch040ModerationAimock(options: { blockedTexts?: str
       // HTTP boundary. The request fields are taken from relay-observed SDK
       // bytes, not synthesized from expected test input.
       const forwarded = requests.filter((item) => item.forwardedToAimock);
-      const handled = mock.getRequests().filter((item) =>
-        item.service === "moderation" || item.path.startsWith("/v1/moderations"));
+      const handled = mock
+        .getRequests()
+        .filter(
+          (item) =>
+            item.service === "moderation" ||
+            item.path.startsWith("/v1/moderations"),
+        );
       if (handled.length !== forwarded.length) {
-        throw new Error("ARCH-040 moderation Aimock HTTP forwarding evidence mismatch");
+        throw new Error(
+          "ARCH-040 moderation Aimock HTTP forwarding evidence mismatch",
+        );
       }
-      return requests.map(({ path, input, model, status }) => ({ path, input, model, status }));
+      return requests.map(({ path, input, model, status }) => ({
+        path,
+        input,
+        model,
+        status,
+      }));
     },
     async failNextWith(status: number, body: unknown) {
-      if (!Number.isInteger(status) || status < 200 || status > 599 || nextFault) {
-        throw new Error("Invalid or overlapping ARCH-040 moderation HTTP fault");
+      if (
+        !Number.isInteger(status) ||
+        status < 200 ||
+        status > 599 ||
+        nextFault
+      ) {
+        throw new Error(
+          "Invalid or overlapping ARCH-040 moderation HTTP fault",
+        );
       }
       nextFault = { status, body };
     },
     async close() {
-      try { await closeRelay(); }
-      finally {
+      try {
+        await closeRelay();
+      } finally {
         await mock.stop();
       }
     },

@@ -21,7 +21,9 @@ export function assertExactTranslationBatchResultMembership(
   const seenIds = new Set<string>();
   for (const result of results) {
     if (!expectedIds.has(result.providerCustomId)) {
-      throw new Error(messages.unknownProviderCustomId(result.providerCustomId));
+      throw new Error(
+        messages.unknownProviderCustomId(result.providerCustomId),
+      );
     }
     if (seenIds.has(result.providerCustomId)) {
       throw new Error(messages.duplicateProviderCustomId);

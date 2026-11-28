@@ -4,9 +4,17 @@ import { CommerceEmbeddingPurpose } from "@prisma/client";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { parseCredentialKeyring } from "@modainteract/moda-interact-shared/security/credentials/node";
 
-const ring = (entries: Record<string, Uint8Array>) => parseCredentialKeyring(
-  JSON.stringify(Object.fromEntries(Object.entries(entries).map(([id, key]) => [id, Buffer.from(key).toString("base64")]))),
-);
+const ring = (entries: Record<string, Uint8Array>) =>
+  parseCredentialKeyring(
+    JSON.stringify(
+      Object.fromEntries(
+        Object.entries(entries).map(([id, key]) => [
+          id,
+          Buffer.from(key).toString("base64"),
+        ]),
+      ),
+    ),
+  );
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -32,13 +40,18 @@ function sealedRow(overrides: Record<string, unknown> = {}) {
   const key = Buffer.alloc(32, 7);
   const nonce = Buffer.alloc(12, 9);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
-  cipher.setAAD(Buffer.from(canonicalJson({
-    credentialType: "EMBEDDING",
-    environment,
-    purpose,
-    provider,
-    keyId,
-  }), "utf8"));
+  cipher.setAAD(
+    Buffer.from(
+      canonicalJson({
+        credentialType: "EMBEDDING",
+        environment,
+        purpose,
+        provider,
+        keyId,
+      }),
+      "utf8",
+    ),
+  );
   const ciphertext = Buffer.concat([
     cipher.update(Buffer.from("db-secret", "utf8")),
     cipher.final(),
@@ -97,8 +110,12 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
 
   it("re-reads the database on every resolution so admin changes are hot-swappable", async () => {
     const first = sealedRow();
-    const second = sealedRow({ embeddingModel: "text-embedding-next", editVersion: 3 });
-    const findUnique = vi.fn()
+    const second = sealedRow({
+      embeddingModel: "text-embedding-next",
+      editVersion: 3,
+    });
+    const findUnique = vi
+      .fn()
       .mockResolvedValueOnce(first.row)
       .mockResolvedValueOnce(second.row);
     const resolver = createMerchantKnowledgeEmbeddingResolver({
@@ -118,7 +135,11 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
 
   it("fails closed when the database configuration is missing or cannot be decrypted", async () => {
     const missing = createMerchantKnowledgeEmbeddingResolver({
-      db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(null) } } as never,
+      db: {
+        commerceEmbeddingConfiguration: {
+          findUnique: vi.fn().mockResolvedValue(null),
+        },
+      } as never,
       environment: "TEST",
       keyring: ring({ active: Buffer.alloc(32, 1) }),
     });
@@ -128,7 +149,11 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
 
     const { row } = sealedRow();
     const wrongKey = createMerchantKnowledgeEmbeddingResolver({
-      db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(row) } } as never,
+      db: {
+        commerceEmbeddingConfiguration: {
+          findUnique: vi.fn().mockResolvedValue(row),
+        },
+      } as never,
       environment: "TEST",
       keyring: ring({ active: Buffer.alloc(32, 3) }),
     });
@@ -142,22 +167,33 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
     ["short nonce", { nonce: Buffer.alloc(11) }],
     ["short auth tag", { authTag: Buffer.alloc(15) }],
     ["oversized ciphertext", { ciphertext: Buffer.alloc(8193) }],
-  ])("preserves invalid-configuration error mapping for %s", async (_label, overrides) => {
-    const { key, row } = sealedRow(overrides);
-    const resolver = createMerchantKnowledgeEmbeddingResolver({
-      db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(row) } } as never,
-      environment: "TEST",
-      keyring: ring({ active: key }),
-    });
-    await expect(resolver.resolve()).rejects.toMatchObject({
-      code: "INVALID_EMBEDDING_CONFIGURATION",
-    });
-  });
+  ])(
+    "preserves invalid-configuration error mapping for %s",
+    async (_label, overrides) => {
+      const { key, row } = sealedRow(overrides);
+      const resolver = createMerchantKnowledgeEmbeddingResolver({
+        db: {
+          commerceEmbeddingConfiguration: {
+            findUnique: vi.fn().mockResolvedValue(row),
+          },
+        } as never,
+        environment: "TEST",
+        keyring: ring({ active: key }),
+      });
+      await expect(resolver.resolve()).rejects.toMatchObject({
+        code: "INVALID_EMBEDDING_CONFIGURATION",
+      });
+    },
+  );
 
   it("preserves unavailable error mapping when authentication fails", async () => {
     const { key, row } = sealedRow({ keyId: "rotated" });
     const resolver = createMerchantKnowledgeEmbeddingResolver({
-      db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(row) } } as never,
+      db: {
+        commerceEmbeddingConfiguration: {
+          findUnique: vi.fn().mockResolvedValue(row),
+        },
+      } as never,
       environment: "TEST",
       keyring: ring({ rotated: key }),
     });
@@ -169,11 +205,12 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
 
 describe("MerchantKnowledgeEmbeddingService", () => {
   it("sends the exact chunk and configured model/dimensions to OpenAI", async () => {
-    const create = vi.fn().mockResolvedValue({ data: [{ embedding: [0, 1, -2] }] });
-    const service = new MerchantKnowledgeEmbeddingService(
-      config,
-      { embeddings: { create } },
-    );
+    const create = vi
+      .fn()
+      .mockResolvedValue({ data: [{ embedding: [0, 1, -2] }] });
+    const service = new MerchantKnowledgeEmbeddingService(config, {
+      embeddings: { create },
+    });
 
     await expect(service.embed("exact chunk")).resolves.toEqual([0, 1, -2]);
     expect(create).toHaveBeenCalledWith({
@@ -183,25 +220,26 @@ describe("MerchantKnowledgeEmbeddingService", () => {
     });
   });
 
-  it.each([[1, 2], [1, Number.NaN, 3], [1, Number.POSITIVE_INFINITY, 3]])(
-    "rejects invalid vectors",
-    async (...embedding) => {
-      const service = new MerchantKnowledgeEmbeddingService(
-        config,
-        { embeddings: { create: vi.fn().mockResolvedValue({ data: [{ embedding }] }) } },
-      );
-      await expect(service.embed("chunk")).rejects.toMatchObject({
-        code: "EMBEDDING_VECTOR_INVALID",
-        retryable: false,
-      });
-    },
-  );
+  it.each([
+    [1, 2],
+    [1, Number.NaN, 3],
+    [1, Number.POSITIVE_INFINITY, 3],
+  ])("rejects invalid vectors", async (...embedding) => {
+    const service = new MerchantKnowledgeEmbeddingService(config, {
+      embeddings: {
+        create: vi.fn().mockResolvedValue({ data: [{ embedding }] }),
+      },
+    });
+    await expect(service.embed("chunk")).rejects.toMatchObject({
+      code: "EMBEDDING_VECTOR_INVALID",
+      retryable: false,
+    });
+  });
 
   it("maps provider availability errors to a bounded retryable failure", async () => {
-    const service = new MerchantKnowledgeEmbeddingService(
-      config,
-      { embeddings: { create: vi.fn().mockRejectedValue({ status: 503 }) } },
-    );
+    const service = new MerchantKnowledgeEmbeddingService(config, {
+      embeddings: { create: vi.fn().mockRejectedValue({ status: 503 }) },
+    });
     await expect(service.embed("chunk")).rejects.toBeInstanceOf(
       MerchantKnowledgeEmbeddingError,
     );

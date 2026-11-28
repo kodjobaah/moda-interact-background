@@ -4,31 +4,68 @@ import { readRecommendationSelection } from "../../../../src/commerce/recommenda
 
 describe("readRecommendationSelection", () => {
   it("delegates to the exact published canonical helper", () => {
-    expect(readRecommendationSelection).toBe(readCommerceRecommendationSelection);
+    expect(readRecommendationSelection).toBe(
+      readCommerceRecommendationSelection,
+    );
   });
   it.each([
-    { responseDisposition: "STANDARD", shippingInformationSelection: { productId: null, variantId: null } },
+    {
+      responseDisposition: "STANDARD",
+      shippingInformationSelection: { productId: null, variantId: null },
+    },
     { shippingInformationSelection: { productId: null, variantId: null } },
-    { responseDisposition: "STANDARD", productRecommendations: [{ scope: "PRODUCT_ONLY", basketLineId: null,
-      productId: "p1", variantId: "v1", quantity: 1, promotionKind: "NONE", offerIds: [] }] },
+    {
+      responseDisposition: "STANDARD",
+      productRecommendations: [
+        {
+          scope: "PRODUCT_ONLY",
+          basketLineId: null,
+          productId: "p1",
+          variantId: "v1",
+          quantity: 1,
+          promotionKind: "NONE",
+          offerIds: [],
+        },
+      ],
+    },
     { productRecommendationVersion: "1" },
-  ])("keeps canonical compatibility for %j", details => {
-    expect(readRecommendationSelection(details)).toEqual(readCommerceRecommendationSelection(details));
+  ])("keeps canonical compatibility for %j", (details) => {
+    expect(readRecommendationSelection(details)).toEqual(
+      readCommerceRecommendationSelection(details),
+    );
   });
   it("extracts only the four host-owned fields", () => {
-    expect(readRecommendationSelection({ responseDisposition: "OUT_OF_SCOPE_REDIRECT", unowned: "ignored" })).toEqual({
+    expect(
+      readRecommendationSelection({
+        responseDisposition: "OUT_OF_SCOPE_REDIRECT",
+        unowned: "ignored",
+      }),
+    ).toEqual({
       responseDisposition: "OUT_OF_SCOPE_REDIRECT",
     });
   });
   it("rejects incomplete pairs and shipping variants without products", () => {
-    expect(readRecommendationSelection({ productRecommendationVersion: "1" })).toBeNull();
-    expect(readRecommendationSelection({ responseDisposition: "STANDARD", shippingInformationSelection: {
-      productId: null, variantId: "variant-1",
-    } })).toEqual({ responseDisposition: "STANDARD" });
+    expect(
+      readRecommendationSelection({ productRecommendationVersion: "1" }),
+    ).toBeNull();
+    expect(
+      readRecommendationSelection({
+        responseDisposition: "STANDARD",
+        shippingInformationSelection: {
+          productId: null,
+          variantId: "variant-1",
+        },
+      }),
+    ).toEqual({ responseDisposition: "STANDARD" });
   });
   it("preserves an independently valid disposition when recommendation data is invalid", () => {
-    expect(readRecommendationSelection({ responseDisposition: "OUT_OF_SCOPE_REDIRECT",
-      productRecommendationVersion: "1", productRecommendations: "invalid" })).toEqual({
+    expect(
+      readRecommendationSelection({
+        responseDisposition: "OUT_OF_SCOPE_REDIRECT",
+        productRecommendationVersion: "1",
+        productRecommendations: "invalid",
+      }),
+    ).toEqual({
       responseDisposition: "OUT_OF_SCOPE_REDIRECT",
     });
   });

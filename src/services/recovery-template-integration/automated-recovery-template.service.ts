@@ -1,7 +1,10 @@
 import { merchantFollowUpOfferService } from "../recovery-offers/merchant-follow-up-offer.service.js";
 import { sameReconciledPrices } from "../recovery-pricing/same-reconciled-prices.js";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { recoveryOfferResolver } from "../recovery-offers/recovery-offer-resolver.service.js";
@@ -13,11 +16,15 @@ import {
 } from "../recovery-offers/initial-outreach-offer-selection.service.js";
 import type { CurrentOutreachOfferAdmissionToken } from "../recovery-offers/current-outreach-offer-revalidation.service.js";
 import type {
-  PreviouslyPromisedOffer, RecoveryOfferDecision, ResolveRecoveryOfferInput,
+  PreviouslyPromisedOffer,
+  RecoveryOfferDecision,
+  ResolveRecoveryOfferInput,
 } from "../recovery-offers/recovery-offer.types.js";
 import { recoveryTemplatePreparer } from "../recovery-template-preparation/recovery-template-preparer.service.js";
 import type {
-  PreparedRecoveryTemplate, RecoveryTemplatePreparationInput, RecoveryPromotionTarget,
+  PreparedRecoveryTemplate,
+  RecoveryTemplatePreparationInput,
+  RecoveryPromotionTarget,
   TrustedOffer,
 } from "../recovery-template-preparation/recovery-template.types.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
@@ -27,7 +34,10 @@ import {
   PersistedCheckoutRecoveryLifetimeReader,
   type CheckoutRecoveryLifetimeReader,
 } from "../recovery-lifetime/checkout-recovery-lifetime.js";
-import { templateSendFields, type RecoveryOfferPromise } from "./prepared-template-send.js";
+import {
+  templateSendFields,
+  type RecoveryOfferPromise,
+} from "./prepared-template-send.js";
 import type { OutreachProductImageRequest } from "../recovery-product-media/recovery-product-image-resolver.js";
 import {
   initialNoOfferFallbackService,
@@ -36,16 +46,25 @@ import {
 } from "./initial-no-offer-fallback.service.js";
 import { classifyInitialOutreachFallback } from "./initial-outreach-fallback-selection.js";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
-import { selectEffectiveOutreachAttempt, hasConfirmedOutreachDelivery } from "../../domain/recovery-outreach-identity.js";
+import {
+  selectEffectiveOutreachAttempt,
+  hasConfirmedOutreachDelivery,
+} from "../../domain/recovery-outreach-identity.js";
 import { recoveryOutreachIdentitySelect } from "../recovery-delivery-retry/outreach-selection.js";
 
 export type AutomatedTemplateResult =
-  | { kind: "prepared"; prepared: PreparedRecoveryTemplate; send: ReturnType<typeof templateSendFields>;
-  admissionToken?: CurrentOutreachOfferAdmissionToken }
+  | {
+      kind: "prepared";
+      prepared: PreparedRecoveryTemplate;
+      send: ReturnType<typeof templateSendFields>;
+      admissionToken?: CurrentOutreachOfferAdmissionToken;
+    }
   | { kind: "unavailable"; reason: string };
 
 export type AutomatedTemplateInput = Readonly<{
-  shopId: string; recoveryId: string; stage: "INITIAL" | "FOLLOW_UP";
+  shopId: string;
+  recoveryId: string;
+  stage: "INITIAL" | "FOLLOW_UP";
   policy: RecoveryPolicySnapshot;
   /** Sequence 1 uses shop default. Sequence 2 uses the conversation language. */
   conversationLanguageTag: string | null;
@@ -56,74 +75,132 @@ export type AutomatedTemplateInput = Readonly<{
 }>;
 
 const logger = createLogger({
-  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
 });
 
 function boundedFailure(error: unknown): string {
-  return error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
-    ? error.name : "unknown";
+  return error instanceof Error &&
+    /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
+    ? error.name
+    : "unknown";
 }
 
 /** The only supported historical promise is the template input actually stored
  * on the effective initial outreach message. Mutable current catalogue or
  * policy must never be treated as proof of what was sent previously. */
-export function previousPromise(content: string): PreviouslyPromisedOffer | null {
+export function previousPromise(
+  content: string,
+): PreviouslyPromisedOffer | null {
   try {
     const value: unknown = JSON.parse(content);
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return null;
     const record = value as Record<string, unknown>;
-    if (record.contract !== "moda.whatsapp.automated-template-parameters.v1") return null;
+    if (record.contract !== "moda.whatsapp.automated-template-parameters.v1")
+      return null;
     const promise = record.recoveryPromise;
-    if (!promise || typeof promise !== "object" || Array.isArray(promise)) return null;
+    if (!promise || typeof promise !== "object" || Array.isArray(promise))
+      return null;
     const evidence = promise as Record<string, unknown>;
-    if (evidence.kind === "NO_OFFER" && Object.keys(evidence).length === 1) return { kind: "NO_OFFER" };
+    if (evidence.kind === "NO_OFFER" && Object.keys(evidence).length === 1)
+      return { kind: "NO_OFFER" };
     const parsedTarget = evidence.promotionTarget;
-    const targetIsValid = parsedTarget === undefined || parsedTarget === "CHECKOUT" ||
+    const targetIsValid =
+      parsedTarget === undefined ||
+      parsedTarget === "CHECKOUT" ||
       parsedTarget === "ALTERNATIVE_PRODUCT";
-    if ((evidence.kind === "CODE_OFFER" || evidence.kind === "AUTOMATIC_OFFER") && targetIsValid &&
-        typeof evidence.providerDiscountId === "string" && evidence.providerDiscountId.length > 0 &&
-        evidence.providerDiscountId.length <= 191 &&
-        (evidence.kind !== "CODE_OFFER" || (typeof evidence.code === "string" &&
-          evidence.code.length > 0 && evidence.code.length <= 100))) {
-      return { kind: evidence.kind, providerDiscountId: evidence.providerDiscountId,
-        ...(evidence.kind === "CODE_OFFER" ? { code: evidence.code as string } : {}),
-        ...(parsedTarget ? { promotionTarget: parsedTarget } : {}) };
+    if (
+      (evidence.kind === "CODE_OFFER" || evidence.kind === "AUTOMATIC_OFFER") &&
+      targetIsValid &&
+      typeof evidence.providerDiscountId === "string" &&
+      evidence.providerDiscountId.length > 0 &&
+      evidence.providerDiscountId.length <= 191 &&
+      (evidence.kind !== "CODE_OFFER" ||
+        (typeof evidence.code === "string" &&
+          evidence.code.length > 0 &&
+          evidence.code.length <= 100))
+    ) {
+      return {
+        kind: evidence.kind,
+        providerDiscountId: evidence.providerDiscountId,
+        ...(evidence.kind === "CODE_OFFER"
+          ? { code: evidence.code as string }
+          : {}),
+        ...(parsedTarget ? { promotionTarget: parsedTarget } : {}),
+      };
     }
-    if (evidence.kind === "CHECKOUT_DISCOUNT" && evidence.offerSet &&
-        (parsedTarget === undefined || parsedTarget === "CHECKOUT") &&
-        typeof evidence.offerSet === "object" && !Array.isArray(evidence.offerSet)) {
+    if (
+      evidence.kind === "CHECKOUT_DISCOUNT" &&
+      evidence.offerSet &&
+      (parsedTarget === undefined || parsedTarget === "CHECKOUT") &&
+      typeof evidence.offerSet === "object" &&
+      !Array.isArray(evidence.offerSet)
+    ) {
       const offerSet = evidence.offerSet as Record<string, unknown>;
       const offers = offerSet.offers;
-      if (offerSet.schemaVersion === "moda.outreach.checkout-offers.v1" &&
-          Array.isArray(offers) && offers.length === 1 &&
-          offers[0] && typeof offers[0] === "object" && !Array.isArray(offers[0])) {
+      if (
+        offerSet.schemaVersion === "moda.outreach.checkout-offers.v1" &&
+        Array.isArray(offers) &&
+        offers.length === 1 &&
+        offers[0] &&
+        typeof offers[0] === "object" &&
+        !Array.isArray(offers[0])
+      ) {
         const [offer] = offers as [Record<string, unknown>];
-        if (typeof offer.providerDiscountId === "string" && offer.providerDiscountId.length > 0 &&
-            offer.providerDiscountId.length <= 191 && offer.method === "CODE" &&
-            typeof offer.code === "string" && offer.code.length > 0 && offer.code.length <= 100) {
-          return { kind: "CODE_OFFER", providerDiscountId: offer.providerDiscountId, code: offer.code,
-            ...(parsedTarget ? { promotionTarget: "CHECKOUT" as const } : {}) };
+        if (
+          typeof offer.providerDiscountId === "string" &&
+          offer.providerDiscountId.length > 0 &&
+          offer.providerDiscountId.length <= 191 &&
+          offer.method === "CODE" &&
+          typeof offer.code === "string" &&
+          offer.code.length > 0 &&
+          offer.code.length <= 100
+        ) {
+          return {
+            kind: "CODE_OFFER",
+            providerDiscountId: offer.providerDiscountId,
+            code: offer.code,
+            ...(parsedTarget ? { promotionTarget: "CHECKOUT" as const } : {}),
+          };
         }
-        if (typeof offer.providerDiscountId === "string" && offer.providerDiscountId.length > 0 &&
-            offer.providerDiscountId.length <= 191 && offer.method === "AUTOMATIC" && offer.code === null) {
-          return { kind: "AUTOMATIC_OFFER", providerDiscountId: offer.providerDiscountId,
-            ...(parsedTarget ? { promotionTarget: "CHECKOUT" as const } : {}) };
+        if (
+          typeof offer.providerDiscountId === "string" &&
+          offer.providerDiscountId.length > 0 &&
+          offer.providerDiscountId.length <= 191 &&
+          offer.method === "AUTOMATIC" &&
+          offer.code === null
+        ) {
+          return {
+            kind: "AUTOMATIC_OFFER",
+            providerDiscountId: offer.providerDiscountId,
+            ...(parsedTarget ? { promotionTarget: "CHECKOUT" as const } : {}),
+          };
         }
       }
     }
-    if (evidence.kind === "ALTERNATIVE_PRODUCT_PROMOTION" &&
-        (parsedTarget === undefined || parsedTarget === "ALTERNATIVE_PRODUCT") &&
-        typeof evidence.providerDiscountId === "string" && evidence.providerDiscountId.length > 0 &&
-        evidence.providerDiscountId.length <= 191 &&
-        (evidence.method === "CODE" && typeof evidence.code === "string" &&
-          evidence.code.length > 0 && evidence.code.length <= 100 ||
-         evidence.method === "AUTOMATIC" &&
-          (!Object.hasOwn(evidence, "code") || evidence.code === null))) {
+    if (
+      evidence.kind === "ALTERNATIVE_PRODUCT_PROMOTION" &&
+      (parsedTarget === undefined || parsedTarget === "ALTERNATIVE_PRODUCT") &&
+      typeof evidence.providerDiscountId === "string" &&
+      evidence.providerDiscountId.length > 0 &&
+      evidence.providerDiscountId.length <= 191 &&
+      ((evidence.method === "CODE" &&
+        typeof evidence.code === "string" &&
+        evidence.code.length > 0 &&
+        evidence.code.length <= 100) ||
+        (evidence.method === "AUTOMATIC" &&
+          (!Object.hasOwn(evidence, "code") || evidence.code === null)))
+    ) {
       return {
         kind: evidence.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER",
         providerDiscountId: evidence.providerDiscountId,
-        ...(evidence.method === "CODE" ? { code: evidence.code as string } : {}),
-        ...(parsedTarget ? { promotionTarget: "ALTERNATIVE_PRODUCT" as const } : {}),
+        ...(evidence.method === "CODE"
+          ? { code: evidence.code as string }
+          : {}),
+        ...(parsedTarget
+          ? { promotionTarget: "ALTERNATIVE_PRODUCT" as const }
+          : {}),
       };
     }
     return null;
@@ -140,53 +217,87 @@ export function previousPromise(content: string): PreviouslyPromisedOffer | null
 
 function promiseFor(offer: RecoveryOfferDecision): RecoveryOfferPromise {
   if (offer.kind === "NO_OFFER") return { kind: "NO_OFFER" };
-  if (offer.kind === "CODE_OFFER") return {
-    kind: "CODE_OFFER", promotionTarget: "CHECKOUT",
-    providerDiscountId: offer.providerDiscountId, code: offer.parameters.code!,
+  if (offer.kind === "CODE_OFFER")
+    return {
+      kind: "CODE_OFFER",
+      promotionTarget: "CHECKOUT",
+      providerDiscountId: offer.providerDiscountId,
+      code: offer.parameters.code!,
+    };
+  return {
+    kind: "AUTOMATIC_OFFER",
+    promotionTarget: "CHECKOUT",
+    providerDiscountId: offer.providerDiscountId,
   };
-  return { kind: "AUTOMATIC_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: offer.providerDiscountId };
 }
 
 function currentBasketFingerprint(recovery: {
-  id: string; shopId: string; generation: number; currency: string | null; lineItems: unknown;
+  id: string;
+  shopId: string;
+  generation: number;
+  currency: string | null;
+  lineItems: unknown;
 }): string | null {
   try {
     return fingerprintRecoveryPricingBasket({
-      shopId: recovery.shopId, checkoutRecoveryId: recovery.id,
-      generation: recovery.generation, currency: recovery.currency, lineItems: recovery.lineItems,
+      shopId: recovery.shopId,
+      checkoutRecoveryId: recovery.id,
+      generation: recovery.generation,
+      currency: recovery.currency,
+      lineItems: recovery.lineItems,
     });
   } catch {
     return null;
   }
 }
 
-
-
 function sameCurrentOfferContext(
-  original: Awaited<ReturnType<InitialOutreachOfferSelectionService["resolve"]>>["context"],
-  current: Awaited<ReturnType<InitialOutreachOfferSelectionService["resolve"]>>["currentContext"],
+  original: Awaited<
+    ReturnType<InitialOutreachOfferSelectionService["resolve"]>
+  >["context"],
+  current: Awaited<
+    ReturnType<InitialOutreachOfferSelectionService["resolve"]>
+  >["currentContext"],
 ): boolean {
-  return original.shopId === current.shopId &&
+  return (
+    original.shopId === current.shopId &&
     original.checkoutRecoveryId === current.checkoutRecoveryId &&
     original.outreachAttemptId === current.outreachAttemptId &&
     original.mode === current.mode &&
-    JSON.stringify(original.authorisedDiscountIds) === JSON.stringify(current.authorisedDiscountIds) &&
-    original.platformInstructionRevisionId === current.platformInstructionRevisionId &&
-    original.merchantInstructionRevisionId === current.merchantInstructionRevisionId &&
+    JSON.stringify(original.authorisedDiscountIds) ===
+      JSON.stringify(current.authorisedDiscountIds) &&
+    original.platformInstructionRevisionId ===
+      current.platformInstructionRevisionId &&
+    original.merchantInstructionRevisionId ===
+      current.merchantInstructionRevisionId &&
     original.basket.generation === current.basket.generation &&
     original.basket.fingerprint === current.basket.fingerprint &&
-    sameReconciledPrices(original.priceReconciliation, current.priceReconciliation);
+    sameReconciledPrices(
+      original.priceReconciliation,
+      current.priceReconciliation,
+    )
+  );
 }
 
-function checkoutImageProduct(lineItems: unknown): { productId: string; variantId: string | null } | null {
+function checkoutImageProduct(
+  lineItems: unknown,
+): { productId: string; variantId: string | null } | null {
   if (!Array.isArray(lineItems)) return null;
   for (const value of lineItems) {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const line = value as Record<string, unknown>;
-    if (typeof line.productId !== "string" || !line.productId.trim() ||
-        (line.variantId !== null && line.variantId !== undefined &&
-          (typeof line.variantId !== "string" || !line.variantId.trim()))) continue;
-    return { productId: line.productId, variantId: typeof line.variantId === "string" ? line.variantId : null };
+    if (
+      typeof line.productId !== "string" ||
+      !line.productId.trim() ||
+      (line.variantId !== null &&
+        line.variantId !== undefined &&
+        (typeof line.variantId !== "string" || !line.variantId.trim()))
+    )
+      continue;
+    return {
+      productId: line.productId,
+      variantId: typeof line.variantId === "string" ? line.variantId : null,
+    };
   }
   return null;
 }
@@ -197,8 +308,13 @@ function authorisedHosts(domain: string): string[] {
   const origin = domain.includes("://") ? domain : `https://${domain}`;
   if (!URL.canParse(origin)) return [];
   const normalized = new URL(origin);
-  if (!normalized.hostname.includes(".") || normalized.username || normalized.password ||
-      !["https:", "http:"].includes(normalized.protocol)) return [];
+  if (
+    !normalized.hostname.includes(".") ||
+    normalized.username ||
+    normalized.password ||
+    !["https:", "http:"].includes(normalized.protocol)
+  )
+    return [];
   return [normalized.hostname.toLowerCase()];
 }
 
@@ -207,27 +323,50 @@ export class AutomatedRecoveryTemplateService {
   private readonly lifetimeReader: CheckoutRecoveryLifetimeReader;
 
   constructor(
-    private readonly offers: Pick<typeof recoveryOfferResolver, "resolve"> = recoveryOfferResolver,
-    private readonly preparer: Pick<typeof recoveryTemplatePreparer, "prepare"> = recoveryTemplatePreparer,
-    private readonly database: Pick<typeof prisma, "checkoutRecovery" | "conversationMessage" | "backgroundRuntimeConfig"> = prisma,
-    private readonly senderWaba: () => Promise<string> = () => outboundWhatsAppAdmissionService.getProviderAccountId(),
+    private readonly offers: Pick<
+      typeof recoveryOfferResolver,
+      "resolve"
+    > = recoveryOfferResolver,
+    private readonly preparer: Pick<
+      typeof recoveryTemplatePreparer,
+      "prepare"
+    > = recoveryTemplatePreparer,
+    private readonly database: Pick<
+      typeof prisma,
+      "checkoutRecovery" | "conversationMessage" | "backgroundRuntimeConfig"
+    > = prisma,
+    private readonly senderWaba: () => Promise<string> = () =>
+      outboundWhatsAppAdmissionService.getProviderAccountId(),
     private readonly clock: () => Date = () => new Date(),
     private readonly log: Pick<StructuredLogger, "warn" | "error"> = logger,
     lifetimeReader?: CheckoutRecoveryLifetimeReader,
-    private readonly initialOffers: Pick<InitialOutreachOfferSelectionService, "resolve"> =
-      initialOutreachOfferSelectionService,
-    private readonly admissionValidator: Pick<InitialOutreachOfferSelectionService, "validateAdmission"> =
-      initialOutreachOfferSelectionService,
+    private readonly initialOffers: Pick<
+      InitialOutreachOfferSelectionService,
+      "resolve"
+    > = initialOutreachOfferSelectionService,
+    private readonly admissionValidator: Pick<
+      InitialOutreachOfferSelectionService,
+      "validateAdmission"
+    > = initialOutreachOfferSelectionService,
     private readonly initialFallback: InitialNoOfferFallbackPort = initialNoOfferFallbackService,
-    private readonly followUpOffers: Pick<typeof merchantFollowUpOfferService, "verify"> = merchantFollowUpOfferService,
+    private readonly followUpOffers: Pick<
+      typeof merchantFollowUpOfferService,
+      "verify"
+    > = merchantFollowUpOfferService,
   ) {
-    this.lifetimeReader = lifetimeReader ?? new PersistedCheckoutRecoveryLifetimeReader(database);
+    this.lifetimeReader =
+      lifetimeReader ?? new PersistedCheckoutRecoveryLifetimeReader(database);
   }
 
-  async prepare(input: AutomatedTemplateInput): Promise<AutomatedTemplateResult> {
+  async prepare(
+    input: AutomatedTemplateInput,
+  ): Promise<AutomatedTemplateResult> {
     const unavailable = (reason: string): AutomatedTemplateResult => {
       this.log.warn("recovery_template.integration.unavailable", {
-        shopId: input.shopId, recoveryId: input.recoveryId, stage: input.stage, reason,
+        shopId: input.shopId,
+        recoveryId: input.recoveryId,
+        stage: input.stage,
+        reason,
       });
       return { kind: "unavailable", reason };
     };
@@ -238,7 +377,12 @@ export class AutomatedRecoveryTemplateService {
       trigger: InitialFallbackTrigger,
       originatingError?: unknown,
     ): Promise<AutomatedTemplateResult> => {
-      if (!evaluatedFallback || evaluatedGeneration === undefined || evaluatedBasketFingerprint === undefined) return unavailable("INITIAL_EVALUATION_MISSING");
+      if (
+        !evaluatedFallback ||
+        evaluatedGeneration === undefined ||
+        evaluatedBasketFingerprint === undefined
+      )
+        return unavailable("INITIAL_EVALUATION_MISSING");
       const decision = classifyInitialOutreachFallback({
         kind: "OPTIONAL_ENRICHMENT_FAILURE",
         trigger,
@@ -252,8 +396,16 @@ export class AutomatedRecoveryTemplateService {
         recoveryId: input.recoveryId,
         outreachAttemptId: input.outreachAttemptId!,
         trigger: decision.trigger,
-        expectedGeneration: evaluatedGeneration, expectedBasketFingerprint: evaluatedBasketFingerprint,
-        outreachEvaluation: { ...evaluatedFallback, offerDecision: { kind: "NO_VERIFIED_OFFER", reasonCode: "VERIFIED_FALLBACK", discoveryIncomplete: false } },
+        expectedGeneration: evaluatedGeneration,
+        expectedBasketFingerprint: evaluatedBasketFingerprint,
+        outreachEvaluation: {
+          ...evaluatedFallback,
+          offerDecision: {
+            kind: "NO_VERIFIED_OFFER",
+            reasonCode: "VERIFIED_FALLBACK",
+            discoveryIncomplete: false,
+          },
+        },
       });
       try {
         this.log.warn("recovery_template.initial_fallback.degraded", {
@@ -263,14 +415,22 @@ export class AutomatedRecoveryTemplateService {
           stage: input.stage,
           trigger,
           outcome: fallback.kind.toLowerCase(),
-          ...(fallback.kind === "BLOCKED" || fallback.kind === "RETRY" ? { reason: fallback.reason } : {}),
-          ...(originatingError !== undefined ? { sourceError: initialOutreachDiagnostic(originatingError) } : {}),
+          ...(fallback.kind === "BLOCKED" || fallback.kind === "RETRY"
+            ? { reason: fallback.reason }
+            : {}),
+          ...(originatingError !== undefined
+            ? { sourceError: initialOutreachDiagnostic(originatingError) }
+            : {}),
         });
       } catch {
         // Optional degradation logging must not change the fallback outcome.
       }
       if (fallback.kind === "PREPARED") {
-        return { kind: "prepared", prepared: fallback.prepared, send: fallback.send };
+        return {
+          kind: "prepared",
+          prepared: fallback.prepared,
+          send: fallback.send,
+        };
       }
       if (fallback.kind === "RETRY") {
         throw new Error(`INITIAL_FALLBACK_${fallback.reason}`);
@@ -281,45 +441,69 @@ export class AutomatedRecoveryTemplateService {
         outreachAttemptId: input.outreachAttemptId,
         trigger,
         reason: fallback.reason,
-        ...(originatingError !== undefined ? { sourceError: initialOutreachDiagnostic(originatingError) } : {}),
+        ...(originatingError !== undefined
+          ? { sourceError: initialOutreachDiagnostic(originatingError) }
+          : {}),
       });
       return unavailable(`INITIAL_FALLBACK_${fallback.reason}`);
     };
-    const failureTrigger = (failure: Extract<
-      Awaited<ReturnType<InitialOutreachOfferSelectionService["resolve"]>>["result"], { kind: "FAILURE" }
-    >): InitialFallbackTrigger | null => {
+    const failureTrigger = (
+      failure: Extract<
+        Awaited<
+          ReturnType<InitialOutreachOfferSelectionService["resolve"]>
+        >["result"],
+        { kind: "FAILURE" }
+      >,
+    ): InitialFallbackTrigger | null => {
       if (!failure.retryable) return null;
-      if (failure.code === "UNAVAILABLE" && failure.reasonCode === "MCP_UNAVAILABLE") {
+      if (
+        failure.code === "UNAVAILABLE" &&
+        failure.reasonCode === "MCP_UNAVAILABLE"
+      ) {
         return "MCP_UNAVAILABLE";
       }
-      if (failure.code === "UNAVAILABLE" && failure.reasonCode === "AI_UNAVAILABLE") {
+      if (
+        failure.code === "UNAVAILABLE" &&
+        failure.reasonCode === "AI_UNAVAILABLE"
+      ) {
         return "AI_UNAVAILABLE";
       }
-      if (failure.code === "DEADLINE" && failure.reasonCode === "OUTREACH_DEADLINE") {
+      if (
+        failure.code === "DEADLINE" &&
+        failure.reasonCode === "OUTREACH_DEADLINE"
+      ) {
         return "AI_UNAVAILABLE";
       }
-      if (failure.code === "BUDGET_EXHAUSTED" && failure.reasonCode === "MODEL_STEP_BUDGET_EXHAUSTED") {
+      if (
+        failure.code === "BUDGET_EXHAUSTED" &&
+        failure.reasonCode === "MODEL_STEP_BUDGET_EXHAUSTED"
+      ) {
         return "AI_UNAVAILABLE";
       }
-      if (failure.code === "UNAVAILABLE" && [
-        "OFFER_DISCOVERY_INCOMPLETE",
-        "CURRENT_SOURCE_READ_DEADLINE",
-        "SOURCE_FENCE_F1_CATALOGUE_UNAVAILABLE",
-        "SOURCE_FENCE_F1_READ_DEADLINE_EXCEEDED",
-        "SOURCE_FENCE_F1_READ_FAILED",
-        "SOURCE_FENCE_F1_SOURCE_DATA_INVALID",
-        "SOURCE_FENCE_F1_SOURCE_ROW_UNAVAILABLE",
-        "SOURCE_FENCE_F1_SOURCE_TOO_LARGE",
-        "SOURCE_FENCE_F2_CHANGED",
-      ].includes(failure.reasonCode)) {
+      if (
+        failure.code === "UNAVAILABLE" &&
+        [
+          "OFFER_DISCOVERY_INCOMPLETE",
+          "CURRENT_SOURCE_READ_DEADLINE",
+          "SOURCE_FENCE_F1_CATALOGUE_UNAVAILABLE",
+          "SOURCE_FENCE_F1_READ_DEADLINE_EXCEEDED",
+          "SOURCE_FENCE_F1_READ_FAILED",
+          "SOURCE_FENCE_F1_SOURCE_DATA_INVALID",
+          "SOURCE_FENCE_F1_SOURCE_ROW_UNAVAILABLE",
+          "SOURCE_FENCE_F1_SOURCE_TOO_LARGE",
+          "SOURCE_FENCE_F2_CHANGED",
+        ].includes(failure.reasonCode)
+      ) {
         return "DISCOUNT_REVALIDATION_UNAVAILABLE";
       }
       return null;
     };
     const noOfferTrigger = (reason: string): InitialFallbackTrigger => {
       if (/PRICE/.test(reason)) return "PRICE_UNVERIFIABLE";
-      if (/ALTERNATIVE_PRODUCT|PROMOTION_PRODUCT/.test(reason)) return "ALTERNATIVE_PRODUCT_UNVERIFIABLE";
-      if (/MCP|SOURCE_FENCE|CURRENT_SOURCE/.test(reason)) return "DISCOUNT_REVALIDATION_UNAVAILABLE";
+      if (/ALTERNATIVE_PRODUCT|PROMOTION_PRODUCT/.test(reason))
+        return "ALTERNATIVE_PRODUCT_UNVERIFIABLE";
+      if (/MCP|SOURCE_FENCE|CURRENT_SOURCE/.test(reason))
+        return "DISCOUNT_REVALIDATION_UNAVAILABLE";
       if (/AI|MODEL/.test(reason)) return "AI_UNAVAILABLE";
       return "NO_VERIFIED_PROMOTION";
     };
@@ -327,86 +511,143 @@ export class AutomatedRecoveryTemplateService {
       const recovery = await this.database.checkoutRecovery.findUnique({
         where: { id: input.recoveryId },
         select: {
-          id: true, shopId: true, generation: true, currency: true,
-          status: true, checkoutUrl: true, lineItems: true,
-          lastExternalActivityAt: true, expiredAt: true,
+          id: true,
+          shopId: true,
+          generation: true,
+          currency: true,
+          status: true,
+          checkoutUrl: true,
+          lineItems: true,
+          lastExternalActivityAt: true,
+          expiredAt: true,
           customer: { select: { firstName: true } },
-          shop: { select: { id: true, domain: true, status: true, defaultLanguageTag: true } },
+          shop: {
+            select: {
+              id: true,
+              domain: true,
+              status: true,
+              defaultLanguageTag: true,
+            },
+          },
           conversation: { select: { id: true } },
           outreachAttempts: { select: recoveryOutreachIdentitySelect },
         },
       });
-      if (!recovery || recovery.shopId !== input.shopId || recovery.shop.id !== input.shopId ||
-          recovery.shop.status !== "ACTIVE" ||
-          !["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(recovery.status)) {
+      if (
+        !recovery ||
+        recovery.shopId !== input.shopId ||
+        recovery.shop.id !== input.shopId ||
+        recovery.shop.status !== "ACTIVE" ||
+        !["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(recovery.status)
+      ) {
         return unavailable("RECOVERY_UNAVAILABLE");
       }
       const now = this.clock();
-      if (!(recovery.lastExternalActivityAt instanceof Date) ||
-          !Number.isSafeInteger(recovery.lastExternalActivityAt.getTime()) ||
-          (recovery.expiredAt !== null && (!(recovery.expiredAt instanceof Date) ||
-            !Number.isSafeInteger(recovery.expiredAt.getTime()) || recovery.expiredAt <= now))) {
+      if (
+        !(recovery.lastExternalActivityAt instanceof Date) ||
+        !Number.isSafeInteger(recovery.lastExternalActivityAt.getTime()) ||
+        (recovery.expiredAt !== null &&
+          (!(recovery.expiredAt instanceof Date) ||
+            !Number.isSafeInteger(recovery.expiredAt.getTime()) ||
+            recovery.expiredAt <= now))
+      ) {
         return unavailable("RECOVERY_UNAVAILABLE");
       }
       let checkoutRecoveryLifetimeDays: number | null = null;
       if (recovery.checkoutUrl) {
         checkoutRecoveryLifetimeDays = await this.lifetimeReader.read();
-        if (!isCheckoutRecoveryWithinLifetime({
-          lastExternalActivityAt: recovery.lastExternalActivityAt,
-          now,
-          checkoutRecoveryLifetimeDays,
-        })) return unavailable("CHECKOUT_UNAVAILABLE");
+        if (
+          !isCheckoutRecoveryWithinLifetime({
+            lastExternalActivityAt: recovery.lastExternalActivityAt,
+            now,
+            checkoutRecoveryLifetimeDays,
+          })
+        )
+          return unavailable("CHECKOUT_UNAVAILABLE");
       }
       let prior: PreviouslyPromisedOffer | undefined;
       let priorOfferSet: unknown;
       if (input.stage === "FOLLOW_UP") {
         const selection = selectEffectiveOutreachAttempt({
-          recoveryId: recovery.id, conversationId: recovery.conversation?.id ?? null,
-          slot: "INITIAL", attempts: recovery.outreachAttempts,
+          recoveryId: recovery.id,
+          conversationId: recovery.conversation?.id ?? null,
+          slot: "INITIAL",
+          attempts: recovery.outreachAttempts,
         });
         if (selection.kind === "conflict") {
           this.log.warn("recovery_template.outreach_identity_conflict", {
-            shopId: input.shopId, recoveryId: recovery.id, reason: selection.reason,
+            shopId: input.shopId,
+            recoveryId: recovery.id,
+            reason: selection.reason,
           });
         }
-        if (selection.kind !== "selected") return unavailable("INITIAL_PROMISE_UNAVAILABLE");
+        if (selection.kind !== "selected")
+          return unavailable("INITIAL_PROMISE_UNAVAILABLE");
         const initial = selection.current;
         // Preserve existing SENT compatibility for the original path. A retry
         // must have positive delivery evidence before its promise is reused.
-        if (!initial.sentAt || !initial.outboundMessageId ||
-            (selection.retryCount > 0 && !hasConfirmedOutreachDelivery(initial, recovery.conversation?.id ?? null))) {
+        if (
+          !initial.sentAt ||
+          !initial.outboundMessageId ||
+          (selection.retryCount > 0 &&
+            !hasConfirmedOutreachDelivery(
+              initial,
+              recovery.conversation?.id ?? null,
+            ))
+        ) {
           return unavailable("INITIAL_PROMISE_UNAVAILABLE");
         }
         const message = await this.database.conversationMessage.findUnique({
           where: { id: initial.outboundMessageId },
-          select: { content: true, status: true, providerMessageId: true, direction: true, senderType: true },
+          select: {
+            content: true,
+            status: true,
+            providerMessageId: true,
+            direction: true,
+            senderType: true,
+          },
         });
-        if (!message || !["SENT", "DELIVERED", "READ"].includes(message.status) ||
-            (selection.retryCount > 0 && !["DELIVERED", "READ"].includes(message.status)) ||
-            !message.providerMessageId || message.direction !== "OUTBOUND" ||
-            message.senderType !== "AUTOMATION") return unavailable("INITIAL_PROMISE_UNAVAILABLE");
+        if (
+          !message ||
+          !["SENT", "DELIVERED", "READ"].includes(message.status) ||
+          (selection.retryCount > 0 &&
+            !["DELIVERED", "READ"].includes(message.status)) ||
+          !message.providerMessageId ||
+          message.direction !== "OUTBOUND" ||
+          message.senderType !== "AUTOMATION"
+        )
+          return unavailable("INITIAL_PROMISE_UNAVAILABLE");
         const parsed = previousPromise(message.content);
         if (!parsed) return unavailable("INITIAL_PROMISE_UNAVAILABLE");
         prior = parsed;
         const receipt = JSON.parse(message.content);
-        if (receipt.recoveryPromise?.kind === "CHECKOUT_DISCOUNT") priorOfferSet = receipt.recoveryPromise.offerSet;
+        if (receipt.recoveryPromise?.kind === "CHECKOUT_DISCOUNT")
+          priorOfferSet = receipt.recoveryPromise.offerSet;
         if (prior.kind !== "NO_OFFER" && prior.promotionTarget === undefined) {
           return unavailable("PREVIOUS_OFFER_UNKNOWN");
         }
       }
-      let offerPresentation: RecoveryTemplatePreparationInput["offerPresentation"] = "NO_OFFER";
+      let offerPresentation: RecoveryTemplatePreparationInput["offerPresentation"] =
+        "NO_OFFER";
       const promotionTarget: RecoveryPromotionTarget = "CHECKOUT";
       let verifiedOffer: TrustedOffer | undefined;
-      let productImageIdentity: { productId: string; variantId: string | null } | null = null;
+      let productImageIdentity: {
+        productId: string;
+        variantId: string | null;
+      } | null = null;
       let recoveryPromise: RecoveryOfferPromise = { kind: "NO_OFFER" };
       let admissionToken: CurrentOutreachOfferAdmissionToken | undefined;
       let outreachEvaluation: RecoveryTemplatePreparationInput["outreachEvaluation"];
       if (input.stage === "INITIAL") {
-        if (!input.outreachAttemptId) return unavailable("OUTREACH_ATTEMPT_UNAVAILABLE");
-        let selected: Awaited<ReturnType<InitialOutreachOfferSelectionService["resolve"]>>;
+        if (!input.outreachAttemptId)
+          return unavailable("OUTREACH_ATTEMPT_UNAVAILABLE");
+        let selected: Awaited<
+          ReturnType<InitialOutreachOfferSelectionService["resolve"]>
+        >;
         try {
           selected = await this.initialOffers.resolve({
-            shopId: input.shopId, checkoutRecoveryId: input.recoveryId,
+            shopId: input.shopId,
+            checkoutRecoveryId: input.recoveryId,
             outreachAttemptId: input.outreachAttemptId,
           });
         } catch (error) {
@@ -421,140 +662,260 @@ export class AutomatedRecoveryTemplateService {
           if (trigger) return await prepareFallback(trigger);
           return unavailable(result.reasonCode);
         }
-        if (result.kind === "ALTERNATIVE_PRODUCT_PROMOTION") return unavailable("OUTSIDE_CHECKOUT");
-        if (result.evaluation?.kind !== "ready") return unavailable("INITIAL_EVALUATION_MISSING");
+        if (result.kind === "ALTERNATIVE_PRODUCT_PROMOTION")
+          return unavailable("OUTSIDE_CHECKOUT");
+        if (result.evaluation?.kind !== "ready")
+          return unavailable("INITIAL_EVALUATION_MISSING");
         const evaluatedDecision = result.evaluation.offerDecision;
-        if (result.evaluation.shopId !== input.shopId || result.evaluation.runId !== input.outreachAttemptId ||
-            evaluatedDecision.kind !== result.kind ||
-            result.kind === "CHECKOUT_DISCOUNT" && canonicalJson(evaluatedDecision) !== canonicalJson({ kind: result.kind,
-              offerSet: result.offerSet, members: result.members, group: result.group, discoveryIncomplete: result.discoveryIncomplete })) {
+        if (
+          result.evaluation.shopId !== input.shopId ||
+          result.evaluation.runId !== input.outreachAttemptId ||
+          evaluatedDecision.kind !== result.kind ||
+          (result.kind === "CHECKOUT_DISCOUNT" &&
+            canonicalJson(evaluatedDecision) !==
+              canonicalJson({
+                kind: result.kind,
+                offerSet: result.offerSet,
+                members: result.members,
+                group: result.group,
+                discoveryIncomplete: result.discoveryIncomplete,
+              }))
+        ) {
           return unavailable("INITIAL_EVALUATION_MISMATCH");
         }
         outreachEvaluation = result.evaluation;
         evaluatedFallback = result.evaluation;
-        evaluatedGeneration = context.basket.generation; evaluatedBasketFingerprint = context.basket.fingerprint;
+        evaluatedGeneration = context.basket.generation;
+        evaluatedBasketFingerprint = context.basket.fingerprint;
         admissionToken = selected.admissionToken;
         const fingerprint = currentBasketFingerprint(recovery);
-        if (context.shopId !== input.shopId || context.checkoutRecoveryId !== input.recoveryId ||
-            context.outreachAttemptId !== input.outreachAttemptId || currentContext.shopId !== input.shopId ||
-            currentContext.checkoutRecoveryId !== input.recoveryId ||
-            currentContext.outreachAttemptId !== input.outreachAttemptId) {
+        if (
+          context.shopId !== input.shopId ||
+          context.checkoutRecoveryId !== input.recoveryId ||
+          context.outreachAttemptId !== input.outreachAttemptId ||
+          currentContext.shopId !== input.shopId ||
+          currentContext.checkoutRecoveryId !== input.recoveryId ||
+          currentContext.outreachAttemptId !== input.outreachAttemptId
+        ) {
           return unavailable("INITIAL_OFFER_CONTEXT_IDENTITY_MISMATCH");
         }
-        if (!fingerprint || !sameCurrentOfferContext(context, currentContext) ||
-            context.basket.generation !== recovery.generation || context.basket.fingerprint !== fingerprint) {
+        if (
+          !fingerprint ||
+          !sameCurrentOfferContext(context, currentContext) ||
+          context.basket.generation !== recovery.generation ||
+          context.basket.fingerprint !== fingerprint
+        ) {
           return unavailable("CURRENT_FACTS_CHANGED");
         }
-        if (context.mode !== input.policy.recoveryOfferMode ||
-            (context.mode === "FIXED" && canonicalJson(context.authorisedDiscountIds) !== canonicalJson(
-              input.policy.authorisedDiscountIds ?? (input.policy.fixedShopifyDiscountId ? [input.policy.fixedShopifyDiscountId] : [])))) {
+        if (
+          context.mode !== input.policy.recoveryOfferMode ||
+          (context.mode === "FIXED" &&
+            canonicalJson(context.authorisedDiscountIds) !==
+              canonicalJson(
+                input.policy.authorisedDiscountIds ??
+                  (input.policy.fixedShopifyDiscountId
+                    ? [input.policy.fixedShopifyDiscountId]
+                    : []),
+              ))
+        ) {
           return unavailable("INITIAL_OFFER_POLICY_CHANGED");
         }
         if (result.kind === "NO_VERIFIED_OFFER") {
-          if (result.discoveryIncomplete) return await prepareFallback(noOfferTrigger(result.reason));
+          if (result.discoveryIncomplete)
+            return await prepareFallback(noOfferTrigger(result.reason));
           offerPresentation = "NO_OFFER";
           recoveryPromise = { kind: "NO_OFFER" };
         } else if (result.kind === "CHECKOUT_DISCOUNT") {
-          if (result.shopId !== input.shopId || result.checkoutRecoveryId !== input.recoveryId ||
-              result.outreachAttemptId !== input.outreachAttemptId) {
+          if (
+            result.shopId !== input.shopId ||
+            result.checkoutRecoveryId !== input.recoveryId ||
+            result.outreachAttemptId !== input.outreachAttemptId
+          ) {
             return unavailable("INITIAL_OFFER_IDENTITY_MISMATCH");
           }
-          if (result.generation !== recovery.generation || result.fingerprint !== fingerprint ||
-              result.group.verdict !== "SUPPORTED" ||
-              !sameReconciledPrices(result.priceReconciliation, context.priceReconciliation) ||
-              result.group.offerIds.length !== result.offerSet.offers.length ||
-              result.members.length !== result.offerSet.offers.length) {
+          if (
+            result.generation !== recovery.generation ||
+            result.fingerprint !== fingerprint ||
+            result.group.verdict !== "SUPPORTED" ||
+            !sameReconciledPrices(
+              result.priceReconciliation,
+              context.priceReconciliation,
+            ) ||
+            result.group.offerIds.length !== result.offerSet.offers.length ||
+            result.members.length !== result.offerSet.offers.length
+          ) {
             return await prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
           }
           const ordered = result.offerSet.offers.map((offer, index) => {
             const member = result.members[index];
-            if (!member || result.group.offerIds[index] !== offer.offerId ||
-                member.offerId !== offer.offerId || member.providerDiscountId !== offer.providerDiscountId ||
-                member.method !== offer.method || member.code !== offer.code ||
-                member.eligibility.verdict !== "SUPPORTED") return null;
+            if (
+              !member ||
+              result.group.offerIds[index] !== offer.offerId ||
+              member.offerId !== offer.offerId ||
+              member.providerDiscountId !== offer.providerDiscountId ||
+              member.method !== offer.method ||
+              member.code !== offer.code ||
+              member.eligibility.verdict !== "SUPPORTED"
+            )
+              return null;
             return { offer, member };
           });
-          if (ordered.some((entry) => entry === null)) return await prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
-          const validOrdered: Array<NonNullable<(typeof ordered)[number]>> = ordered.filter(
-            (entry): entry is NonNullable<(typeof ordered)[number]> => entry !== null,
-          );
+          if (ordered.some((entry) => entry === null))
+            return await prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
+          const validOrdered: Array<NonNullable<(typeof ordered)[number]>> =
+            ordered.filter(
+              (entry): entry is NonNullable<(typeof ordered)[number]> =>
+                entry !== null,
+            );
           const groups = new Map<"CODE" | "AUTOMATIC", typeof validOrdered>();
           for (const entry of validOrdered) {
             const group = groups.get(entry.offer.method) ?? [];
             group.push(entry);
             groups.set(entry.offer.method, group);
           }
-          const sendable = [...groups.values()].sort((left, right) => right.length - left.length)[0]!;
+          const sendable = [...groups.values()].sort(
+            (left, right) => right.length - left.length,
+          )[0]!;
           const offerSet = {
             schemaVersion: result.offerSet.schemaVersion,
             offers: sendable.map(({ offer }) => offer),
           };
           const codes = sendable.map(({ offer }) => offer.code);
-          const description = sendable.map(({ member }) => member.description).join(", ");
-          if (sendable[0]!.offer.method === "CODE" && codes.some((code) => !code)) {
+          const description = sendable
+            .map(({ member }) => member.description)
+            .join(", ");
+          if (
+            sendable[0]!.offer.method === "CODE" &&
+            codes.some((code) => !code)
+          ) {
             return await prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
           }
-          offerPresentation = sendable[0]!.offer.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER";
+          offerPresentation =
+            sendable[0]!.offer.method === "CODE"
+              ? "CODE_OFFER"
+              : "AUTOMATIC_OFFER";
           verifiedOffer = {
-            shopId: input.shopId, kind: offerPresentation, verified: true,
-            verifiedAt: now, expiresAt: null,
-            ...(offerPresentation === "CODE_OFFER" ? { code: codes[0]!, codes: codes as string[] } : {}),
+            shopId: input.shopId,
+            kind: offerPresentation,
+            verified: true,
+            verifiedAt: now,
+            expiresAt: null,
+            ...(offerPresentation === "CODE_OFFER"
+              ? { code: codes[0]!, codes: codes as string[] }
+              : {}),
             description,
           };
-          recoveryPromise = { kind: "CHECKOUT_DISCOUNT", promotionTarget: "CHECKOUT", offerSet };
+          recoveryPromise = {
+            kind: "CHECKOUT_DISCOUNT",
+            promotionTarget: "CHECKOUT",
+            offerSet,
+          };
         }
       } else if (priorOfferSet && input.outreachAttemptId) {
-        const current = await this.followUpOffers.verify({ shopId: input.shopId,
-          checkoutRecoveryId: input.recoveryId, outreachAttemptId: input.outreachAttemptId,
-          offerSet: priorOfferSet });
-        if (!current || !prior || prior.kind === "NO_OFFER") return unavailable("PREVIOUS_OFFER_UNVERIFIED");
+        const current = await this.followUpOffers.verify({
+          shopId: input.shopId,
+          checkoutRecoveryId: input.recoveryId,
+          outreachAttemptId: input.outreachAttemptId,
+          offerSet: priorOfferSet,
+        });
+        if (!current || !prior || prior.kind === "NO_OFFER")
+          return unavailable("PREVIOUS_OFFER_UNVERIFIED");
         const member = current.member;
-        offerPresentation = member.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER";
-        if (offerPresentation !== prior.kind || member.providerDiscountId !== prior.providerDiscountId ||
-            member.method === "CODE" && member.code !== prior.code) return unavailable("FOLLOW_UP_OFFER_CHANGED");
+        offerPresentation =
+          member.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER";
+        if (
+          offerPresentation !== prior.kind ||
+          member.providerDiscountId !== prior.providerDiscountId ||
+          (member.method === "CODE" && member.code !== prior.code)
+        )
+          return unavailable("FOLLOW_UP_OFFER_CHANGED");
         admissionToken = current.admissionToken;
-        if (offerPresentation === "CODE_OFFER" && !member.code) return unavailable("PREVIOUS_OFFER_UNVERIFIED");
-        recoveryPromise = offerPresentation === "CODE_OFFER"
-          ? { kind: "CODE_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: member.providerDiscountId, code: member.code! }
-          : { kind: "AUTOMATIC_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: member.providerDiscountId };
-        verifiedOffer = { shopId: input.shopId, kind: offerPresentation, verified: true,
-          verifiedAt: now, expiresAt: new Date(now.getTime() + 30_000),
-          ...(member.code ? { code: member.code } : {}), description: member.description };
+        if (offerPresentation === "CODE_OFFER" && !member.code)
+          return unavailable("PREVIOUS_OFFER_UNVERIFIED");
+        recoveryPromise =
+          offerPresentation === "CODE_OFFER"
+            ? {
+                kind: "CODE_OFFER",
+                promotionTarget: "CHECKOUT",
+                providerDiscountId: member.providerDiscountId,
+                code: member.code!,
+              }
+            : {
+                kind: "AUTOMATIC_OFFER",
+                promotionTarget: "CHECKOUT",
+                providerDiscountId: member.providerDiscountId,
+              };
+        verifiedOffer = {
+          shopId: input.shopId,
+          kind: offerPresentation,
+          verified: true,
+          verifiedAt: now,
+          expiresAt: new Date(now.getTime() + 30_000),
+          ...(member.code ? { code: member.code } : {}),
+          description: member.description,
+        };
       } else {
         const offerInput: ResolveRecoveryOfferInput = {
-          shopId: input.shopId, checkoutRecoveryId: input.recoveryId,
-          stage: input.stage, policy: input.policy, now,
+          shopId: input.shopId,
+          checkoutRecoveryId: input.recoveryId,
+          stage: input.stage,
+          policy: input.policy,
+          now,
           ...(prior ? { previouslyPromisedOffer: prior } : {}),
         };
         const offer = await this.offers.resolve(offerInput);
         if (offer.kind === "NO_OFFER") {
-          if (["INVALID_CONTEXT", "RECOVERY_UNAVAILABLE", "STALE_CHECKOUT", "PREVIOUS_OFFER_UNKNOWN"].includes(offer.reason)) {
+          if (
+            [
+              "INVALID_CONTEXT",
+              "RECOVERY_UNAVAILABLE",
+              "STALE_CHECKOUT",
+              "PREVIOUS_OFFER_UNKNOWN",
+            ].includes(offer.reason)
+          ) {
             return unavailable(offer.reason);
           }
-          if (prior && prior.kind !== "NO_OFFER") return unavailable("PREVIOUS_OFFER_UNVERIFIED");
+          if (prior && prior.kind !== "NO_OFFER")
+            return unavailable("PREVIOUS_OFFER_UNVERIFIED");
           if (offer.reason === "PROVIDER_VERIFICATION_UNAVAILABLE") {
             this.log.warn("recovery_offer.capability_gap", {
-              shopId: input.shopId, recoveryId: input.recoveryId, stage: input.stage,
+              shopId: input.shopId,
+              recoveryId: input.recoveryId,
+              stage: input.stage,
               reason: "CHECKOUT_RULE_READER_UNAVAILABLE",
             });
           }
         }
-        if (offer.kind !== "NO_OFFER" && prior && prior.kind !== "NO_OFFER" &&
-          prior.promotionTarget === "ALTERNATIVE_PRODUCT") {
+        if (
+          offer.kind !== "NO_OFFER" &&
+          prior &&
+          prior.kind !== "NO_OFFER" &&
+          prior.promotionTarget === "ALTERNATIVE_PRODUCT"
+        ) {
           return unavailable("FOLLOW_UP_OFFER_CHANGED");
         }
-        if (offer.kind !== "NO_OFFER" &&
-            (!prior || prior.kind !== offer.kind || prior.providerDiscountId !== offer.providerDiscountId ||
-             (offer.kind === "CODE_OFFER" && prior.code !== offer.parameters.code))) {
+        if (
+          offer.kind !== "NO_OFFER" &&
+          (!prior ||
+            prior.kind !== offer.kind ||
+            prior.providerDiscountId !== offer.providerDiscountId ||
+            (offer.kind === "CODE_OFFER" &&
+              prior.code !== offer.parameters.code))
+        ) {
           return unavailable("FOLLOW_UP_OFFER_CHANGED");
         }
         offerPresentation = offer.kind;
         recoveryPromise = promiseFor(offer);
         if (offer.kind !== "NO_OFFER") {
           verifiedOffer = {
-            shopId: input.shopId, kind: offer.kind, verified: true,
-            verifiedAt: offer.evidence.evaluatedAt, expiresAt: offer.evidence.expiresAt,
-            ...(offer.kind === "CODE_OFFER" ? { code: offer.parameters.code } : {}),
+            shopId: input.shopId,
+            kind: offer.kind,
+            verified: true,
+            verifiedAt: offer.evidence.evaluatedAt,
+            expiresAt: offer.evidence.expiresAt,
+            ...(offer.kind === "CODE_OFFER"
+              ? { code: offer.parameters.code }
+              : {}),
             description: offer.description,
           };
         }
@@ -562,59 +923,84 @@ export class AutomatedRecoveryTemplateService {
       if (input.stage === "INITIAL" && promotionTarget === "CHECKOUT") {
         productImageIdentity = checkoutImageProduct(recovery.lineItems);
       }
-      const productImage: OutreachProductImageRequest | null = input.stage === "INITIAL" &&
-        input.outreachAttemptId && productImageIdentity ? {
-          shopId: input.shopId,
-          checkoutRecoveryId: input.recoveryId,
-          outreachAttemptId: input.outreachAttemptId,
-          generation: recovery.generation,
-          productId: productImageIdentity.productId,
-          variantId: productImageIdentity.variantId,
-        } : null;
+      const productImage: OutreachProductImageRequest | null =
+        input.stage === "INITIAL" &&
+        input.outreachAttemptId &&
+        productImageIdentity
+          ? {
+              shopId: input.shopId,
+              checkoutRecoveryId: input.recoveryId,
+              outreachAttemptId: input.outreachAttemptId,
+              generation: recovery.generation,
+              productId: productImageIdentity.productId,
+              variantId: productImageIdentity.variantId,
+            }
+          : null;
       const prep: RecoveryTemplatePreparationInput = {
         ...(outreachEvaluation ? { outreachEvaluation } : {}),
         shopId: input.shopId,
         senderWabaId: await this.senderWaba(),
         stage: input.stage,
-        ...(input.requestedTemplate ? { selection: { kind: "EXACT" as const,
-          templateName: input.requestedTemplate.templateName, languageCode: input.requestedTemplate.languageCode } } : {}),
+        ...(input.requestedTemplate
+          ? {
+              selection: {
+                kind: "EXACT" as const,
+                templateName: input.requestedTemplate.templateName,
+                languageCode: input.requestedTemplate.languageCode,
+              },
+            }
+          : {}),
         offerPresentation,
         promotionTarget,
-        conversationLanguageTag: input.stage === "INITIAL" ? null : input.conversationLanguageTag,
+        conversationLanguageTag:
+          input.stage === "INITIAL" ? null : input.conversationLanguageTag,
         merchantLanguageTag: recovery.shop.defaultLanguageTag,
-        customerFirstName: input.customerFirstName ?? recovery.customer?.firstName ?? null,
+        customerFirstName:
+          input.customerFirstName ?? recovery.customer?.firstName ?? null,
         shopName: { shopId: input.shopId, value: recovery.shop.domain },
         checkoutItems: { shopId: input.shopId, lineItems: recovery.lineItems },
-        checkout: recovery.checkoutUrl ? {
-          shopId: input.shopId, url: recovery.checkoutUrl,
-          lastExternalActivityAt: recovery.lastExternalActivityAt,
-          checkoutRecoveryLifetimeDays: checkoutRecoveryLifetimeDays!,
-          expiresAt: recovery.expiredAt,
-          approvedHosts: authorisedHosts(recovery.shop.domain),
-        } : null,
+        checkout: recovery.checkoutUrl
+          ? {
+              shopId: input.shopId,
+              url: recovery.checkoutUrl,
+              lastExternalActivityAt: recovery.lastExternalActivityAt,
+              checkoutRecoveryLifetimeDays: checkoutRecoveryLifetimeDays!,
+              expiresAt: recovery.expiredAt,
+              approvedHosts: authorisedHosts(recovery.shop.domain),
+            }
+          : null,
         ...(verifiedOffer ? { verifiedOffer } : {}),
         productImage,
       };
       const prepared = await this.preparer.prepare(prep);
       if (prepared.outcome !== "prepared") {
-
         return unavailable(prepared.reason);
       }
-      return { kind: "prepared", prepared, send: templateSendFields(prepared, recoveryPromise, promotionTarget),
-        ...(admissionToken ? { admissionToken } : {}) };
+      return {
+        kind: "prepared",
+        prepared,
+        send: templateSendFields(prepared, recoveryPromise, promotionTarget),
+        ...(admissionToken ? { admissionToken } : {}),
+      };
     } catch (error) {
       this.log.error("recovery_template.integration.failed", {
-        shopId: input.shopId, recoveryId: input.recoveryId,
-        stage: input.stage, errorType: boundedFailure(error),
+        shopId: input.shopId,
+        recoveryId: input.recoveryId,
+        stage: input.stage,
+        errorType: boundedFailure(error),
         sourceError: initialOutreachDiagnostic(error),
       });
       throw error;
     }
   }
 
-  validateAdmission(token: CurrentOutreachOfferAdmissionToken, signal: AbortSignal): Promise<boolean> {
+  validateAdmission(
+    token: CurrentOutreachOfferAdmissionToken,
+    signal: AbortSignal,
+  ): Promise<boolean> {
     return this.admissionValidator.validateAdmission(token, signal);
   }
 }
 
-export const automatedRecoveryTemplateService = new AutomatedRecoveryTemplateService();
+export const automatedRecoveryTemplateService =
+  new AutomatedRecoveryTemplateService();

@@ -62,6 +62,9 @@ export function providerSummary(event: NormalizedWhatsAppStatus): string {
 }
 
 export function isRetryableConflict(error: unknown): boolean {
-  return error instanceof ProviderStatusConcurrencyConflict ||
-    (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034");
+  return (
+    error instanceof ProviderStatusConcurrencyConflict ||
+    (error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2034")
+  );
 }

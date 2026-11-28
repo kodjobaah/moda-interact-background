@@ -12,7 +12,8 @@ const runtimeConfig = { current: () => backgroundRuntimeConfig() };
 
 function createDatabase() {
   return {
-    $queryRaw: vi.fn()
+    $queryRaw: vi
+      .fn()
       .mockResolvedValueOnce([{ id: "translation-1" }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]),
@@ -51,14 +52,20 @@ describe("TranslationReconciliationService", () => {
       translationReconciliationPageSize: 7,
       translationClaimTimeoutSeconds: 90,
     } as any;
-    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
+    const service = new TranslationReconciliationService({
+      queue,
+      database,
+      runtimeConfig,
+    });
 
     await service.reconcile(undefined, snapshot);
 
     expect(database.$queryRaw.mock.calls[0]?.[0].values).toContain(7);
     const claimQuery = database.$queryRaw.mock.calls[5]?.[0];
     expect(claimQuery.values).toContain(7);
-    expect(claimQuery.values.some((value: unknown) => value instanceof Date)).toBe(true);
+    expect(
+      claimQuery.values.some((value: unknown) => value instanceof Date),
+    ).toBe(true);
   });
 
   it("reuses a healthy deterministic dispatch job", async () => {
@@ -92,7 +99,9 @@ describe("TranslationReconciliationService", () => {
       expect(queue.remove).toHaveBeenCalledOnce();
       expect(queue.add).toHaveBeenCalledOnce();
       expect(queue.add.mock.calls[0]?.[2]).toEqual(
-        expect.objectContaining({ jobId: expect.stringContaining("translation-dispatch-") }),
+        expect.objectContaining({
+          jobId: expect.stringContaining("translation-dispatch-"),
+        }),
       );
     },
   );
@@ -104,18 +113,20 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{
-      id: "batch-1",
-      status: "SUBMISSION_UNKNOWN",
-      pollSequence: 1,
-      provider: "openai",
-      model: "gpt-test",
-      inputFileId: "input-1",
-      providerBatchId: null,
-      submissionStartedAt: new Date("2026-09-06T18:00:00Z"),
-      outputFileId: null,
-      errorFileId: null,
-      }]);
+      .mockResolvedValueOnce([
+        {
+          id: "batch-1",
+          status: "SUBMISSION_UNKNOWN",
+          pollSequence: 1,
+          provider: "openai",
+          model: "gpt-test",
+          inputFileId: "input-1",
+          providerBatchId: null,
+          submissionStartedAt: new Date("2026-09-06T18:00:00Z"),
+          outputFileId: null,
+          errorFileId: null,
+        },
+      ]);
     const queue = createQueue(undefined);
     const provider = {
       findBatchByCorrelation: vi.fn().mockResolvedValue({
@@ -137,25 +148,32 @@ describe("TranslationReconciliationService", () => {
     const service = new TranslationReconciliationService({
       queue,
       database,
-      providerFactory: () => provider, credentialReader: async () => "test-only-commerce-credential",
+      providerFactory: () => provider,
+      credentialReader: async () => "test-only-commerce-credential",
       runtimeConfig,
     });
 
     const result = await service.reconcile();
 
     expect(result.repairedJobs).toBe(1);
-    expect(provider.findBatchByCorrelation).toHaveBeenCalledWith(expect.objectContaining({
-      logicalBatchId: "batch-1",
-      inputFileId: "input-1",
-    }));
+    expect(provider.findBatchByCorrelation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        logicalBatchId: "batch-1",
+        inputFileId: "input-1",
+      }),
+    );
     expect(database.$executeRaw).toHaveBeenCalledOnce();
     const update = database.$executeRaw.mock.calls[0]?.[0];
-    expect(update.sql).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(update.sql).toContain(
+      'AS "support"."MerchantTranslationBatchStatus"',
+    );
     expect(update.values).toContain("PROVIDER_COMPLETED");
     expect(queue.add).toHaveBeenCalledWith(
       "translation-batch-results",
       expect.objectContaining({ translationBatchId: "batch-1" }),
-      expect.objectContaining({ jobId: expect.stringContaining("translation-batch-results-") }),
+      expect.objectContaining({
+        jobId: expect.stringContaining("translation-batch-results-"),
+      }),
     );
   });
 
@@ -166,18 +184,20 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{
-      id: "batch-terminal",
-      status: "SUBMISSION_UNKNOWN",
-      pollSequence: 2,
-      provider: "openai",
-      model: "gpt-test",
-      inputFileId: null,
-      providerBatchId: null,
-      submissionStartedAt: null,
-      outputFileId: null,
-      errorFileId: null,
-      }]);
+      .mockResolvedValueOnce([
+        {
+          id: "batch-terminal",
+          status: "SUBMISSION_UNKNOWN",
+          pollSequence: 2,
+          provider: "openai",
+          model: "gpt-test",
+          inputFileId: null,
+          providerBatchId: null,
+          submissionStartedAt: null,
+          outputFileId: null,
+          errorFileId: null,
+        },
+      ]);
     database.$executeRaw.mockResolvedValueOnce(1);
     const queue = createQueue(undefined);
     const provider = {
@@ -197,11 +217,20 @@ describe("TranslationReconciliationService", () => {
         },
       }),
     };
-    const service = new TranslationReconciliationService({ queue, database, providerFactory: () => provider, credentialReader: async () => "test-only-commerce-credential", runtimeConfig });
+    const service = new TranslationReconciliationService({
+      queue,
+      database,
+      providerFactory: () => provider,
+      credentialReader: async () => "test-only-commerce-credential",
+      runtimeConfig,
+    });
     await service.reconcile();
     expect(queue.add).toHaveBeenCalledWith(
       "translation-batch-poll",
-      expect.objectContaining({ translationBatchId: "batch-terminal", pollSequence: 2 }),
+      expect.objectContaining({
+        translationBatchId: "batch-terminal",
+        pollSequence: 2,
+      }),
       expect.anything(),
     );
 
@@ -211,16 +240,27 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{
-      id: "batch-stale", status: "SUBMISSION_UNKNOWN", pollSequence: 1, provider: "openai", model: "gpt-test",
-      inputFileId: null, providerBatchId: null, submissionStartedAt: null, outputFileId: null, errorFileId: null,
-      }]);
+      .mockResolvedValueOnce([
+        {
+          id: "batch-stale",
+          status: "SUBMISSION_UNKNOWN",
+          pollSequence: 1,
+          provider: "openai",
+          model: "gpt-test",
+          inputFileId: null,
+          providerBatchId: null,
+          submissionStartedAt: null,
+          outputFileId: null,
+          errorFileId: null,
+        },
+      ]);
     lostCasDatabase.$executeRaw.mockResolvedValueOnce(0);
     const lostQueue = createQueue(undefined);
     const lostService = new TranslationReconciliationService({
       queue: lostQueue,
       database: lostCasDatabase,
-      providerFactory: () => provider, credentialReader: async () => "test-only-commerce-credential",
+      providerFactory: () => provider,
+      credentialReader: async () => "test-only-commerce-credential",
       runtimeConfig,
     });
     await lostService.reconcile();
@@ -229,17 +269,24 @@ describe("TranslationReconciliationService", () => {
 
   it("scans each batch state independently so unknown work cannot starve repair", async () => {
     const database = {
-      $queryRaw: vi.fn()
+      $queryRaw: vi
+        .fn()
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ id: "ready-1" }])
-        .mockResolvedValueOnce([{ id: "poll-1", status: "SUBMITTED", pollSequence: 3 }])
+        .mockResolvedValueOnce([
+          { id: "poll-1", status: "SUBMITTED", pollSequence: 3 },
+        ])
         .mockResolvedValueOnce([{ id: "completed-1" }])
         .mockResolvedValueOnce([]),
       $executeRaw: vi.fn().mockResolvedValue(1),
       $transaction: vi.fn(),
     };
     const queue = createQueue(undefined);
-    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
+    const service = new TranslationReconciliationService({
+      queue,
+      database,
+      runtimeConfig,
+    });
 
     const result = await service.reconcile();
 
@@ -255,11 +302,29 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ id: "request-outside-page", scope: "TRANSLATION", translationId: "failed-1" }])
-      .mockResolvedValueOnce([{ id: "failed-1", status: "FAILED", currentBatchId: null, batchStatus: null, pollSequence: null }])
+      .mockResolvedValueOnce([
+        {
+          id: "request-outside-page",
+          scope: "TRANSLATION",
+          translationId: "failed-1",
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "failed-1",
+          status: "FAILED",
+          currentBatchId: null,
+          batchStatus: null,
+          pollSequence: null,
+        },
+      ])
       .mockResolvedValueOnce([{ id: "failed-1" }]);
     const queue = createQueue(undefined);
-    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
+    const service = new TranslationReconciliationService({
+      queue,
+      database,
+      runtimeConfig,
+    });
 
     const result = await service.reconcile("request-outside-page");
 
@@ -281,20 +346,28 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ id: "request-1", scope: "FAILED_TRANSLATIONS", translationId: null }])
+      .mockResolvedValueOnce([
+        { id: "request-1", scope: "FAILED_TRANSLATIONS", translationId: null },
+      ])
       .mockResolvedValueOnce([{ id: "failed-1" }])
       .mockResolvedValueOnce([{ id: "remaining-failed" }]);
     const queue = createQueue(undefined);
-    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
+    const service = new TranslationReconciliationService({
+      queue,
+      database,
+      runtimeConfig,
+    });
 
     await service.reconcile();
 
     const remainingProbe = database.$queryRaw.mock.calls[7]?.[0];
-    expect(remainingProbe?.sql).toContain('LIMIT 1');
-    expect(remainingProbe?.sql).not.toContain('COUNT');
-    expect(database.$executeRaw).toHaveBeenCalledWith(expect.objectContaining({
-      values: expect.arrayContaining(["request-1"]),
-    }));
+    expect(remainingProbe?.sql).toContain("LIMIT 1");
+    expect(remainingProbe?.sql).not.toContain("COUNT");
+    expect(database.$executeRaw).toHaveBeenCalledWith(
+      expect.objectContaining({
+        values: expect.arrayContaining(["request-1"]),
+      }),
+    );
     expect(queue.add).toHaveBeenCalledWith(
       "translation-dispatch",
       expect.objectContaining({ translationId: "failed-1" }),
@@ -310,16 +383,22 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ id: "request-2", scope: "FAILED_TRANSLATIONS", translationId: null }])
+      .mockResolvedValueOnce([
+        { id: "request-2", scope: "FAILED_TRANSLATIONS", translationId: null },
+      ])
       .mockResolvedValueOnce([{ id: "failed-2" }])
       .mockResolvedValueOnce([]);
     const queue = createQueue(undefined);
-    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
+    const service = new TranslationReconciliationService({
+      queue,
+      database,
+      runtimeConfig,
+    });
 
     await service.reconcile();
 
     const completionUpdate = database.$executeRaw.mock.calls.at(-1)?.[0];
-    expect(completionUpdate?.sql).toContain('"status" = \'COMPLETED\'');
+    expect(completionUpdate?.sql).toContain("\"status\" = 'COMPLETED'");
   });
 
   it("returns a claimed request to PENDING when queue repair fails", async () => {
@@ -330,17 +409,33 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ id: "request-1", scope: "TRANSLATION", translationId: "failed-1" }])
-      .mockResolvedValueOnce([{ id: "failed-1", status: "FAILED", currentBatchId: null, batchStatus: null, pollSequence: null }])
+      .mockResolvedValueOnce([
+        { id: "request-1", scope: "TRANSLATION", translationId: "failed-1" },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "failed-1",
+          status: "FAILED",
+          currentBatchId: null,
+          batchStatus: null,
+          pollSequence: null,
+        },
+      ])
       .mockResolvedValueOnce([{ id: "failed-1" }]);
     const queue = createQueue(undefined);
     queue.add.mockRejectedValue(new Error("redis unavailable"));
-    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
+    const service = new TranslationReconciliationService({
+      queue,
+      database,
+      runtimeConfig,
+    });
 
     await expect(service.reconcile()).rejects.toThrow("redis unavailable");
-    expect(database.$executeRaw).toHaveBeenLastCalledWith(expect.objectContaining({
-      values: expect.arrayContaining(["request-1"]),
-    }));
+    expect(database.$executeRaw).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        values: expect.arrayContaining(["request-1"]),
+      }),
+    );
   });
 });
 
@@ -352,27 +447,55 @@ describe("ARCH-043 support translation credential revocation", () => {
     log.warn.mockClear();
     try {
       const batch = {
-        id: "revoked-translation-batch", status: "SUBMISSION_UNKNOWN", pollSequence: 1,
-        provider: "openai", model: "persisted-gpt-model", inputFileId: "input-file",
-        providerBatchId: null, submissionStartedAt: null, outputFileId: null, errorFileId: null,
+        id: "revoked-translation-batch",
+        status: "SUBMISSION_UNKNOWN",
+        pollSequence: 1,
+        provider: "openai",
+        model: "persisted-gpt-model",
+        inputFileId: "input-file",
+        providerBatchId: null,
+        submissionStartedAt: null,
+        outputFileId: null,
+        errorFileId: null,
       };
       const database = emptyScanDatabase();
-      database.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([])
-        .mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([batch]);
+      database.$queryRaw
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([batch]);
       const factory = vi.fn();
-      const credentialReader = vi.fn().mockRejectedValue(new Error(`database credential revoked: ${legacySecret}`));
-      const service = new TranslationReconciliationService({ database, queue: createQueue(undefined),
-        providerFactory: factory, credentialReader, runtimeConfig });
-      await expect(service.reconcile()).rejects.toThrow("Translation provider credential is unavailable");
+      const credentialReader = vi
+        .fn()
+        .mockRejectedValue(
+          new Error(`database credential revoked: ${legacySecret}`),
+        );
+      const service = new TranslationReconciliationService({
+        database,
+        queue: createQueue(undefined),
+        providerFactory: factory,
+        credentialReader,
+        runtimeConfig,
+      });
+      await expect(service.reconcile()).rejects.toThrow(
+        "Translation provider credential is unavailable",
+      );
       expect(credentialReader).toHaveBeenCalledTimes(1);
       expect(credentialReader).toHaveBeenCalledWith("openai");
       expect(factory).not.toHaveBeenCalled();
       expect(database.$executeRaw).not.toHaveBeenCalled();
-      expect(log.warn).toHaveBeenCalledWith("background.support_translation.reconciliation_credential_unavailable", {
-        batchId: batch.id, reasonCode: "PROVIDER_CREDENTIAL_UNAVAILABLE",
-      });
+      expect(log.warn).toHaveBeenCalledWith(
+        "background.support_translation.reconciliation_credential_unavailable",
+        {
+          batchId: batch.id,
+          reasonCode: "PROVIDER_CREDENTIAL_UNAVAILABLE",
+        },
+      );
       expect(JSON.stringify(log.warn.mock.calls)).not.toContain(legacySecret);
-      expect(JSON.stringify(log.warn.mock.calls)).not.toContain("database credential revoked");
+      expect(JSON.stringify(log.warn.mock.calls)).not.toContain(
+        "database credential revoked",
+      );
     } finally {
       if (previous === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previous;
@@ -380,16 +503,40 @@ describe("ARCH-043 support translation credential revocation", () => {
   });
 
   it("passes a fresh explicit Commerce credential with the previously persisted model", async () => {
-    const batch = { id: "stored-batch", status: "SUBMISSION_UNKNOWN", pollSequence: 1,
-      provider: "openai", model: "historic-model", inputFileId: "input", providerBatchId: null,
-      submissionStartedAt: null, outputFileId: null, errorFileId: null };
+    const batch = {
+      id: "stored-batch",
+      status: "SUBMISSION_UNKNOWN",
+      pollSequence: 1,
+      provider: "openai",
+      model: "historic-model",
+      inputFileId: "input",
+      providerBatchId: null,
+      submissionStartedAt: null,
+      outputFileId: null,
+      errorFileId: null,
+    };
     const database = emptyScanDatabase();
-    database.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([batch]);
-    const factory = vi.fn(() => ({ findBatchByCorrelation: vi.fn().mockResolvedValue({ kind: "none" }) }));
-    const service = new TranslationReconciliationService({ database, queue: createQueue(undefined),
-      providerFactory: factory, credentialReader: async () => "fresh-commerce-key", runtimeConfig });
+    database.$queryRaw
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([batch]);
+    const factory = vi.fn(() => ({
+      findBatchByCorrelation: vi.fn().mockResolvedValue({ kind: "none" }),
+    }));
+    const service = new TranslationReconciliationService({
+      database,
+      queue: createQueue(undefined),
+      providerFactory: factory,
+      credentialReader: async () => "fresh-commerce-key",
+      runtimeConfig,
+    });
     await service.reconcile();
-    expect(factory).toHaveBeenCalledWith({ provider: "openai", model: "historic-model", apiKey: "fresh-commerce-key" });
+    expect(factory).toHaveBeenCalledWith({
+      provider: "openai",
+      model: "historic-model",
+      apiKey: "fresh-commerce-key",
+    });
   });
 });

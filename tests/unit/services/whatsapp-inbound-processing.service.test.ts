@@ -22,18 +22,69 @@ const h = vi.hoisted(() => ({
   createMessage: vi.fn(),
 }));
 
-vi.mock("../../../src/lib/db.js", () => ({ default: { conversationMessage: { update: h.updateMessage, findUnique: h.findMessage, create: h.createMessage } } }));
-vi.mock("../../../src/services/whatsapp-contact-opt-out.service.js", () => ({ whatsAppContactOptOutService: { handleInbound: h.optOut } }));
-vi.mock("../../../src/services/inbound-whatsapp-abuse-admission.service.js", () => ({ inboundWhatsAppAbuseAdmissionService: { admitRaw: h.abuse } }));
-vi.mock("../../../src/services/recovery-routing.service.js", () => ({ recoveryRoutingService: { resolveInboundMessage: h.route, isCurrentActiveRoute: h.current } }));
-vi.mock("../../../src/services/recovery-sender-pool/routing-runtime.js", () => ({ routingRuntime: { accept: h.routingAccept, receivingScope: h.receivingScope } }));
-vi.mock("../../../src/services/routing-guidance.service.js", () => ({ sendRoutingGuidance: h.guidance }));
-vi.mock("../../../src/services/checkout-recovery.service.js", () => ({ checkoutRecoveryService: { recordExternalActivity: h.activity } }));
-vi.mock("../../../src/services/inbound-whatsapp-audio.service.js", () => ({ inboundWhatsAppAudioService: { reserve: h.audioReserve, process: h.audioProcess } }));
-vi.mock("../../../src/services/conversation.service.js", () => ({ conversationService: { receiveMessage: h.receive, getTurnState: h.turnState } }));
-vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({ outboundWhatsAppAdmissionService: { sendText: h.sendText } }));
-vi.mock("../../../src/services/recovery-conversation/ai-turn-ownership.service.js", () => ({ AiTurnOwnershipService: class { readTurnOwnership = h.turnOwnership; } }));
-vi.mock("../../../src/services/recipient-reachability-positive.service.js", () => ({ recipientReachabilityPositiveService: { fromRoutedInbound: h.reachability } }));
+vi.mock("../../../src/lib/db.js", () => ({
+  default: {
+    conversationMessage: {
+      update: h.updateMessage,
+      findUnique: h.findMessage,
+      create: h.createMessage,
+    },
+  },
+}));
+vi.mock("../../../src/services/whatsapp-contact-opt-out.service.js", () => ({
+  whatsAppContactOptOutService: { handleInbound: h.optOut },
+}));
+vi.mock(
+  "../../../src/services/inbound-whatsapp-abuse-admission.service.js",
+  () => ({ inboundWhatsAppAbuseAdmissionService: { admitRaw: h.abuse } }),
+);
+vi.mock("../../../src/services/recovery-routing.service.js", () => ({
+  recoveryRoutingService: {
+    resolveInboundMessage: h.route,
+    isCurrentActiveRoute: h.current,
+  },
+}));
+vi.mock(
+  "../../../src/services/recovery-sender-pool/routing-runtime.js",
+  () => ({
+    routingRuntime: {
+      accept: h.routingAccept,
+      receivingScope: h.receivingScope,
+    },
+  }),
+);
+vi.mock("../../../src/services/routing-guidance.service.js", () => ({
+  sendRoutingGuidance: h.guidance,
+}));
+vi.mock("../../../src/services/checkout-recovery.service.js", () => ({
+  checkoutRecoveryService: { recordExternalActivity: h.activity },
+}));
+vi.mock("../../../src/services/inbound-whatsapp-audio.service.js", () => ({
+  inboundWhatsAppAudioService: {
+    reserve: h.audioReserve,
+    process: h.audioProcess,
+  },
+}));
+vi.mock("../../../src/services/conversation.service.js", () => ({
+  conversationService: { receiveMessage: h.receive, getTurnState: h.turnState },
+}));
+vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
+  outboundWhatsAppAdmissionService: { sendText: h.sendText },
+}));
+vi.mock(
+  "../../../src/services/recovery-conversation/ai-turn-ownership.service.js",
+  () => ({
+    AiTurnOwnershipService: class {
+      readTurnOwnership = h.turnOwnership;
+    },
+  }),
+);
+vi.mock(
+  "../../../src/services/recipient-reachability-positive.service.js",
+  () => ({
+    recipientReachabilityPositiveService: { fromRoutedInbound: h.reachability },
+  }),
+);
 
 import { processRoutedInboundMessage } from "../../../src/services/whatsapp-inbound-processing.service.js";
 import type { WhatsAppInboundEvent } from "../../../src/integration/whatsapp/types.js";
@@ -59,7 +110,13 @@ const activeRoute = {
 };
 const historicalRoute = { ...activeRoute, mode: "historical" as const };
 const logMock = {
-  debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child() { return this; },
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  child() {
+    return this;
+  },
 };
 const logger = logMock as unknown as StructuredLogger;
 
@@ -73,21 +130,37 @@ beforeEach(() => {
   h.routingAccept.mockResolvedValue({ kind: "held" });
   h.receivingScope.mockResolvedValue(null);
   h.activity.mockResolvedValue(undefined);
-  h.audioReserve.mockResolvedValue({ conversationId: activeRoute.conversationId });
+  h.audioReserve.mockResolvedValue({
+    conversationId: activeRoute.conversationId,
+  });
   h.audioProcess.mockResolvedValue({ kind: "completed" });
-  h.receive.mockResolvedValue({ conversationId: activeRoute.conversationId, version: 2, duplicate: false });
+  h.receive.mockResolvedValue({
+    conversationId: activeRoute.conversationId,
+    version: 2,
+    duplicate: false,
+  });
   h.updateMessage.mockResolvedValue(undefined);
   h.findMessage.mockResolvedValue(null);
   h.createMessage.mockResolvedValue(undefined);
   h.reachability.mockResolvedValue(undefined);
-  h.turnState.mockResolvedValue({ inboundVersion: 2, controlMode: "AI", pendingTurnStartedAt: new Date(event.occurredAt) });
+  h.turnState.mockResolvedValue({
+    inboundVersion: 2,
+    controlMode: "AI",
+    pendingTurnStartedAt: new Date(event.occurredAt),
+  });
   h.turnOwnership.mockResolvedValue({ revision: 3 });
   h.sendText.mockResolvedValue(undefined);
 });
 
 describe("processRoutedInboundMessage generation safety", () => {
   it("hands unresolved pooled input to the durable router without merchant effects", async () => {
-    const scope = { threadId: "thread", routeId: "route", canonicalRecipient: "447700900123", providerAccountId: "account", providerPhoneNumberId: "sender" };
+    const scope = {
+      threadId: "thread",
+      routeId: "route",
+      canonicalRecipient: "447700900123",
+      providerAccountId: "account",
+      providerPhoneNumberId: "sender",
+    };
     h.route.mockResolvedValue({ kind: "routing", scope });
     const enqueue = vi.fn();
     await processRoutedInboundMessage(event, {}, logger, enqueue);
@@ -98,7 +171,13 @@ describe("processRoutedInboundMessage generation safety", () => {
   });
 
   it("uses durable neutral routing for pooled guidance instead of the legacy sender", async () => {
-    const scope = { threadId: "thread", routeId: null, canonicalRecipient: "447700900123", providerAccountId: "account", providerPhoneNumberId: "sender" };
+    const scope = {
+      threadId: "thread",
+      routeId: null,
+      canonicalRecipient: "447700900123",
+      providerAccountId: "account",
+      providerPhoneNumberId: "sender",
+    };
     h.route.mockResolvedValue({ kind: "guidance", reason: "ambiguous" });
     h.receivingScope.mockResolvedValue(scope);
     const enqueue = vi.fn();
@@ -112,14 +191,16 @@ describe("processRoutedInboundMessage generation safety", () => {
     h.route.mockResolvedValue(historicalRoute);
     const enqueue = vi.fn();
     await processRoutedInboundMessage(event, {}, logger, enqueue);
-    expect(h.createMessage).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        conversationId: historicalRoute.conversationId,
-        providerMessageId: event.providerMessageId,
-        inReplyToProviderId: event.contextMessageId,
-        content: "I have a question",
+    expect(h.createMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          conversationId: historicalRoute.conversationId,
+          providerMessageId: event.providerMessageId,
+          inReplyToProviderId: event.contextMessageId,
+          content: "I have a question",
+        }),
       }),
-    }));
+    );
     expect(h.receive).not.toHaveBeenCalled();
     expect(h.activity).not.toHaveBeenCalled();
     expect(enqueue).not.toHaveBeenCalled();
@@ -129,8 +210,24 @@ describe("processRoutedInboundMessage generation safety", () => {
   it("stores a historical audio message without transcription, fallback or turn enqueue", async () => {
     h.route.mockResolvedValue(historicalRoute);
     const enqueue = vi.fn();
-    await processRoutedInboundMessage({ ...event, content: { type: "audio", mediaId: "media", mimeType: "audio/ogg", sha256: null } } as WhatsAppInboundEvent, {}, logger, enqueue);
-    expect(h.audioReserve).toHaveBeenCalledWith(expect.objectContaining({ providerMessageId: event.providerMessageId }), historicalRoute.conversationId);
+    await processRoutedInboundMessage(
+      {
+        ...event,
+        content: {
+          type: "audio",
+          mediaId: "media",
+          mimeType: "audio/ogg",
+          sha256: null,
+        },
+      } as WhatsAppInboundEvent,
+      {},
+      logger,
+      enqueue,
+    );
+    expect(h.audioReserve).toHaveBeenCalledWith(
+      expect.objectContaining({ providerMessageId: event.providerMessageId }),
+      historicalRoute.conversationId,
+    );
     expect(h.audioProcess).not.toHaveBeenCalled();
     expect(h.activity).not.toHaveBeenCalled();
     expect(h.sendText).not.toHaveBeenCalled();
@@ -140,10 +237,23 @@ describe("processRoutedInboundMessage generation safety", () => {
   it("stores historical unsupported content without scheduling automation", async () => {
     h.route.mockResolvedValue(historicalRoute);
     const enqueue = vi.fn();
-    await processRoutedInboundMessage({ ...event, content: { type: "unsupported", providerType: "sticker" } } as WhatsAppInboundEvent, {}, logger, enqueue);
-    expect(h.createMessage).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ content: "[Unsupported WhatsApp content: sticker]", contentType: "UNSUPPORTED" }),
-    }));
+    await processRoutedInboundMessage(
+      {
+        ...event,
+        content: { type: "unsupported", providerType: "sticker" },
+      } as WhatsAppInboundEvent,
+      {},
+      logger,
+      enqueue,
+    );
+    expect(h.createMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          content: "[Unsupported WhatsApp content: sticker]",
+          contentType: "UNSUPPORTED",
+        }),
+      }),
+    );
     expect(h.receive).not.toHaveBeenCalled();
     expect(h.updateMessage).not.toHaveBeenCalled();
     expect(enqueue).not.toHaveBeenCalled();
@@ -152,7 +262,10 @@ describe("processRoutedInboundMessage generation safety", () => {
 
   it("keeps a persisted historical duplicate in its original conversation without changing turn state", async () => {
     h.route.mockResolvedValue(historicalRoute);
-    h.findMessage.mockResolvedValue({ conversationId: historicalRoute.conversationId, direction: "INBOUND" });
+    h.findMessage.mockResolvedValue({
+      conversationId: historicalRoute.conversationId,
+      direction: "INBOUND",
+    });
     const enqueue = vi.fn();
     await processRoutedInboundMessage(event, {}, logger, enqueue);
     expect(h.createMessage).not.toHaveBeenCalled();
@@ -164,7 +277,10 @@ describe("processRoutedInboundMessage generation safety", () => {
   it("preserves active current-recovery activity and turn behavior", async () => {
     const enqueue = vi.fn().mockResolvedValue(undefined);
     await processRoutedInboundMessage(event, {}, logger, enqueue);
-    expect(h.activity).toHaveBeenCalledWith(activeRoute.checkoutRecoveryId, new Date(event.occurredAt));
+    expect(h.activity).toHaveBeenCalledWith(
+      activeRoute.checkoutRecoveryId,
+      new Date(event.occurredAt),
+    );
     expect(enqueue).toHaveBeenCalledWith(activeRoute.conversationId, 2);
   });
 
@@ -174,9 +290,12 @@ describe("processRoutedInboundMessage generation safety", () => {
     await processRoutedInboundMessage(event, {}, logger, enqueue);
     expect(h.receive).toHaveBeenCalledOnce();
     expect(enqueue).not.toHaveBeenCalled();
-    expect(logMock.warn).toHaveBeenCalledWith("whatsapp.inbound.turn_suppressed", expect.objectContaining({
-      reason: "RECOVERY_CLOSED_OR_SUPERSEDED",
-    }));
+    expect(logMock.warn).toHaveBeenCalledWith(
+      "whatsapp.inbound.turn_suppressed",
+      expect.objectContaining({
+        reason: "RECOVERY_CLOSED_OR_SUPERSEDED",
+      }),
+    );
   });
 
   it("downgrades an active route that was superseded before persistence", async () => {
@@ -191,9 +310,25 @@ describe("processRoutedInboundMessage generation safety", () => {
 
   it("suppresses audio fallback if its recovery closes during transcription", async () => {
     h.current.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-    h.audioProcess.mockResolvedValue({ kind: "failed", fallback: "Try text instead" });
+    h.audioProcess.mockResolvedValue({
+      kind: "failed",
+      fallback: "Try text instead",
+    });
     const enqueue = vi.fn();
-    await processRoutedInboundMessage({ ...event, content: { type: "audio", mediaId: "media", mimeType: "audio/ogg", sha256: null } } as WhatsAppInboundEvent, {}, logger, enqueue);
+    await processRoutedInboundMessage(
+      {
+        ...event,
+        content: {
+          type: "audio",
+          mediaId: "media",
+          mimeType: "audio/ogg",
+          sha256: null,
+        },
+      } as WhatsAppInboundEvent,
+      {},
+      logger,
+      enqueue,
+    );
     expect(h.sendText).not.toHaveBeenCalled();
     expect(enqueue).not.toHaveBeenCalled();
   });
@@ -208,42 +343,84 @@ describe("processRoutedInboundMessage generation safety", () => {
   });
 
   it("logs guidance as sent only after confirmed delivery and never downloads ambiguous audio", async () => {
-    h.route.mockResolvedValue({ kind: "guidance", reason: "MULTIPLE_RECOVERIES" });
+    h.route.mockResolvedValue({
+      kind: "guidance",
+      reason: "MULTIPLE_RECOVERIES",
+    });
     h.guidance.mockResolvedValue({ kind: "sent" });
-  h.routingAccept.mockResolvedValue({ kind: "held" });
-  h.receivingScope.mockResolvedValue(null);
+    h.routingAccept.mockResolvedValue({ kind: "held" });
+    h.receivingScope.mockResolvedValue(null);
     const enqueue = vi.fn();
-    await processRoutedInboundMessage({
-      ...event,
-      content: { type: "audio", mediaId: "private-media", mimeType: "audio/ogg", sha256: null },
-    } as WhatsAppInboundEvent, {}, logger, enqueue);
+    await processRoutedInboundMessage(
+      {
+        ...event,
+        content: {
+          type: "audio",
+          mediaId: "private-media",
+          mimeType: "audio/ogg",
+          sha256: null,
+        },
+      } as WhatsAppInboundEvent,
+      {},
+      logger,
+      enqueue,
+    );
     expect(h.guidance).toHaveBeenCalledOnce();
     expect(h.audioReserve).not.toHaveBeenCalled();
     expect(h.audioProcess).not.toHaveBeenCalled();
     expect(enqueue).not.toHaveBeenCalled();
-    expect(logMock.info).toHaveBeenCalledWith("whatsapp.inbound.guidance_sent", expect.objectContaining({
-      reason: "MULTIPLE_RECOVERIES", outcome: "sent",
-    }));
-    expect(logMock.debug).not.toHaveBeenCalledWith("whatsapp.inbound.guidance_sent", expect.anything());
+    expect(logMock.info).toHaveBeenCalledWith(
+      "whatsapp.inbound.guidance_sent",
+      expect.objectContaining({
+        reason: "MULTIPLE_RECOVERIES",
+        outcome: "sent",
+      }),
+    );
+    expect(logMock.debug).not.toHaveBeenCalledWith(
+      "whatsapp.inbound.guidance_sent",
+      expect.anything(),
+    );
   });
 
   it("does not report suppressed or failed guidance as sent", async () => {
-    h.route.mockResolvedValue({ kind: "guidance", reason: "INVALID_REFERENCE" });
-    h.guidance.mockResolvedValue({ kind: "failed", reason: "PROVIDER_SEND_FAILED" });
+    h.route.mockResolvedValue({
+      kind: "guidance",
+      reason: "INVALID_REFERENCE",
+    });
+    h.guidance.mockResolvedValue({
+      kind: "failed",
+      reason: "PROVIDER_SEND_FAILED",
+    });
     await processRoutedInboundMessage(event, {}, logger, vi.fn());
-    expect(logMock.info).not.toHaveBeenCalledWith("whatsapp.inbound.guidance_sent", expect.anything());
-    expect(logMock.warn).toHaveBeenCalledWith("whatsapp.inbound.guidance_not_sent", expect.objectContaining({
-      outcome: "failed", outcomeReason: "PROVIDER_SEND_FAILED",
-    }));
+    expect(logMock.info).not.toHaveBeenCalledWith(
+      "whatsapp.inbound.guidance_sent",
+      expect.anything(),
+    );
+    expect(logMock.warn).toHaveBeenCalledWith(
+      "whatsapp.inbound.guidance_not_sent",
+      expect.objectContaining({
+        outcome: "failed",
+        outcomeReason: "PROVIDER_SEND_FAILED",
+      }),
+    );
   });
 
   it("logs unexpected failures with a hashed message identity and rethrows", async () => {
     const failure = new Error("routing unavailable");
     h.route.mockRejectedValue(failure);
-    await expect(processRoutedInboundMessage(event, {}, logger, vi.fn())).rejects.toBe(failure);
-    expect(logMock.error).toHaveBeenCalledWith("whatsapp.inbound.processing_failed", expect.objectContaining({
-      stage: "processing", error: failure, messageDigest: expect.any(String),
-    }));
-    expect(JSON.stringify(logMock.error.mock.calls)).not.toContain(event.providerMessageId);
+    await expect(
+      processRoutedInboundMessage(event, {}, logger, vi.fn()),
+    ).rejects.toBe(failure);
+    expect(logMock.error).toHaveBeenCalledWith(
+      "whatsapp.inbound.processing_failed",
+      expect.objectContaining({
+        stage: "processing",
+        error: failure,
+        messageDigest: expect.any(String),
+      }),
+    );
+    expect(JSON.stringify(logMock.error.mock.calls)).not.toContain(
+      event.providerMessageId,
+    );
   });
 });

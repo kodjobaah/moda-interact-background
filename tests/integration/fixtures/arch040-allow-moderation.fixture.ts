@@ -10,7 +10,8 @@ export function allowModerationFixture(): ModerationAssessmentService {
   return {
     effectiveText: vi.fn(async () => "fixture-content"),
     assessText: vi.fn(async (input) => ({
-      kind: "allow" as const, assessmentId: "b002-test-allow",
+      kind: "allow" as const,
+      assessmentId: "b002-test-allow",
       digest: createHash("sha256").update(input.effectiveText).digest("hex"),
       policyVersion: input.policyVersion,
     })),

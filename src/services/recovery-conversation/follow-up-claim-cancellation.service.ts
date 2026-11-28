@@ -1,36 +1,69 @@
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
-import { FollowUpClaimKeyIntegrityError, MerchantSendCommandService } from "./merchant-send-command.service.js";
-import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } from "./recovery-follow-up-billing.service.js";
+import {
+  FollowUpClaimKeyIntegrityError,
+  MerchantSendCommandService,
+} from "./merchant-send-command.service.js";
+import {
+  RecoveryFollowUpBillingService,
+  type PersistedFollowUpReservation,
+} from "./recovery-follow-up-billing.service.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import {
-  changed, first, lockRecoveryContext, recoveryDatabase, rows,
-  type RecoveryDatabase, type SqlTransaction,
+  changed,
+  first,
+  lockRecoveryContext,
+  recoveryDatabase,
+  rows,
+  type RecoveryDatabase,
+  type SqlTransaction,
 } from "./recovery-conversation.sql.js";
 
 /** The dispatcher needs only cancellation and bounded repair operations.
  * Credit release is owned by the injected billing service, never by moderation.
  */
 export interface FollowUpClaimCancellation {
-  cancelClaimed(commandId: string, leaseToken: string, failureCode: string,
-    integrityError?: FollowUpClaimKeyIntegrityError): Promise<CancellationResult>;
+  cancelClaimed(
+    commandId: string,
+    leaseToken: string,
+    failureCode: string,
+    integrityError?: FollowUpClaimKeyIntegrityError,
+  ): Promise<CancellationResult>;
   repairCancelledClaims(limit?: number): Promise<number>;
 }
 
-export type CancellationResult = "not-follow-up" | "stale" | "released" | "held";
-type InternalResult = CancellationResult | "no-context" |
-  { kind: "reserved"; admission: PersistedFollowUpReservation };
-const logger = createLogger({ serviceName: "moda-background-runtime", environment: resolveDeploymentEnvironmentName() });
+export type CancellationResult =
+  "not-follow-up" | "stale" | "released" | "held";
+type InternalResult =
+  | CancellationResult
+  | "no-context"
+  | { kind: "reserved"; admission: PersistedFollowUpReservation };
+const logger = createLogger({
+  serviceName: "moda-background-runtime",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 type CommandPointer = { conversationId: string; shopId: string; kind: string };
 type LockedCommand = {
-  id: string; shopId: string; conversationId: string; kind: string;
-  state: string; followUpClaimKey: string | null; leaseToken: string | null; leaseValid: boolean;
-  recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null;
-  providerDispatchAdmittedAt: Date | null; outboundMessageId: string | null;
+  id: string;
+  shopId: string;
+  conversationId: string;
+  kind: string;
+  state: string;
+  followUpClaimKey: string | null;
+  leaseToken: string | null;
+  leaseValid: boolean;
+  recoveryOutreachAttemptId: string | null;
+  providerDispatchKey: string | null;
+  providerDispatchAdmittedAt: Date | null;
+  outboundMessageId: string | null;
 };
 type LockedAttempt = {
-  id: string; initiatedBy: string | null; initiationKey: string | null;
-  status: string; outboundMessageId: string | null; sentAt: Date | null;
+  id: string;
+  initiatedBy: string | null;
+  initiationKey: string | null;
+  status: string;
+  outboundMessageId: string | null;
+  sentAt: Date | null;
 };
 
 /** Application-owned cancellation of a HUMAN sequence-two claim. The accepted
@@ -43,19 +76,33 @@ type LockedAttempt = {
 export class FollowUpClaimCancellationService implements FollowUpClaimCancellation {
   constructor(
     private readonly database: RecoveryDatabase = recoveryDatabase,
-    private readonly commands: Pick<MerchantSendCommandService, "rejectCommand"> =
-      new MerchantSendCommandService(database),
-    private readonly billing: Pick<RecoveryFollowUpBillingService,
-      "inspectBeforePermit" | "releaseBeforePermit"> = new RecoveryFollowUpBillingService(),
+    private readonly commands: Pick<
+      MerchantSendCommandService,
+      "rejectCommand"
+    > = new MerchantSendCommandService(database),
+    private readonly billing: Pick<
+      RecoveryFollowUpBillingService,
+      "inspectBeforePermit" | "releaseBeforePermit"
+    > = new RecoveryFollowUpBillingService(),
   ) {}
 
-  async cancelClaimed(commandId: string, leaseToken: string, failureCode: string,
-    integrityError?: FollowUpClaimKeyIntegrityError): Promise<CancellationResult> {
-    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(failureCode)) throw new Error("invalid bounded failure code");
+  async cancelClaimed(
+    commandId: string,
+    leaseToken: string,
+    failureCode: string,
+    integrityError?: FollowUpClaimKeyIntegrityError,
+  ): Promise<CancellationResult> {
+    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(failureCode))
+      throw new Error("invalid bounded failure code");
     const pointer = await this.pointer(commandId);
-    if (!pointer || pointer.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE") return "not-follow-up";
-    const result = await this.transitionAndReconcile(commandId, pointer,
-      { kind: "claimed", leaseToken, failureCode, ...(integrityError ? { integrityError } : {}) });
+    if (!pointer || pointer.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE")
+      return "not-follow-up";
+    const result = await this.transitionAndReconcile(commandId, pointer, {
+      kind: "claimed",
+      leaseToken,
+      failureCode,
+      ...(integrityError ? { integrityError } : {}),
+    });
     if (result === "no-context") {
       // Invalid recovery linkage cannot authorise an attempt reset. Still fence
       // the original command using the existing lease-protected cancellation.
@@ -71,7 +118,14 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
   async repairCancelledClaims(limit = 25): Promise<number> {
     const boundedLimit = Math.max(0, Math.min(25, Math.floor(limit)));
     if (!boundedLimit) return 0;
-    const pending = await rows<{ id: string; conversationId: string; shopId: string; kind: string }>(this.database, `
+    const pending = await rows<{
+      id: string;
+      conversationId: string;
+      shopId: string;
+      kind: string;
+    }>(
+      this.database,
+      `
       SELECT cmd."id",cmd."conversationId",cmd."shopId",cmd."kind"::text
       FROM "whatsapp"."MerchantConversationSendCommand" cmd
       JOIN "commerce"."RecoveryOutreachAttempt" attempt ON attempt."id"=cmd."recoveryOutreachAttemptId"
@@ -83,10 +137,16 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
         AND attempt."initiationKey"=cmd."followUpClaimKey"
         AND attempt."outboundMessageId" IS NULL AND attempt."sentAt" IS NULL
         AND (cmd."nextAttemptAt" IS NULL OR cmd."nextAttemptAt"<=statement_timestamp())
-      ORDER BY cmd."createdAt",cmd."id" LIMIT $1`, boundedLimit);
+      ORDER BY cmd."createdAt",cmd."id" LIMIT $1`,
+      boundedLimit,
+    );
     let repaired = 0;
     for (const candidate of pending) {
-      const outcome = await this.transitionAndReconcile(candidate.id, candidate, { kind: "cancelled" });
+      const outcome = await this.transitionAndReconcile(
+        candidate.id,
+        candidate,
+        { kind: "cancelled" },
+      );
       if (outcome === "released") repaired++;
     }
     return repaired;
@@ -99,23 +159,32 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
    * A crash between transactions is repaired by the bounded CANCELLED scan.
    */
   private async transitionAndReconcile(
-    commandId: string, pointer: CommandPointer,
-    mode: { kind: "claimed"; leaseToken: string; failureCode: string;
-      integrityError?: FollowUpClaimKeyIntegrityError } |
-      { kind: "cancelled"; integrityError?: FollowUpClaimKeyIntegrityError },
+    commandId: string,
+    pointer: CommandPointer,
+    mode:
+      | {
+          kind: "claimed";
+          leaseToken: string;
+          failureCode: string;
+          integrityError?: FollowUpClaimKeyIntegrityError;
+        }
+      | { kind: "cancelled"; integrityError?: FollowUpClaimKeyIntegrityError },
   ): Promise<CancellationResult | "no-context"> {
     const result = await this.database.$transaction((tx) =>
-      this.transition(tx, commandId, pointer, mode));
+      this.transition(tx, commandId, pointer, mode),
+    );
     if (typeof result === "string") return result;
     try {
       await this.billing.releaseBeforePermit(result.admission);
       // A successful call alone is not evidence of durable release.
       const verified = await this.database.$transaction((tx) =>
-        this.transition(tx, commandId, pointer, { kind: "cancelled" }));
+        this.transition(tx, commandId, pointer, { kind: "cancelled" }),
+      );
       return typeof verified === "string" ? verified : "held";
     } catch (error) {
       logger.warn("arch040.follow_up_credit_release_deferred", {
-        commandId, reasonCode: "credit_release_unverified",
+        commandId,
+        reasonCode: "credit_release_unverified",
         errorType: error instanceof Error ? error.name : "unknown",
         errorMessage: error instanceof Error ? error.message : String(error),
         error: error,
@@ -125,76 +194,125 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
   }
 
   private async pointer(commandId: string): Promise<CommandPointer | null> {
-    return first<CommandPointer>(this.database, `
+    return first<CommandPointer>(
+      this.database,
+      `
       SELECT "conversationId","shopId","kind"::text
-      FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1`, commandId);
+      FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1`,
+      commandId,
+    );
   }
 
   private async transition(
     tx: SqlTransaction,
     commandId: string,
     pointer: CommandPointer,
-    mode: { kind: "claimed"; leaseToken: string; failureCode: string;
-      integrityError?: FollowUpClaimKeyIntegrityError } |
-      { kind: "cancelled"; integrityError?: FollowUpClaimKeyIntegrityError },
+    mode:
+      | {
+          kind: "claimed";
+          leaseToken: string;
+          failureCode: string;
+          integrityError?: FollowUpClaimKeyIntegrityError;
+        }
+      | { kind: "cancelled"; integrityError?: FollowUpClaimKeyIntegrityError },
   ): Promise<InternalResult> {
     const context = await lockRecoveryContext(tx, pointer.conversationId);
     if (!context || context.shopId !== pointer.shopId) return "no-context";
-    const command = await first<LockedCommand>(tx, `
+    const command = await first<LockedCommand>(
+      tx,
+      `
       SELECT "id","shopId","conversationId","kind"::text,"state"::text,
         "followUpClaimKey","leaseToken",("leaseExpiresAt">statement_timestamp()) AS "leaseValid",
         "recoveryOutreachAttemptId","providerDispatchKey","providerDispatchAdmittedAt","outboundMessageId"
-      FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1 FOR UPDATE`, commandId);
-    if (!command || command.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE" ||
-        command.shopId !== context.shopId || command.conversationId !== context.id ||
-        command.providerDispatchKey || command.providerDispatchAdmittedAt || command.outboundMessageId ||
-        (mode.kind === "claimed"
-          ? command.state !== "CLAIMED" || command.leaseToken !== mode.leaseToken || !command.leaseValid
-          : command.state !== "CANCELLED")) return "stale";
+      FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1 FOR UPDATE`,
+      commandId,
+    );
+    if (
+      !command ||
+      command.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE" ||
+      command.shopId !== context.shopId ||
+      command.conversationId !== context.id ||
+      command.providerDispatchKey ||
+      command.providerDispatchAdmittedAt ||
+      command.outboundMessageId ||
+      (mode.kind === "claimed"
+        ? command.state !== "CLAIMED" ||
+          command.leaseToken !== mode.leaseToken ||
+          !command.leaseValid
+        : command.state !== "CANCELLED")
+    )
+      return "stale";
 
     const attempt = command.recoveryOutreachAttemptId
-      ? await first<LockedAttempt>(tx, `
+      ? await first<LockedAttempt>(
+          tx,
+          `
           SELECT "id","initiatedBy"::text,"initiationKey","status"::text,"outboundMessageId","sentAt"
           FROM "commerce"."RecoveryOutreachAttempt"
           WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND "sequence"=2 FOR UPDATE`,
-          command.recoveryOutreachAttemptId, context.recoveryId)
+          command.recoveryOutreachAttemptId,
+          context.recoveryId,
+        )
       : null;
-    const claimKeyValid = typeof command.followUpClaimKey === "string" && !!command.followUpClaimKey.trim();
+    const claimKeyValid =
+      typeof command.followUpClaimKey === "string" &&
+      !!command.followUpClaimKey.trim();
     if (!claimKeyValid) {
-      const integrityError = mode.integrityError ?? new FollowUpClaimKeyIntegrityError(commandId);
+      const integrityError =
+        mode.integrityError ?? new FollowUpClaimKeyIntegrityError(commandId);
       logger.error("arch055.follow_up_claim_key_integrity_failed", {
-        commandId, shopId: command.shopId, errorType: integrityError.name,
-        errorMessage: integrityError.message, error: integrityError,
-        reasonCode: "persisted_claim_key_missing", source: "follow_up_claim_cancellation",
+        commandId,
+        shopId: command.shopId,
+        errorType: integrityError.name,
+        errorMessage: integrityError.message,
+        error: integrityError,
+        reasonCode: "persisted_claim_key_missing",
+        source: "follow_up_claim_cancellation",
       });
     }
-    const ownerMatches = claimKeyValid && !!attempt && attempt.status === "PENDING" &&
-      attempt.initiatedBy === "HUMAN" && attempt.initiationKey === command.followUpClaimKey &&
-      !attempt.outboundMessageId && !attempt.sentAt;
-    const providerSafe = ownerMatches && attempt !== null &&
+    const ownerMatches =
+      claimKeyValid &&
+      !!attempt &&
+      attempt.status === "PENDING" &&
+      attempt.initiatedBy === "HUMAN" &&
+      attempt.initiationKey === command.followUpClaimKey &&
+      !attempt.outboundMessageId &&
+      !attempt.sentAt;
+    const providerSafe =
+      ownerMatches &&
+      attempt !== null &&
       !(await this.hasProviderEvidence(tx, attempt.id));
     // Billing is an independently persisted lifecycle. Read through its owner
     // so period-qualified paid reservations cannot be missed. On read errors,
     // still cancel denied content but keep the claim for bounded repair.
-    const credit = providerSafe && attempt
-      ? await this.billing.inspectBeforePermit(tx, { shopId: context.shopId, attemptId: attempt.id })
-          .catch((error: unknown) => {
-            // The command is still cancelled, but a failed credit inspection
-            // MUST hold the sequence-two claim for durable repair, not silently
-            // declare it safe to release or hide the infrastructure failure.
-            logger.error("arch040.follow_up_credit_inspection_failed", {
-              commandId, reasonCode: "credit_inspection_unavailable",
-              errorType: error instanceof Error ? error.name : "unknown",
-              errorMessage: error instanceof Error ? error.message : String(error),
-              error: error,
-            });
-            return { kind: "unsafe" as const };
-          })
-      : { kind: "unsafe" as const };
+    const credit =
+      providerSafe && attempt
+        ? await this.billing
+            .inspectBeforePermit(tx, {
+              shopId: context.shopId,
+              attemptId: attempt.id,
+            })
+            .catch((error: unknown) => {
+              // The command is still cancelled, but a failed credit inspection
+              // MUST hold the sequence-two claim for durable repair, not silently
+              // declare it safe to release or hide the infrastructure failure.
+              logger.error("arch040.follow_up_credit_inspection_failed", {
+                commandId,
+                reasonCode: "credit_inspection_unavailable",
+                errorType: error instanceof Error ? error.name : "unknown",
+                errorMessage:
+                  error instanceof Error ? error.message : String(error),
+                error: error,
+              });
+              return { kind: "unsafe" as const };
+            })
+        : { kind: "unsafe" as const };
     const safeToRelease = providerSafe && credit.kind === "clear";
 
     if (mode.kind === "claimed") {
-      const cancelled = await changed(tx, `
+      const cancelled = await changed(
+        tx,
+        `
         UPDATE "whatsapp"."MerchantConversationSendCommand"
         SET "state"='CANCELLED',"failureCode"=$3,"nextAttemptAt"=NULL,
           "completedAt"=statement_timestamp(),"leaseToken"=NULL,"leaseExpiresAt"=NULL,
@@ -202,44 +320,70 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
         WHERE "id"=$1 AND "leaseToken"=$2 AND "state"='CLAIMED'
           AND "leaseExpiresAt">statement_timestamp()
           AND "providerDispatchKey" IS NULL AND "providerDispatchAdmittedAt" IS NULL
-          AND "outboundMessageId" IS NULL`, commandId, mode.leaseToken, mode.failureCode);
-      if (cancelled !== 1) throw new Error("Follow-up cancellation lost its lease");
+          AND "outboundMessageId" IS NULL`,
+        commandId,
+        mode.leaseToken,
+        mode.failureCode,
+      );
+      if (cancelled !== 1)
+        throw new Error("Follow-up cancellation lost its lease");
     }
     if (!safeToRelease || !attempt) {
       // A terminal command cannot be dispatched again. Persist a bounded repair
       // delay whether the provisional release is pending or billing is unsafe.
-      if (ownerMatches) await changed(tx, `
+      if (ownerMatches)
+        await changed(
+          tx,
+          `
         UPDATE "whatsapp"."MerchantConversationSendCommand"
         SET "nextAttemptAt"=statement_timestamp()+interval '1 minute',"updatedAt"=statement_timestamp()
-        WHERE "id"=$1 AND "state"='CANCELLED'`, commandId);
+        WHERE "id"=$1 AND "state"='CANCELLED'`,
+          commandId,
+        );
       if (providerSafe && credit.kind === "reserved") {
         return { kind: "reserved", admission: credit.admission };
       }
       return "held";
     }
-    const released = await changed(tx, `
+    const released = await changed(
+      tx,
+      `
       UPDATE "commerce"."RecoveryOutreachAttempt"
       SET "initiatedBy"=NULL,"initiationKey"=NULL,"claimedAt"=NULL,
         "updatedAt"=statement_timestamp()
       WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND "sequence"=2
         AND "status"='PENDING' AND "initiatedBy"='HUMAN' AND "initiationKey"=$3
         AND "outboundMessageId" IS NULL AND "sentAt" IS NULL`,
-      attempt.id, context.recoveryId, command.followUpClaimKey);
+      attempt.id,
+      context.recoveryId,
+      command.followUpClaimKey,
+    );
     if (released !== 1) throw new Error("Follow-up claim reset lost its owner");
-    if (mode.kind === "cancelled") await changed(tx, `
+    if (mode.kind === "cancelled")
+      await changed(
+        tx,
+        `
       UPDATE "whatsapp"."MerchantConversationSendCommand"
       SET "nextAttemptAt"=NULL,"updatedAt"=statement_timestamp()
-      WHERE "id"=$1 AND "state"='CANCELLED'`, commandId);
+      WHERE "id"=$1 AND "state"='CANCELLED'`,
+        commandId,
+      );
     return "released";
   }
 
-  private async hasProviderEvidence(tx: SqlTransaction, attemptId: string): Promise<boolean> {
-    return !!(await first<{ id: string }>(tx, `
+  private async hasProviderEvidence(
+    tx: SqlTransaction,
+    attemptId: string,
+  ): Promise<boolean> {
+    return !!(await first<{ id: string }>(
+      tx,
+      `
       SELECT "id" FROM "whatsapp"."MerchantConversationSendCommand"
       WHERE "recoveryOutreachAttemptId"=$1
         AND ("providerDispatchKey" IS NOT NULL OR "providerDispatchAdmittedAt" IS NOT NULL
           OR "outboundMessageId" IS NOT NULL OR "state" IN ('DISPATCH_ADMITTED','SENT','UNKNOWN'))
-      LIMIT 1`, attemptId));
+      LIMIT 1`,
+      attemptId,
+    ));
   }
-
 }

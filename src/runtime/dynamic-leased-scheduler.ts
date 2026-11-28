@@ -1,5 +1,11 @@
-import type { BackgroundRuntimeConfigSnapshot, BackgroundRuntimeConfigService } from "./background-runtime-config.js";
-import type { BackgroundLeaseHandle, BackgroundRuntimeLeaseService } from "./background-runtime-lease.js";
+import type {
+  BackgroundRuntimeConfigSnapshot,
+  BackgroundRuntimeConfigService,
+} from "./background-runtime-config.js";
+import type {
+  BackgroundLeaseHandle,
+  BackgroundRuntimeLeaseService,
+} from "./background-runtime-lease.js";
 
 export type DynamicLeasedSchedulerOptions = {
   config: BackgroundRuntimeConfigService;
@@ -8,38 +14,54 @@ export type DynamicLeasedSchedulerOptions = {
   intervalMs: number;
   runImmediately?: boolean;
   getIntervalMs?: (snapshot: BackgroundRuntimeConfigSnapshot) => number;
-  run: (snapshot: BackgroundRuntimeConfigSnapshot, handle: BackgroundLeaseHandle) => Promise<void>;
+  run: (
+    snapshot: BackgroundRuntimeConfigSnapshot,
+    handle: BackgroundLeaseHandle,
+  ) => Promise<void>;
   onLeaseSkipped?: () => void;
   onError?: (error: unknown) => void;
 };
 
-export async function startDynamicLeasedScheduler(options: DynamicLeasedSchedulerOptions): Promise<() => Promise<void>> {
+export async function startDynamicLeasedScheduler(
+  options: DynamicLeasedSchedulerOptions,
+): Promise<() => Promise<void>> {
   options.config.current();
   let stopped = false;
   let timer: NodeJS.Timeout | undefined;
   let running: Promise<void> | undefined;
   let resolveStop!: () => void;
-  const stopWait = new Promise<void>((resolve) => { resolveStop = resolve; });
-  const intervalFor = (snapshot: BackgroundRuntimeConfigSnapshot): number => Math.max(0, options.getIntervalMs?.(snapshot) ?? options.intervalMs);
+  const stopWait = new Promise<void>((resolve) => {
+    resolveStop = resolve;
+  });
+  const intervalFor = (snapshot: BackgroundRuntimeConfigSnapshot): number =>
+    Math.max(0, options.getIntervalMs?.(snapshot) ?? options.intervalMs);
   const schedule = (delay: number): void => {
     if (stopped || running) return;
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => { timer = undefined; void cycle(); }, delay);
+    timer = setTimeout(() => {
+      timer = undefined;
+      void cycle();
+    }, delay);
     timer.unref();
   };
   const cycle = async (): Promise<void> => {
     if (stopped) return;
     running = (async () => {
-      const result = await options.lease.runWithLease(options.leaseName, async (handle) => {
-        const snapshot = await options.config.getFresh();
-        await options.run(snapshot, handle);
-      });
+      const result = await options.lease.runWithLease(
+        options.leaseName,
+        async (handle) => {
+          const snapshot = await options.config.getFresh();
+          await options.run(snapshot, handle);
+        },
+      );
       if (result.kind === "skipped") options.onLeaseSkipped?.();
-    })().catch((error) => options.onError?.(error)).finally(() => {
-      running = undefined;
-      if (stopped) resolveStop();
-      else schedule(intervalFor(options.config.current()));
-    });
+    })()
+      .catch((error) => options.onError?.(error))
+      .finally(() => {
+        running = undefined;
+        if (stopped) resolveStop();
+        else schedule(intervalFor(options.config.current()));
+      });
     await running;
   };
   const unsubscribe = options.config.subscribe((snapshot) => {

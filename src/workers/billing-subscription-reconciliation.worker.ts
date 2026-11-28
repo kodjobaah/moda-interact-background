@@ -11,20 +11,32 @@ import { BillingSubscriptionReconciliationService } from "../services/billing-su
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 
-const bullMQTelemetry = createBullMQTelemetry({ serviceName: "moda-billing-worker", enableMetrics: false });
+const bullMQTelemetry = createBullMQTelemetry({
+  serviceName: "moda-billing-worker",
+  enableMetrics: false,
+});
 
 export function createBillingSubscriptionReconciliationWorker(
   service: Pick<BillingSubscriptionReconciliationService, "reconcileJob">,
 ): Worker {
   const worker = new Worker(
     BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME,
-    async (job: Job) => observeWorkerJob(
-      { workerName: "billing-subscription-reconciliation", queueName: BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME, jobNames: [BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME] },
-      job,
-      () => service.reconcileJob(job.data),
-    ),
+    async (job: Job) =>
+      observeWorkerJob(
+        {
+          workerName: "billing-subscription-reconciliation",
+          queueName: BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME,
+          jobNames: [BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME],
+        },
+        job,
+        () => service.reconcileJob(job.data),
+      ),
     { connection: connectionRedis, telemetry: bullMQTelemetry },
   );
-  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "billingSubscriptionQueueGlobalConcurrency");
+  bindWorkerConcurrency(
+    worker,
+    backgroundRuntimeConfigService,
+    "billingSubscriptionQueueGlobalConcurrency",
+  );
   return worker;
 }

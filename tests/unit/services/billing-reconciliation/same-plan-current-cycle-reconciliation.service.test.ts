@@ -33,12 +33,19 @@ function harness() {
     periodEnd: cycleEnd,
     status: "OPEN",
   });
-  transaction.billingPeriodEntitlementCounter.findUnique.mockResolvedValue(null);
+  transaction.billingPeriodEntitlementCounter.findUnique.mockResolvedValue(
+    null,
+  );
   const database = {
-    $transaction: async (callback: (value: typeof transaction) => unknown) => callback(transaction),
+    $transaction: async (callback: (value: typeof transaction) => unknown) =>
+      callback(transaction),
   };
   const { scheduler, logger } = serviceDependencies();
-  const service = new SamePlanCurrentCycleReconciliationService(database as never, scheduler, logger as never);
+  const service = new SamePlanCurrentCycleReconciliationService(
+    database as never,
+    scheduler,
+    logger as never,
+  );
   return { service, existing, transaction, scheduler, logger };
 }
 
@@ -48,7 +55,11 @@ describe("SamePlanCurrentCycleReconciliationService", () => {
 
     const result = await test.service.reconcile({
       shopId: "shop-1",
-      provider: { ...provider, planHandle: freePlan.shopifyPlanHandle, usageEventHandles: [] },
+      provider: {
+        ...provider,
+        planHandle: freePlan.shopifyPlanHandle,
+        usageEventHandles: [],
+      },
       plan: freePlan,
       existing: test.existing,
       now,
@@ -74,7 +85,11 @@ describe("SamePlanCurrentCycleReconciliationService", () => {
 
     await test.service.reconcile({
       shopId: "shop-1",
-      provider: { ...provider, planHandle: freePlan.shopifyPlanHandle, usageEventHandles: [] },
+      provider: {
+        ...provider,
+        planHandle: freePlan.shopifyPlanHandle,
+        usageEventHandles: [],
+      },
       plan: freePlan,
       existing: test.existing,
       now,
@@ -82,17 +97,23 @@ describe("SamePlanCurrentCycleReconciliationService", () => {
       syncErrorCode: null,
     });
 
-    expect(test.transaction.shopEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        counter: "LIFETIME_FREE_RECOVERY_CREDITS",
-        grantedQuantity: 5,
+    expect(test.transaction.shopEntitlementCounter.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+          grantedQuantity: 5,
+        }),
       }),
-    }));
+    );
   });
 
   it("repairs a missing Paid included-credit counter before period progression", async () => {
     const test = harness();
-    const existing = existingSubscription({ status: "ACTIVE", planId: paidPlan.id, nextReconcileAt: null });
+    const existing = existingSubscription({
+      status: "ACTIVE",
+      planId: paidPlan.id,
+      nextReconcileAt: null,
+    });
     test.transaction.subscription.findUnique.mockResolvedValue(existing);
     test.transaction.billingPeriod.findUnique.mockResolvedValue({
       id: "period-1",
@@ -107,7 +128,9 @@ describe("SamePlanCurrentCycleReconciliationService", () => {
       periodEnd: cycleEnd,
       status: "OPEN",
     });
-    test.transaction.billingPeriodEntitlementCounter.findUnique.mockResolvedValue(null);
+    test.transaction.billingPeriodEntitlementCounter.findUnique.mockResolvedValue(
+      null,
+    );
 
     const result = await test.service.reconcile({
       shopId: "shop-1",
@@ -120,7 +143,9 @@ describe("SamePlanCurrentCycleReconciliationService", () => {
     });
 
     expect(result).toEqual({ kind: "continue" });
-    expect(test.transaction.billingPeriodEntitlementCounter.create).toHaveBeenCalledWith({
+    expect(
+      test.transaction.billingPeriodEntitlementCounter.create,
+    ).toHaveBeenCalledWith({
       data: {
         shopId: "shop-1",
         billingPeriodId: "period-1",
@@ -140,7 +165,11 @@ describe("SamePlanCurrentCycleReconciliationService", () => {
 
     const result = await test.service.reconcile({
       shopId: "shop-1",
-      provider: { ...provider, planHandle: freePlan.shopifyPlanHandle, usageEventHandles: [] },
+      provider: {
+        ...provider,
+        planHandle: freePlan.shopifyPlanHandle,
+        usageEventHandles: [],
+      },
       plan: freePlan,
       existing: test.existing,
       now,
@@ -148,14 +177,20 @@ describe("SamePlanCurrentCycleReconciliationService", () => {
       syncErrorCode: null,
     });
 
-    expect(result).toEqual({ kind: "handled", billingPeriodId: "period-1", packMeterHandle: null });
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status: "SYNC_ERROR",
-        lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
-        nextReconcileAt: null,
+    expect(result).toEqual({
+      kind: "handled",
+      billingPeriodId: "period-1",
+      packMeterHandle: null,
+    });
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SYNC_ERROR",
+          lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
+          nextReconcileAt: null,
+        }),
       }),
-    }));
+    );
     expect(test.logger.warn).toHaveBeenCalledWith(
       "billing.subscription_reconciliation.lifetime_free_counter_history_conflict",
       { shopId: "shop-1" },
@@ -180,7 +215,11 @@ describe("SamePlanCurrentCycleReconciliationService", () => {
 
     const result = await test.service.reconcile({
       shopId: "shop-1",
-      provider: { ...provider, planHandle: freePlan.shopifyPlanHandle, usageEventHandles: [] },
+      provider: {
+        ...provider,
+        planHandle: freePlan.shopifyPlanHandle,
+        usageEventHandles: [],
+      },
       plan: freePlan,
       existing: test.existing,
       now,
@@ -189,15 +228,26 @@ describe("SamePlanCurrentCycleReconciliationService", () => {
     });
 
     const next = new Date("2026-09-12T12:01:00.000Z");
-    expect(result).toEqual({ kind: "handled", billingPeriodId: "period-1", packMeterHandle: null });
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status: "SYNC_ERROR",
-        lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
-        nextReconcileAt: next,
+    expect(result).toEqual({
+      kind: "handled",
+      billingPeriodId: "period-1",
+      packMeterHandle: null,
+    });
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SYNC_ERROR",
+          lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
+          nextReconcileAt: next,
+        }),
       }),
-    }));
-    expect(test.scheduler.enqueue).toHaveBeenCalledWith("shop-1", "subscription-1", next, now);
+    );
+    expect(test.scheduler.enqueue).toHaveBeenCalledWith(
+      "shop-1",
+      "subscription-1",
+      next,
+      now,
+    );
   });
 
   it("leaves a different provider cycle for the period progression service", async () => {

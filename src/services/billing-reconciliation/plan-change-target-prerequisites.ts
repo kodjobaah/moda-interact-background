@@ -12,27 +12,31 @@ export function planChangeTargetPrerequisiteFailure(
   provider: PartnerSubscription,
   plan: ShopifyPlanChangePlan,
 ): PlanChangeTargetFailureCode | null {
-  const requiresExactCycle = plan.kind === BillingPlanKind.PAID_METERED
-    || (plan.kind === BillingPlanKind.FREE && plan.recoveryCreditPackEnabled === true);
+  const requiresExactCycle =
+    plan.kind === BillingPlanKind.PAID_METERED ||
+    (plan.kind === BillingPlanKind.FREE &&
+      plan.recoveryCreditPackEnabled === true);
   if (
-    requiresExactCycle
-    && (!provider.currentPeriodStart
-      || !provider.currentPeriodEnd
-      || provider.currentPeriodStart >= provider.currentPeriodEnd)
+    requiresExactCycle &&
+    (!provider.currentPeriodStart ||
+      !provider.currentPeriodEnd ||
+      provider.currentPeriodStart >= provider.currentPeriodEnd)
   ) {
     return "MISSING_BILLING_CYCLE";
   }
   if (
-    plan.kind === BillingPlanKind.PAID_METERED
-    && (!Number.isSafeInteger(plan.includedRecoveryConversationAllowance)
-      || (plan.includedRecoveryConversationAllowance ?? -1) < 0)
+    plan.kind === BillingPlanKind.PAID_METERED &&
+    (!Number.isSafeInteger(plan.includedRecoveryConversationAllowance) ||
+      (plan.includedRecoveryConversationAllowance ?? -1) < 0)
   ) {
     return "INVALID_INCLUDED_ALLOWANCE";
   }
   if (
-    plan.recoveryCreditPackEnabled
-    && (!plan.shopifyRecoveryCreditPackEventHandle
-      || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))
+    plan.recoveryCreditPackEnabled &&
+    (!plan.shopifyRecoveryCreditPackEventHandle ||
+      !provider.usageEventHandles.includes(
+        plan.shopifyRecoveryCreditPackEventHandle,
+      ))
   ) {
     return "MISSING_USAGE_METER";
   }

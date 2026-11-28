@@ -15,11 +15,23 @@ export async function terminalizeUnrecoverableBlockedRecovery(
           ? {
               OR: [
                 { admissionBlockReason: null },
-                { admissionBlockReason: { in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"] } },
+                {
+                  admissionBlockReason: {
+                    in: [
+                      "RECOVERY_CAPACITY_EXHAUSTED",
+                      "WHATSAPP_RECIPIENT_SUPPRESSED",
+                    ],
+                  },
+                },
               ],
             }
           : {
-              admissionBlockReason: { in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"] },
+              admissionBlockReason: {
+                in: [
+                  "RECOVERY_CAPACITY_EXHAUSTED",
+                  "WHATSAPP_RECIPIENT_SUPPRESSED",
+                ],
+              },
             }),
       },
       data: {

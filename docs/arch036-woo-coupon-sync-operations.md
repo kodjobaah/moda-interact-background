@@ -6,18 +6,18 @@ The recovery deployment starts **one global PostgreSQL-leased dispatcher** share
 
 All numeric overrides are strictly validated at process/service construction. Missing values take the defaults. Invalid values fail fast; they do not silently fall back. The 60-second global lease cadence remains fixed in the existing PostgreSQL lease service.
 
-| Environment variable | Default | Allowed | Meaning |
-|---|---:|---:|---|
-| `WOO_COUPON_SYNC_DISPATCH_BATCH_SIZE` | 500 | 1–500 | Maximum reserved/enqueued shop jobs per tick; bounds discovery pages |
-| `WOO_COUPON_SYNC_REFRESH_MINUTES` | 30 | 1–1440 | Minimum age since last successful full scan before another refresh |
-| `WOO_COUPON_SYNC_DISPATCH_COOLDOWN_MINUTES` | 5 | 1–120 | Minimum time before a shop can be redispatched, including lost Redis publication |
-| `WOO_COUPON_SYNC_UNAVAILABLE_RECHECK_MINUTES` | 30 | 1–1440 | Minimum time before a grant/permission-unavailable shop is eligible again |
-| `WOO_COUPON_SYNC_STALE_SCAN_MINUTES` | 15 | 1–120 | Maximum age of a shop `SYNCING` claim before its generation may be replaced |
-| `WOO_COUPON_SYNC_MAX_PAGES` | 50 | 1–200 | Maximum complete pages, each with up to 100 coupons; exceeding limit fails the scan |
-| `WOO_COUPON_SYNC_REQUEST_TIMEOUT_MS` | 8000 | 1000–30000 | Per Woo HTTP request deadline |
-| `WOO_COUPON_SYNC_MAX_RESPONSE_BYTES` | 1048576 | 16384–4194304 | Maximum bytes per Woo response |
-| `WOO_COUPON_SYNC_MAX_SCAN_DURATION_MS` | 120000 | 30000–600000 | Maximum overall elapsed time for successful pagination; abort before committing any partial scan |
-| `WOO_COUPON_SYNC_WORKER_CONCURRENCY` | 4 | 1–32 | BullMQ concurrency per recovery worker process (existing validation) |
+| Environment variable                          | Default |       Allowed | Meaning                                                                                          |
+| --------------------------------------------- | ------: | ------------: | ------------------------------------------------------------------------------------------------ |
+| `WOO_COUPON_SYNC_DISPATCH_BATCH_SIZE`         |     500 |         1–500 | Maximum reserved/enqueued shop jobs per tick; bounds discovery pages                             |
+| `WOO_COUPON_SYNC_REFRESH_MINUTES`             |      30 |        1–1440 | Minimum age since last successful full scan before another refresh                               |
+| `WOO_COUPON_SYNC_DISPATCH_COOLDOWN_MINUTES`   |       5 |         1–120 | Minimum time before a shop can be redispatched, including lost Redis publication                 |
+| `WOO_COUPON_SYNC_UNAVAILABLE_RECHECK_MINUTES` |      30 |        1–1440 | Minimum time before a grant/permission-unavailable shop is eligible again                        |
+| `WOO_COUPON_SYNC_STALE_SCAN_MINUTES`          |      15 |         1–120 | Maximum age of a shop `SYNCING` claim before its generation may be replaced                      |
+| `WOO_COUPON_SYNC_MAX_PAGES`                   |      50 |         1–200 | Maximum complete pages, each with up to 100 coupons; exceeding limit fails the scan              |
+| `WOO_COUPON_SYNC_REQUEST_TIMEOUT_MS`          |    8000 |    1000–30000 | Per Woo HTTP request deadline                                                                    |
+| `WOO_COUPON_SYNC_MAX_RESPONSE_BYTES`          | 1048576 | 16384–4194304 | Maximum bytes per Woo response                                                                   |
+| `WOO_COUPON_SYNC_MAX_SCAN_DURATION_MS`        |  120000 |  30000–600000 | Maximum overall elapsed time for successful pagination; abort before committing any partial scan |
+| `WOO_COUPON_SYNC_WORKER_CONCURRENCY`          |       4 |          1–32 | BullMQ concurrency per recovery worker process (existing validation)                             |
 
 The provider HTTP client pins DNS and rejects redirects, uses Basic credentials **only over verified HTTPS**, and allows signed local-development HTTP only outside production. No provider URL or key is accepted from a queue job.
 

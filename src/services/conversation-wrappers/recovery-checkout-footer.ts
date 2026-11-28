@@ -1,51 +1,103 @@
-import type { VerifiedWrapperContext, WrapperRefusal, WrapperSource } from "./contracts.js";
+import type {
+  VerifiedWrapperContext,
+  WrapperRefusal,
+  WrapperSource,
+} from "./contracts.js";
 import { MAX_WHATSAPP_TEXT_LENGTH } from "./render.js";
 
-export function validRecoveryCheckoutFooterUrl(value: unknown): value is string {
+export function validRecoveryCheckoutFooterUrl(
+  value: unknown,
+): value is string {
   // Stored URLs may not contain whitespace or control characters.
   // eslint-disable-next-line no-control-regex
-  if (typeof value !== "string" || !value || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) return false;
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.length > 2048 ||
+    /[\u0000-\u0020\u007f]/.test(value)
+  )
+    return false;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password && !url.port &&
-      url.hostname.includes(".") && !url.hostname.endsWith(".invalid") && url.href === value;
-  } catch { return false; }
+    return (
+      url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      url.hostname.includes(".") &&
+      !url.hostname.endsWith(".invalid") &&
+      url.href === value
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Transform only standalone exact raw links, never embedded Markdown or other URLs. */
-function mapCheckoutUrlTokens(body: string, checkoutUrl: string, replace: (url: string) => string): string {
+function mapCheckoutUrlTokens(
+  body: string,
+  checkoutUrl: string,
+  replace: (url: string) => string,
+): string {
   return body.replace(/https?:\/\/[^\s<>]+/g, (token, offset: number) => {
     if (offset > 0 && !/\s/.test(body[offset - 1]!)) return token;
     if (!token.startsWith(checkoutUrl)) return token;
     const suffix = token.slice(checkoutUrl.length);
-    return !suffix || /^[.,;:!?)*_`\]}。！，；：？]+$/.test(suffix) ? replace(checkoutUrl) + suffix : token;
+    return !suffix || /^[.,;:!?)*_`\]}。！，；：？]+$/.test(suffix)
+      ? replace(checkoutUrl) + suffix
+      : token;
   });
 }
 
-export function withoutRecoveryCheckoutUrl(body: string, checkoutUrl: string): string {
-  return mapCheckoutUrlTokens(body, checkoutUrl, () => "").split("\n").map(line => line.trimEnd()).join("\n").trim();
+export function withoutRecoveryCheckoutUrl(
+  body: string,
+  checkoutUrl: string,
+): string {
+  return mapCheckoutUrlTokens(body, checkoutUrl, () => "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .trim();
 }
 
 /** Preserve localized link labels and other prose by moving complete link lines to the footer. */
-export function withLegacyRecoveryCheckoutFooter(body: string, checkoutUrl: string): string {
+export function withLegacyRecoveryCheckoutFooter(
+  body: string,
+  checkoutUrl: string,
+): string {
   const lines = body.split("\n");
-  const linkLines = lines.filter(line => mapCheckoutUrlTokens(line, checkoutUrl, () => "") !== line);
+  const linkLines = lines.filter(
+    (line) => mapCheckoutUrlTokens(line, checkoutUrl, () => "") !== line,
+  );
   if (!linkLines.length) return `${body.trim()}\n\n${checkoutUrl}`;
-  const labelled = linkLines.filter(line => withoutRecoveryCheckoutUrl(line, checkoutUrl).trim());
+  const labelled = linkLines.filter((line) =>
+    withoutRecoveryCheckoutUrl(line, checkoutUrl).trim(),
+  );
   const selected = labelled.at(-1);
-  const selectedIndex = selected === undefined ? -1 : lines.lastIndexOf(selected);
+  const selectedIndex =
+    selected === undefined ? -1 : lines.lastIndexOf(selected);
   const footerLines: string[] = [];
   if (selected) {
     // Keep the last exact URL within the selected line; preserve every other word.
     let remaining = 0;
-    mapCheckoutUrlTokens(selected, checkoutUrl, value => { remaining++; return value; });
-    footerLines.push(mapCheckoutUrlTokens(selected, checkoutUrl, value => --remaining === 0 ? value : "").trim());
+    mapCheckoutUrlTokens(selected, checkoutUrl, (value) => {
+      remaining++;
+      return value;
+    });
+    footerLines.push(
+      mapCheckoutUrlTokens(selected, checkoutUrl, (value) =>
+        --remaining === 0 ? value : "",
+      ).trim(),
+    );
   } else footerLines.push(checkoutUrl);
-  const content = lines.flatMap((line, index) => {
-    if (index === selectedIndex) return [];
-    const stripped = mapCheckoutUrlTokens(line, checkoutUrl, () => "");
-    return stripped !== line && !stripped.trim() ? [] : [stripped.trimEnd()];
-  }).join("\n").trim();
+  const content = lines
+    .flatMap((line, index) => {
+      if (index === selectedIndex) return [];
+      const stripped = mapCheckoutUrlTokens(line, checkoutUrl, () => "");
+      return stripped !== line && !stripped.trim() ? [] : [stripped.trimEnd()];
+    })
+    .join("\n")
+    .trim();
   return [content, footerLines.join("\n")].filter(Boolean).join("\n\n");
 }
 
@@ -53,42 +105,77 @@ export const RECOVERY_CHECKOUT_DIVIDER = "──────────";
 export const RECOVERY_CHECKOUT_SEPARATOR = `\n\n${RECOVERY_CHECKOUT_DIVIDER}\n`;
 
 /** New AI/service preparation; old immutable bodies use the legacy validator only. */
-export function withRecoveryCheckoutFooter(body: string, checkoutUrl: string): string {
+export function withRecoveryCheckoutFooter(
+  body: string,
+  checkoutUrl: string,
+): string {
   const legacy = withLegacyRecoveryCheckoutFooter(body, checkoutUrl);
   const split = legacy.lastIndexOf("\n\n");
   let content = split < 0 ? "" : legacy.slice(0, split);
   const footer = split < 0 ? legacy : legacy.slice(split + 2);
-  if (content.endsWith(RECOVERY_CHECKOUT_DIVIDER)) content = content.slice(0, -RECOVERY_CHECKOUT_DIVIDER.length).trimEnd();
-  return content ? `${content}${RECOVERY_CHECKOUT_SEPARATOR}${footer}` : `${RECOVERY_CHECKOUT_DIVIDER}\n${footer}`;
+  if (content.endsWith(RECOVERY_CHECKOUT_DIVIDER))
+    content = content.slice(0, -RECOVERY_CHECKOUT_DIVIDER.length).trimEnd();
+  return content
+    ? `${content}${RECOVERY_CHECKOUT_SEPARATOR}${footer}`
+    : `${RECOVERY_CHECKOUT_DIVIDER}\n${footer}`;
 }
 
 /** Staff-authored content is immutable: add a suffix without moving or rewriting it. */
-export function withHumanRecoveryCheckoutFooter(body: string, checkoutUrl: string): string {
-  return body.endsWith(RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl) ? body : body + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl;
+export function withHumanRecoveryCheckoutFooter(
+  body: string,
+  checkoutUrl: string,
+): string {
+  return body.endsWith(RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl)
+    ? body
+    : body + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl;
 }
 
 /** Replay validation accepts both generations without rewriting either body's bytes. */
-export function hasPreparedRecoveryCheckoutFooter(body: string, checkoutUrl: string): boolean {
-  return validRecoveryCheckoutFooterUrl(checkoutUrl) &&
-    (body.endsWith(RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl) || withRecoveryCheckoutFooter(body, checkoutUrl) === body ||
-      withLegacyRecoveryCheckoutFooter(body, checkoutUrl) === body);
+export function hasPreparedRecoveryCheckoutFooter(
+  body: string,
+  checkoutUrl: string,
+): boolean {
+  return (
+    validRecoveryCheckoutFooterUrl(checkoutUrl) &&
+    (body.endsWith(RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl) ||
+      withRecoveryCheckoutFooter(body, checkoutUrl) === body ||
+      withLegacyRecoveryCheckoutFooter(body, checkoutUrl) === body)
+  );
 }
 
-export function recoveryReplyContentPreserved(original: string, rendered: string, checkoutUrl: string): boolean {
+export function recoveryReplyContentPreserved(
+  original: string,
+  rendered: string,
+  checkoutUrl: string,
+): boolean {
   const content = withoutRecoveryCheckoutUrl(rendered, checkoutUrl);
-  return withoutRecoveryCheckoutUrl(original, checkoutUrl).split("\n")
-    .map(line => line.trim()).filter(Boolean).every(line => content.includes(line));
+  return withoutRecoveryCheckoutUrl(original, checkoutUrl)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .every((line) => content.includes(line));
 }
 
 export function appendRecoveryCheckoutFooter(input: {
-  body: string; source: WrapperSource; context: VerifiedWrapperContext;
-}): {kind: "ready"; body: string; recoveryCheckoutUrl?: string} | {kind: "rejected"; reason: WrapperRefusal} {
-  if (!input.context.checkoutAvailable) return {kind: "ready", body: input.body};
+  body: string;
+  source: WrapperSource;
+  context: VerifiedWrapperContext;
+}):
+  | { kind: "ready"; body: string; recoveryCheckoutUrl?: string }
+  | { kind: "rejected"; reason: WrapperRefusal } {
+  if (!input.context.checkoutAvailable)
+    return { kind: "ready", body: input.body };
   const url = input.context.variables["checkout.url"];
-  if (!validRecoveryCheckoutFooterUrl(url)) return {kind: "rejected", reason: "VARIABLE_UNAVAILABLE"};
+  if (!validRecoveryCheckoutFooterUrl(url))
+    return { kind: "rejected", reason: "VARIABLE_UNAVAILABLE" };
   // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.body)) return {kind: "rejected", reason: "INVALID_INPUT"};
-  const body = input.source === "HUMAN" ? withHumanRecoveryCheckoutFooter(input.body, url) : withRecoveryCheckoutFooter(input.body, url);
-  if (body.length > MAX_WHATSAPP_TEXT_LENGTH) return {kind: "rejected", reason: "OUTPUT_TOO_LONG"};
-  return {kind: "ready", body, recoveryCheckoutUrl: url};
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.body))
+    return { kind: "rejected", reason: "INVALID_INPUT" };
+  const body =
+    input.source === "HUMAN"
+      ? withHumanRecoveryCheckoutFooter(input.body, url)
+      : withRecoveryCheckoutFooter(input.body, url);
+  if (body.length > MAX_WHATSAPP_TEXT_LENGTH)
+    return { kind: "rejected", reason: "OUTPUT_TOO_LONG" };
+  return { kind: "ready", body, recoveryCheckoutUrl: url };
 }

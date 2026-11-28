@@ -28,7 +28,12 @@ export class RecoverySnapshotBuilderService {
       shop,
     );
 
-    return toRecoverySeed(candidate, shopDomain, checkout, internationalContext);
+    return toRecoverySeed(
+      candidate,
+      shopDomain,
+      checkout,
+      internationalContext,
+    );
   }
 
   serializeLineItems(
@@ -38,4 +43,5 @@ export class RecoverySnapshotBuilderService {
   }
 }
 
-export const recoverySnapshotBuilderService = new RecoverySnapshotBuilderService();
+export const recoverySnapshotBuilderService =
+  new RecoverySnapshotBuilderService();

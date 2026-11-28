@@ -69,10 +69,17 @@ export type PaidIncludedReservationOutcome =
   | { kind: "released"; reservation: UsageReservation }
   | { kind: "ambiguous"; reservation: UsageReservation }
   | ReservationReplay
-  | { kind: "allowance-exhausted"; remaining: number; policy: EffectiveBillingPolicy };
+  | {
+      kind: "allowance-exhausted";
+      remaining: number;
+      policy: EffectiveBillingPolicy;
+    };
 
 export class PaidIncludedRecoveryReservationError extends Error {
-  constructor(message: string, public readonly reason?: "PERIOD_NOT_CURRENT_OPEN") {
+  constructor(
+    message: string,
+    public readonly reason?: "PERIOD_NOT_CURRENT_OPEN",
+  ) {
     super(message);
     this.name = "PaidIncludedRecoveryReservationError";
   }
@@ -110,10 +117,14 @@ export class PaidIncludedRecoveryReservationService {
       ({ recoveryId: string } | { sourceKey: string }) &
       Pick<PaidIncludedRecoveryReservationInput, "quantity">,
   ): Promise<PaidIncludedReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PaidIncludedRecoveryReservationError(message),
+    );
     return this.withRetry(() =>
       this.database.$transaction(
-        (transaction) => this.reserveInTransaction(transaction, input, quantity),
+        (transaction) =>
+          this.reserveInTransaction(transaction, input, quantity),
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
     );
@@ -126,15 +137,25 @@ export class PaidIncludedRecoveryReservationService {
       ({ recoveryId: string } | { sourceKey: string }) &
       Pick<PaidIncludedRecoveryReservationInput, "quantity">,
   ): Promise<PaidIncludedReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PaidIncludedRecoveryReservationError(message),
+    );
     return this.reserveInTransaction(transaction, input, quantity);
   }
 
   async commit(
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
-      Pick<PaidIncludedRecoveryReservationInput, "quantity"> & { occurredAt?: Date },
+    input: Required<
+      Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">
+    > &
+      Pick<PaidIncludedRecoveryReservationInput, "quantity"> & {
+        occurredAt?: Date;
+      },
   ): Promise<PaidIncludedReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PaidIncludedRecoveryReservationError(message),
+    );
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.commitInTransaction(transaction, input, quantity),
@@ -145,22 +166,34 @@ export class PaidIncludedRecoveryReservationService {
 
   async commitInExistingTransaction(
     transaction: Prisma.TransactionClient,
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
-      Pick<PaidIncludedRecoveryReservationInput, "quantity"> & { occurredAt?: Date },
+    input: Required<
+      Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">
+    > &
+      Pick<PaidIncludedRecoveryReservationInput, "quantity"> & {
+        occurredAt?: Date;
+      },
   ): Promise<PaidIncludedReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity,
-      (message) => new PaidIncludedRecoveryReservationError(message));
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PaidIncludedRecoveryReservationError(message),
+    );
     return this.commitInTransaction(transaction, input, quantity);
   }
 
   async release(
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
+    input: Required<
+      Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">
+    > &
       Pick<PaidIncludedRecoveryReservationInput, "quantity">,
   ): Promise<PaidIncludedReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PaidIncludedRecoveryReservationError(message),
+    );
     return this.withRetry(() =>
       this.database.$transaction(
-        (transaction) => this.releaseInTransaction(transaction, input, quantity),
+        (transaction) =>
+          this.releaseInTransaction(transaction, input, quantity),
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
     );
@@ -170,18 +203,28 @@ export class PaidIncludedRecoveryReservationService {
    * provider-failure compensation transaction (no nested transaction). */
   async releaseInExistingTransaction(
     transaction: Prisma.TransactionClient,
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> & Pick<PaidIncludedRecoveryReservationInput, "quantity">,
+    input: Required<
+      Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">
+    > &
+      Pick<PaidIncludedRecoveryReservationInput, "quantity">,
   ): Promise<PaidIncludedReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity,
-      (message) => new PaidIncludedRecoveryReservationError(message));
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PaidIncludedRecoveryReservationError(message),
+    );
     return this.releaseInTransaction(transaction, input, quantity);
   }
 
   async markAmbiguous(
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
+    input: Required<
+      Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">
+    > &
       Pick<PaidIncludedRecoveryReservationInput, "quantity">,
   ): Promise<PaidIncludedReservationOutcome> {
-    validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
+    validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PaidIncludedRecoveryReservationError(message),
+    );
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.markAmbiguousInTransaction(transaction, input),
@@ -200,63 +243,102 @@ export class PaidIncludedRecoveryReservationService {
     const now = this.now();
     const policy = await policyResolver.resolve(input.shopId, now);
     if (policy.planKind !== BillingPlanKind.PAID_METERED) {
-      throw new PaidIncludedRecoveryReservationError("Paid included reservation requires a paid plan");
+      throw new PaidIncludedRecoveryReservationError(
+        "Paid included reservation requires a paid plan",
+      );
     }
     if (
       policy.platform === "WOOCOMMERCE" &&
       (policy.subscriptionStatus === SubscriptionProjectionStatus.FROZEN ||
         policy.billingPeriod?.phase === "EXPIRED_RECONCILING" ||
-        (policy.providerCoverageEndAt !== null && policy.providerCoverageEndAt <= now))
+        (policy.providerCoverageEndAt !== null &&
+          policy.providerCoverageEndAt <= now))
     ) {
       throw new PaidIncludedRecoveryReservationError(
         "Woo paid included reservation is unavailable while frozen or provider coverage is expired",
       );
     }
-    const period = await this.requireCurrentOpenPeriod(transaction, input.shopId, policy, now);
-    const sourceKey = "sourceKey" in input
-      ? `paid-included:${period.id}:${input.sourceKey}`
-      : `paid-included:${period.id}:${input.recoveryId}`;
-    const existing = await transaction.usageReservation.findUnique({ where: { sourceKey } });
+    const period = await this.requireCurrentOpenPeriod(
+      transaction,
+      input.shopId,
+      policy,
+      now,
+    );
+    const sourceKey =
+      "sourceKey" in input
+        ? `paid-included:${period.id}:${input.sourceKey}`
+        : `paid-included:${period.id}:${input.recoveryId}`;
+    const existing = await transaction.usageReservation.findUnique({
+      where: { sourceKey },
+    });
 
     if (existing) {
-      assertRecoveryReservationShop(existing, input.shopId, (message) => new PaidIncludedRecoveryReservationError(message));
+      assertRecoveryReservationShop(
+        existing,
+        input.shopId,
+        (message) => new PaidIncludedRecoveryReservationError(message),
+      );
       const periodCounter = await this.requireCounter(transaction, period);
       if (existing.billingPeriodEntitlementCounterId !== periodCounter.id) {
-        throw new PaidIncludedRecoveryReservationError("Reservation belongs to another billing period counter");
+        throw new PaidIncludedRecoveryReservationError(
+          "Reservation belongs to another billing period counter",
+        );
       }
       const counter = await this.readCounter(transaction, existing);
       const transition = recoveryReservationTransitionDecision({
         reservation: existing,
         transition: "reactivate",
         requestedQuantity: quantity,
-        createError: (message) => new PaidIncludedRecoveryReservationError(message),
+        createError: (message) =>
+          new PaidIncludedRecoveryReservationError(message),
       });
       if (transition.kind === "apply") {
         const available = availablePaidIncludedQuantity(periodCounter);
-        if (available < quantity) return replayOutcome(existing, sourceKey, counter);
-        const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
-          where: { id: periodCounter.id, version: periodCounter.version },
-          data: { reservedQuantity: { increment: quantity }, version: { increment: 1 } },
-        });
-        if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
+        if (available < quantity)
+          return replayOutcome(existing, sourceKey, counter);
+        const updatedCounter =
+          await transaction.billingPeriodEntitlementCounter.updateMany({
+            where: { id: periodCounter.id, version: periodCounter.version },
+            data: {
+              reservedQuantity: { increment: quantity },
+              version: { increment: 1 },
+            },
+          });
+        if (updatedCounter.count !== 1)
+          throw new RecoveryReservationConcurrencyConflict();
         const reactivated = await transaction.usageReservation.update({
           where: { id: existing.id },
-          data: { status: UsageReservationStatus.RESERVED, releaseReason: null },
+          data: {
+            status: UsageReservationStatus.RESERVED,
+            releaseReason: null,
+          },
         });
-        return { kind: "reserved", reservation: reactivated, counter, sourceKey, policy };
+        return {
+          kind: "reserved",
+          reservation: reactivated,
+          counter,
+          sourceKey,
+          policy,
+        };
       }
       return replayOutcome(existing, sourceKey, counter, policy);
     }
 
     const periodCounter = await this.requireCounter(transaction, period);
     const available = availablePaidIncludedQuantity(periodCounter);
-    if (available < quantity) return { kind: "allowance-exhausted", remaining: available, policy };
+    if (available < quantity)
+      return { kind: "allowance-exhausted", remaining: available, policy };
 
-    const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
-      where: { id: periodCounter.id, version: periodCounter.version },
-      data: { reservedQuantity: { increment: quantity }, version: { increment: 1 } },
-    });
-    if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
+    const updatedCounter =
+      await transaction.billingPeriodEntitlementCounter.updateMany({
+        where: { id: periodCounter.id, version: periodCounter.version },
+        data: {
+          reservedQuantity: { increment: quantity },
+          version: { increment: 1 },
+        },
+      });
+    if (updatedCounter.count !== 1)
+      throw new RecoveryReservationConcurrencyConflict();
 
     const reservation = await transaction.usageReservation.create({
       data: {
@@ -280,7 +362,9 @@ export class PaidIncludedRecoveryReservationService {
 
   private async commitInTransaction(
     transaction: ReservationTransaction,
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> & { occurredAt?: Date },
+    input: Required<
+      Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">
+    > & { occurredAt?: Date },
     quantity: number,
   ): Promise<PaidIncludedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
@@ -288,13 +372,24 @@ export class PaidIncludedRecoveryReservationService {
       reservation,
       transition: "commit",
       requestedQuantity: quantity,
-      createError: (message) => new PaidIncludedRecoveryReservationError(message),
+      createError: (message) =>
+        new PaidIncludedRecoveryReservationError(message),
     });
     if (transition.kind === "replay") {
-      return replayOutcome(reservation, input.sourceKey, "INCLUDED_RECOVERY_CREDITS");
+      return replayOutcome(
+        reservation,
+        input.sourceKey,
+        "INCLUDED_RECOVERY_CREDITS",
+      );
     }
-    if (!reservation.billingPeriodEntitlementCounterId || reservation.counterId || reservation.purchasedCreditPurchaseId) {
-      throw new PaidIncludedRecoveryReservationError("Reservation is not a paid included reservation");
+    if (
+      !reservation.billingPeriodEntitlementCounterId ||
+      reservation.counterId ||
+      reservation.purchasedCreditPurchaseId
+    ) {
+      throw new PaidIncludedRecoveryReservationError(
+        "Reservation is not a paid included reservation",
+      );
     }
 
     const now = this.now();
@@ -308,12 +403,20 @@ export class PaidIncludedRecoveryReservationService {
         plan: { select: { kind: true, shopifyUsageEventHandle: true } },
       },
     });
-    const counter = await transaction.billingPeriodEntitlementCounter.findUnique({
-      where: { id: reservation.billingPeriodEntitlementCounterId },
-      include: { billingPeriod: true },
-    });
-    if (!subscription || !counter || counter.counter !== BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS) {
-      throw new PaidIncludedRecoveryReservationError("Paid included reservation counter does not exist");
+    const counter =
+      await transaction.billingPeriodEntitlementCounter.findUnique({
+        where: { id: reservation.billingPeriodEntitlementCounterId },
+        include: { billingPeriod: true },
+      });
+    if (
+      !subscription ||
+      !counter ||
+      counter.counter !==
+        BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS
+    ) {
+      throw new PaidIncludedRecoveryReservationError(
+        "Paid included reservation counter does not exist",
+      );
     }
     const period = counter.billingPeriod;
     if (
@@ -324,7 +427,8 @@ export class PaidIncludedRecoveryReservationService {
       period.subscriptionId !== subscription.id ||
       counter.shopId !== input.shopId ||
       counter.billingPeriodId !== period.id ||
-      subscription.currentPeriodStart?.getTime() !== period.periodStart.getTime() ||
+      subscription.currentPeriodStart?.getTime() !==
+        period.periodStart.getTime() ||
       subscription.currentPeriodEnd?.getTime() !== period.periodEnd.getTime()
     ) {
       throw new PaidIncludedRecoveryReservationError(
@@ -333,31 +437,42 @@ export class PaidIncludedRecoveryReservationService {
       );
     }
 
-    const provider = await resolveRecoveryUsageProvider(transaction, input.shopId);
+    const provider = await resolveRecoveryUsageProvider(
+      transaction,
+      input.shopId,
+    );
     if (subscription.plan?.kind !== BillingPlanKind.PAID_METERED) {
-      throw new PaidIncludedRecoveryReservationError("Paid included recovery plan is missing");
+      throw new PaidIncludedRecoveryReservationError(
+        "Paid included recovery plan is missing",
+      );
     }
     // An App Events reporting handle is optional; it is not a Shopify billable
     // usage-event meter. Keep the local usage record and credit commitment, but
     // never enqueue an unpublishable App Events report without a valid handle.
-    const hasShopifyReportingHandle = provider === "SHOPIFY"
-      && Boolean(subscription.plan.shopifyUsageEventHandle?.trim());
+    const hasShopifyReportingHandle =
+      provider === "SHOPIFY" &&
+      Boolean(subscription.plan.shopifyUsageEventHandle?.trim());
 
-    const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
-      where: {
-        id: counter.id,
-        version: counter.version,
-        reservedQuantity: { gte: quantity },
-      },
-      data: {
-        reservedQuantity: { decrement: quantity },
-        committedQuantity: { increment: quantity },
-        version: { increment: 1 },
-      },
-    });
-    if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
+    const updatedCounter =
+      await transaction.billingPeriodEntitlementCounter.updateMany({
+        where: {
+          id: counter.id,
+          version: counter.version,
+          reservedQuantity: { gte: quantity },
+        },
+        data: {
+          reservedQuantity: { decrement: quantity },
+          committedQuantity: { increment: quantity },
+          version: { increment: 1 },
+        },
+      });
+    if (updatedCounter.count !== 1)
+      throw new RecoveryReservationConcurrencyConflict();
 
-    const idempotencyKey = createRecoveryIdempotencyKey(input.shopId, input.sourceKey);
+    const idempotencyKey = createRecoveryIdempotencyKey(
+      input.shopId,
+      input.sourceKey,
+    );
     const usageEvent = await transaction.usageEvent.create({
       data: {
         shopId: input.shopId,
@@ -382,14 +497,19 @@ export class PaidIncludedRecoveryReservationService {
     });
     const committed = await transaction.usageReservation.update({
       where: { id: reservation.id },
-      data: { status: UsageReservationStatus.COMMITTED, committedUsageEventId: usageEvent.id },
+      data: {
+        status: UsageReservationStatus.COMMITTED,
+        committedUsageEventId: usageEvent.id,
+      },
     });
     return { kind: "committed", reservation: committed };
   }
 
   private async releaseInTransaction(
     transaction: ReservationTransaction,
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">>,
+    input: Required<
+      Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">
+    >,
     quantity: number,
   ): Promise<PaidIncludedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
@@ -397,17 +517,35 @@ export class PaidIncludedRecoveryReservationService {
       reservation,
       transition: "release",
       requestedQuantity: quantity,
-      createError: (message) => new PaidIncludedRecoveryReservationError(message),
+      createError: (message) =>
+        new PaidIncludedRecoveryReservationError(message),
     });
     if (transition.kind === "replay") {
-      return replayOutcome(reservation, input.sourceKey, "INCLUDED_RECOVERY_CREDITS");
+      return replayOutcome(
+        reservation,
+        input.sourceKey,
+        "INCLUDED_RECOVERY_CREDITS",
+      );
     }
-    const counter = await this.requireReservationCounter(transaction, reservation, input.shopId);
-    const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
-      where: { id: counter.id, version: counter.version, reservedQuantity: { gte: quantity } },
-      data: { reservedQuantity: { decrement: quantity }, version: { increment: 1 } },
-    });
-    if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
+    const counter = await this.requireReservationCounter(
+      transaction,
+      reservation,
+      input.shopId,
+    );
+    const updatedCounter =
+      await transaction.billingPeriodEntitlementCounter.updateMany({
+        where: {
+          id: counter.id,
+          version: counter.version,
+          reservedQuantity: { gte: quantity },
+        },
+        data: {
+          reservedQuantity: { decrement: quantity },
+          version: { increment: 1 },
+        },
+      });
+    if (updatedCounter.count !== 1)
+      throw new RecoveryReservationConcurrencyConflict();
     const released = await transaction.usageReservation.update({
       where: { id: reservation.id },
       data: { status: UsageReservationStatus.RELEASED },
@@ -417,18 +555,29 @@ export class PaidIncludedRecoveryReservationService {
 
   private async markAmbiguousInTransaction(
     transaction: ReservationTransaction,
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">>,
+    input: Required<
+      Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">
+    >,
   ): Promise<PaidIncludedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
     const transition = recoveryReservationTransitionDecision({
       reservation,
       transition: "ambiguous",
-      createError: (message) => new PaidIncludedRecoveryReservationError(message),
+      createError: (message) =>
+        new PaidIncludedRecoveryReservationError(message),
     });
     if (transition.kind === "replay") {
-      return replayOutcome(reservation, input.sourceKey, "INCLUDED_RECOVERY_CREDITS");
+      return replayOutcome(
+        reservation,
+        input.sourceKey,
+        "INCLUDED_RECOVERY_CREDITS",
+      );
     }
-    await this.requireOpenReservationCounter(transaction, reservation, input.shopId);
+    await this.requireOpenReservationCounter(
+      transaction,
+      reservation,
+      input.shopId,
+    );
     const ambiguous = await transaction.usageReservation.update({
       where: { id: reservation.id },
       data: { status: UsageReservationStatus.AMBIGUOUS },
@@ -449,7 +598,16 @@ export class PaidIncludedRecoveryReservationService {
         billingPeriodId: true,
         currentPeriodStart: true,
         currentPeriodEnd: true,
-        billingPeriod: { select: { id: true, shopId: true, subscriptionId: true, periodStart: true, periodEnd: true, status: true } },
+        billingPeriod: {
+          select: {
+            id: true,
+            shopId: true,
+            subscriptionId: true,
+            periodStart: true,
+            periodEnd: true,
+            status: true,
+          },
+        },
       },
     });
     const period = subscription?.billingPeriod;
@@ -465,25 +623,39 @@ export class PaidIncludedRecoveryReservationService {
       period.subscriptionId !== subscription.id ||
       period.status !== BillingPeriodStatus.OPEN ||
       period.periodEnd <= now ||
-      subscription.currentPeriodStart?.getTime() !== period.periodStart.getTime() ||
+      subscription.currentPeriodStart?.getTime() !==
+        period.periodStart.getTime() ||
       subscription.currentPeriodEnd?.getTime() !== period.periodEnd.getTime()
     ) {
-      throw new PaidIncludedRecoveryReservationError("Paid subscription has no exact current open billing period");
+      throw new PaidIncludedRecoveryReservationError(
+        "Paid subscription has no exact current open billing period",
+      );
     }
     return period;
   }
 
-  private async requireCounter(transaction: ReservationTransaction, period: CurrentPeriod) {
-    const counter = await transaction.billingPeriodEntitlementCounter.findUnique({
-      where: {
-        billingPeriodId_counter: {
-          billingPeriodId: period.id,
-          counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+  private async requireCounter(
+    transaction: ReservationTransaction,
+    period: CurrentPeriod,
+  ) {
+    const counter =
+      await transaction.billingPeriodEntitlementCounter.findUnique({
+        where: {
+          billingPeriodId_counter: {
+            billingPeriodId: period.id,
+            counter:
+              BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+          },
         },
-      },
-    });
-    if (!counter || counter.shopId !== period.shopId || counter.billingPeriodId !== period.id) {
-      throw new PaidIncludedRecoveryReservationError("Included recovery period counter does not exist");
+      });
+    if (
+      !counter ||
+      counter.shopId !== period.shopId ||
+      counter.billingPeriodId !== period.id
+    ) {
+      throw new PaidIncludedRecoveryReservationError(
+        "Included recovery period counter does not exist",
+      );
     }
     validateCounter(counter);
     return counter;
@@ -495,14 +667,19 @@ export class PaidIncludedRecoveryReservationService {
     shopId: string,
   ) {
     if (!reservation.billingPeriodEntitlementCounterId) {
-      throw new PaidIncludedRecoveryReservationError("Reservation period counter does not exist");
+      throw new PaidIncludedRecoveryReservationError(
+        "Reservation period counter does not exist",
+      );
     }
-    const counter = await transaction.billingPeriodEntitlementCounter.findUnique({
-      where: { id: reservation.billingPeriodEntitlementCounterId },
-      include: { billingPeriod: true },
-    });
+    const counter =
+      await transaction.billingPeriodEntitlementCounter.findUnique({
+        where: { id: reservation.billingPeriodEntitlementCounterId },
+        include: { billingPeriod: true },
+      });
     if (!counter || counter.shopId !== shopId) {
-      throw new PaidIncludedRecoveryReservationError("Reservation billing period counter does not exist");
+      throw new PaidIncludedRecoveryReservationError(
+        "Reservation billing period counter does not exist",
+      );
     }
     validateCounter(counter);
     return counter;
@@ -513,24 +690,54 @@ export class PaidIncludedRecoveryReservationService {
     reservation: UsageReservation,
     shopId: string,
   ) {
-    const counter = await this.requireReservationCounter(transaction, reservation, shopId);
-    if (counter.billingPeriod.status !== BillingPeriodStatus.OPEN || counter.billingPeriod.periodEnd <= this.now()) {
-      throw new PaidIncludedRecoveryReservationError("Paid included reservation period is no longer open");
+    const counter = await this.requireReservationCounter(
+      transaction,
+      reservation,
+      shopId,
+    );
+    if (
+      counter.billingPeriod.status !== BillingPeriodStatus.OPEN ||
+      counter.billingPeriod.periodEnd <= this.now()
+    ) {
+      throw new PaidIncludedRecoveryReservationError(
+        "Paid included reservation period is no longer open",
+      );
     }
     return counter;
   }
 
-  private async readCounter(transaction: ReservationTransaction, reservation: UsageReservation): Promise<ReservationCounter> {
-    if (!reservation.billingPeriodEntitlementCounterId || reservation.counterId || reservation.purchasedCreditPurchaseId) {
-      throw new PaidIncludedRecoveryReservationError("Reservation is not a paid included reservation");
+  private async readCounter(
+    transaction: ReservationTransaction,
+    reservation: UsageReservation,
+  ): Promise<ReservationCounter> {
+    if (
+      !reservation.billingPeriodEntitlementCounterId ||
+      reservation.counterId ||
+      reservation.purchasedCreditPurchaseId
+    ) {
+      throw new PaidIncludedRecoveryReservationError(
+        "Reservation is not a paid included reservation",
+      );
     }
     return "INCLUDED_RECOVERY_CREDITS";
   }
 
-  private async requireReservation(transaction: ReservationTransaction, input: { shopId: string; sourceKey: string }) {
-    const reservation = await transaction.usageReservation.findUnique({ where: { sourceKey: input.sourceKey } });
-    if (!reservation) throw new PaidIncludedRecoveryReservationError("Reservation does not exist");
-    assertRecoveryReservationShop(reservation, input.shopId, (message) => new PaidIncludedRecoveryReservationError(message));
+  private async requireReservation(
+    transaction: ReservationTransaction,
+    input: { shopId: string; sourceKey: string },
+  ) {
+    const reservation = await transaction.usageReservation.findUnique({
+      where: { sourceKey: input.sourceKey },
+    });
+    if (!reservation)
+      throw new PaidIncludedRecoveryReservationError(
+        "Reservation does not exist",
+      );
+    assertRecoveryReservationShop(
+      reservation,
+      input.shopId,
+      (message) => new PaidIncludedRecoveryReservationError(message),
+    );
     return reservation;
   }
 
@@ -538,15 +745,17 @@ export class PaidIncludedRecoveryReservationService {
     return withRecoveryReservationRetry({
       operation,
       maxRetries: this.maxRetries,
-      createRetryLimitError: (message) => new PaidIncludedRecoveryReservationError(message),
+      createRetryLimitError: (message) =>
+        new PaidIncludedRecoveryReservationError(message),
     });
   }
 }
 
-
 function validateCounter(counter: PaidIncludedAllowanceCounter): void {
   if (!isValidPaidIncludedAllowanceCounter(counter)) {
-    throw new PaidIncludedRecoveryReservationError("Included recovery period counter quantities are invalid");
+    throw new PaidIncludedRecoveryReservationError(
+      "Included recovery period counter quantities are invalid",
+    );
   }
 }
 
@@ -562,5 +771,5 @@ function replayOutcome(
     : { kind, reservation, counter, sourceKey, policy };
 }
 
-
-export const paidIncludedRecoveryReservationService = new PaidIncludedRecoveryReservationService();
+export const paidIncludedRecoveryReservationService =
+  new PaidIncludedRecoveryReservationService();

@@ -14,7 +14,15 @@ import {
 async function workbookBytes(): Promise<Uint8Array> {
   const workbook = new ExcelJS.Workbook();
   const visible = workbook.addWorksheet("Visible");
-  visible.addRow(["Name", "", "Details", "Boolean", "Date", "Formula", "No cache"]);
+  visible.addRow([
+    "Name",
+    "",
+    "Details",
+    "Boolean",
+    "Date",
+    "Formula",
+    "No cache",
+  ]);
   visible.addRow([
     " Widget ",
     12.5,
@@ -31,23 +39,30 @@ async function workbookBytes(): Promise<Uint8Array> {
 
   const sharedFormula = workbook.addWorksheet("Shared formula");
   sharedFormula.addRow(["Item", "Cached result"]);
-  sharedFormula.addRow(["master", { formula: "1+1", result: 2, shareType: "shared", ref: "B2:B3" }]);
+  sharedFormula.addRow([
+    "master",
+    { formula: "1+1", result: 2, shareType: "shared", ref: "B2:B3" },
+  ]);
   sharedFormula.addRow(["follower", { sharedFormula: "B2", result: 3 }]);
   return new Uint8Array(await workbook.xlsx.writeBuffer());
 }
 
 describe("extractMerchantKnowledgeXlsx", () => {
   it("extracts the exact originally failed XLSX containing prefixed SpreadsheetML tags", async () => {
-    const bytes = await readFile(new URL(
-      "../../fixtures/merchant-knowledge/moda_merchant_knowledge_support_test.xlsx",
-      import.meta.url,
-    ));
+    const bytes = await readFile(
+      new URL(
+        "../../fixtures/merchant-knowledge/moda_merchant_knowledge_support_test.xlsx",
+        import.meta.url,
+      ),
+    );
     expect(createHash("sha256").update(bytes).digest("hex")).toBe(
       "ed12cb0742ee5d5033ba2d982bb58150ccbf56827a3a6a751736b684a3ce2ef7",
     );
 
     const extracted = await extractMerchantKnowledgeXlsx(
-      "moda_merchant_knowledge_support_test.xlsx", bytes, 1_000_000,
+      "moda_merchant_knowledge_support_test.xlsx",
+      bytes,
+      1_000_000,
     );
     expect(extracted).toContain("Worksheet: Products");
     expect(extracted).toContain("Classic Cotton T-Shirt");
@@ -70,10 +85,14 @@ describe("extractMerchantKnowledgeXlsx", () => {
   });
 
   it("rejects invalid names and malformed ZIP data", async () => {
-    await expect(extractMerchantKnowledgeXlsx("catalog.xls", new Uint8Array(), 100)).rejects.toMatchObject({
+    await expect(
+      extractMerchantKnowledgeXlsx("catalog.xls", new Uint8Array(), 100),
+    ).rejects.toMatchObject({
       code: "INVALID_FILENAME",
     });
-    await expect(extractMerchantKnowledgeXlsx("catalog.xlsx", Uint8Array.of(1, 2, 3), 100)).rejects.toMatchObject({
+    await expect(
+      extractMerchantKnowledgeXlsx("catalog.xlsx", Uint8Array.of(1, 2, 3), 100),
+    ).rejects.toMatchObject({
       code: "INVALID_XLSX",
     });
   });
@@ -85,32 +104,44 @@ describe("extractMerchantKnowledgeXlsx", () => {
       generalPurposeBitFlag: 0,
     };
 
-    expect(() => assertSafeMerchantKnowledgeXlsxEntries([safeEntry], 10)).not.toThrow();
-    expect(() => assertSafeMerchantKnowledgeXlsxEntries([safeEntry], 9)).toThrowError(
-      expect.objectContaining({ code: "UNSAFE_XLSX" }),
-    );
-    expect(() => assertSafeMerchantKnowledgeXlsxEntries([
-      { ...safeEntry, fileName: "XL/EXTERNALlinks/externalLink1.xml" },
-    ], 100)).toThrowError(expect.objectContaining({ code: "UNSAFE_XLSX" }));
-    expect(() => assertSafeMerchantKnowledgeXlsxEntries([
-      { ...safeEntry, generalPurposeBitFlag: 1 },
-    ], 100)).toThrowError(expect.objectContaining({ code: "UNSAFE_XLSX" }));
+    expect(() =>
+      assertSafeMerchantKnowledgeXlsxEntries([safeEntry], 10),
+    ).not.toThrow();
+    expect(() =>
+      assertSafeMerchantKnowledgeXlsxEntries([safeEntry], 9),
+    ).toThrowError(expect.objectContaining({ code: "UNSAFE_XLSX" }));
+    expect(() =>
+      assertSafeMerchantKnowledgeXlsxEntries(
+        [{ ...safeEntry, fileName: "XL/EXTERNALlinks/externalLink1.xml" }],
+        100,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "UNSAFE_XLSX" }));
+    expect(() =>
+      assertSafeMerchantKnowledgeXlsxEntries(
+        [{ ...safeEntry, generalPurposeBitFlag: 1 }],
+        100,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "UNSAFE_XLSX" }));
     expect(MerchantKnowledgeXlsxExtractionError).toBeTypeOf("function");
   });
 
   it("requires the core OOXML parts in the central directory", () => {
-    expect(() => assertValidMerchantKnowledgeXlsxEntries([
-      { fileName: "random.txt" },
-    ])).toThrowError(expect.objectContaining({ code: "INVALID_XLSX" }));
-    expect(() => assertValidMerchantKnowledgeXlsxEntries([
-      { fileName: "[Content_Types].xml" },
-      { fileName: "xl/workbook.xml" },
-    ])).not.toThrow();
+    expect(() =>
+      assertValidMerchantKnowledgeXlsxEntries([{ fileName: "random.txt" }]),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_XLSX" }));
+    expect(() =>
+      assertValidMerchantKnowledgeXlsxEntries([
+        { fileName: "[Content_Types].xml" },
+        { fileName: "xl/workbook.xml" },
+      ]),
+    ).not.toThrow();
   });
 
   it("checks the archive expansion limit before loading the workbook", async () => {
     const bytes = await workbookBytes();
-    await expect(extractMerchantKnowledgeXlsx("catalog.xlsx", bytes, 1)).rejects.toMatchObject({
+    await expect(
+      extractMerchantKnowledgeXlsx("catalog.xlsx", bytes, 1),
+    ).rejects.toMatchObject({
       code: "UNSAFE_XLSX",
     });
   });

@@ -1,7 +1,9 @@
 import { parse } from "csv-parse/sync";
 
 export class MerchantKnowledgeCsvExtractionError extends Error {
-  constructor(readonly code: "INVALID_FILENAME" | "INVALID_UTF8" | "INVALID_CSV") {
+  constructor(
+    readonly code: "INVALID_FILENAME" | "INVALID_UTF8" | "INVALID_CSV",
+  ) {
     super(code);
     this.name = "MerchantKnowledgeCsvExtractionError";
   }
@@ -41,7 +43,9 @@ export function extractMerchantKnowledgeCsv(
     throw new MerchantKnowledgeCsvExtractionError("INVALID_CSV");
   }
 
-  const headerIndex = records.findIndex((record) => record.some((cell) => !isBlank(cell)));
+  const headerIndex = records.findIndex((record) =>
+    record.some((cell) => !isBlank(cell)),
+  );
   if (headerIndex < 0) return "";
 
   const header = records[headerIndex]!.map((cell, index) =>

@@ -4,8 +4,11 @@ import { safeCommerceDiagnosticText } from "../../../../src/commerce/host-diagno
 export function registerRecommendationFailureTests() {
   describe("recommendation failure boundaries", () => {
     it("redacts an unsafe full diagnostic payload", () => {
-      expect(safeCommerceDiagnosticText("SELECT * FROM customers WHERE email='private@example.test'"))
-        .toMatchObject({ value: "[REDACTED]", redacted: true });
+      expect(
+        safeCommerceDiagnosticText(
+          "SELECT * FROM customers WHERE email='private@example.test'",
+        ),
+      ).toMatchObject({ value: "[REDACTED]", redacted: true });
     });
   });
 }

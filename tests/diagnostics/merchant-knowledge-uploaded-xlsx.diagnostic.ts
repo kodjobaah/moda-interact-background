@@ -18,7 +18,8 @@ const fileUrl = new URL(
   "../fixtures/merchant-knowledge/moda_merchant_knowledge_support_test.xlsx",
   import.meta.url,
 );
-const expectedSha256 = "ed12cb0742ee5d5033ba2d982bb58150ccbf56827a3a6a751736b684a3ce2ef7";
+const expectedSha256 =
+  "ed12cb0742ee5d5033ba2d982bb58150ccbf56827a3a6a751736b684a3ce2ef7";
 
 async function fixtureBytes(): Promise<Buffer> {
   return readFile(fileUrl);
@@ -34,7 +35,10 @@ function reportFailure(stage: string, error: unknown): void {
 
 test("original XLSX fixture is unchanged", async () => {
   const bytes = await fixtureBytes();
-  assert.equal(createHash("sha256").update(bytes).digest("hex"), expectedSha256);
+  assert.equal(
+    createHash("sha256").update(bytes).digest("hex"),
+    expectedSha256,
+  );
 });
 
 test("the original uploaded workbook uses prefixed SpreadsheetML elements", async () => {

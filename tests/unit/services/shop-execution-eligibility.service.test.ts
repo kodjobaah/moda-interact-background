@@ -14,8 +14,7 @@ function service(
     subscription: {
       findUnique: vi.fn().mockResolvedValue({
         status,
-        lastProviderLifecycleState:
-          options.lastProviderLifecycleState ?? null,
+        lastProviderLifecycleState: options.lastProviderLifecycleState ?? null,
         shop: {
           status: shopStatus,
           platform: options.platform ?? "SHOPIFY",
@@ -30,8 +29,14 @@ describe("ShopExecutionEligibilityService", () => {
   it.each([
     ["ACTIVE", { allowed: true, shopId: "shop-1" }],
     ["TRIALING", { allowed: true, shopId: "shop-1" }],
-    ["NO_CONTRACT", { allowed: false, shopId: "shop-1", reason: "CONTRACT_REQUIRED" }],
-    ["FROZEN", { allowed: false, shopId: "shop-1", reason: "SUBSCRIPTION_FROZEN" }],
+    [
+      "NO_CONTRACT",
+      { allowed: false, shopId: "shop-1", reason: "CONTRACT_REQUIRED" },
+    ],
+    [
+      "FROZEN",
+      { allowed: false, shopId: "shop-1", reason: "SUBSCRIPTION_FROZEN" },
+    ],
     ["UNMAPPED", { allowed: false, shopId: "shop-1", reason: "UNMAPPED_PLAN" }],
     ["SYNC_ERROR", { allowed: false, shopId: "shop-1", reason: "SYNC_ERROR" }],
   ])("maps a resolved shop projection for %s", (status, expected) => {
@@ -80,7 +85,9 @@ describe("ShopExecutionEligibilityService", () => {
   });
 
   it("preserves the shop lifecycle denial independent of subscription state", async () => {
-    await expect(service("ACTIVE", "UNINSTALLED").evaluate("shop-1")).resolves.toEqual({
+    await expect(
+      service("ACTIVE", "UNINSTALLED").evaluate("shop-1"),
+    ).resolves.toEqual({
       allowed: false,
       shopId: "shop-1",
       reason: "SHOP_UNAVAILABLE",
@@ -103,9 +110,13 @@ describe("ShopExecutionEligibilityService", () => {
   });
 
   it("allows Woo FROZEN for recovery only while keeping general execution blocked", async () => {
-    const eligibility = service("FROZEN", "ACTIVE", { platform: "WOOCOMMERCE" });
+    const eligibility = service("FROZEN", "ACTIVE", {
+      platform: "WOOCOMMERCE",
+    });
 
-    await expect(eligibility.evaluate("shop-1", undefined, "recovery")).resolves.toEqual({
+    await expect(
+      eligibility.evaluate("shop-1", undefined, "recovery"),
+    ).resolves.toEqual({
       allowed: true,
       shopId: "shop-1",
     });
@@ -130,5 +141,4 @@ describe("ShopExecutionEligibilityService", () => {
       reason: "CONTRACT_REQUIRED",
     });
   });
-
 });

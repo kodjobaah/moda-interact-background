@@ -1,6 +1,9 @@
 import { Queue } from "bullmq";
 import { Prisma } from "@prisma/client";
-import { CommerceEnvironmentSchema, type CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
+import {
+  CommerceEnvironmentSchema,
+  type CommerceEnvironment,
+} from "@modainteract/moda-interact-shared/commerce/model";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import {
@@ -37,7 +40,8 @@ import {
 } from "./translation-batch-runtime/failure-policy.js";
 import { submitTranslationProviderBatch } from "./translation-batch-runtime/provider-submission.js";
 
-export type MerchantPricingSubmitFailureClassification = TranslationSubmitFailureClassification;
+export type MerchantPricingSubmitFailureClassification =
+  TranslationSubmitFailureClassification;
 
 type BatchToSubmit = {
   id: string;
@@ -59,7 +63,9 @@ type SubmissionTransaction = {
 };
 
 type SubmissionDatabase = {
-  $transaction<T>(callback: (transaction: SubmissionTransaction) => Promise<T>): Promise<T>;
+  $transaction<T>(
+    callback: (transaction: SubmissionTransaction) => Promise<T>,
+  ): Promise<T>;
 };
 
 type SubmissionQueue = Pick<Queue, "add">;
@@ -91,35 +97,53 @@ export class MerchantPricingTranslationBatchSubmitService {
   private readonly providerFactory: ProviderFactory;
   private readonly queue: SubmissionQueue;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
-  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
+  private readonly credentialResolverFactory: () =>
+    | TranslationProviderCredentialResolver
+    | Promise<TranslationProviderCredentialResolver>;
 
-  constructor(options: {
-    database?: SubmissionDatabase;
-    providerFactory?: ProviderFactory;
-    queue?: SubmissionQueue;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-    credentialResolverFactory?: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
-  } = {}) {
+  constructor(
+    options: {
+      database?: SubmissionDatabase;
+      providerFactory?: ProviderFactory;
+      queue?: SubmissionQueue;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+      credentialResolverFactory?: () =>
+        | TranslationProviderCredentialResolver
+        | Promise<TranslationProviderCredentialResolver>;
+    } = {},
+  ) {
     this.database = options.database ?? prisma;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) =>
-      createOpenAITranslationProvider(providerOptions));
-    this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
-      connection: connectionRedis,
-    });
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
-    this.credentialResolverFactory = options.credentialResolverFactory ?? defaultCredentialResolver;
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.queue =
+      options.queue ??
+      new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
+        connection: connectionRedis,
+      });
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.credentialResolverFactory =
+      options.credentialResolverFactory ?? defaultCredentialResolver;
   }
 
-  async submit(input: { translationBatchId: string }): Promise<MerchantPricingTranslationBatchSubmitResult> {
+  async submit(input: {
+    translationBatchId: string;
+  }): Promise<MerchantPricingTranslationBatchSubmitResult> {
     const startedAt = Date.now();
     const claimed = await this.claimReadyBatch(input.translationBatchId);
-    if (!claimed) return { status: "skipped", batchId: input.translationBatchId };
+    if (!claimed)
+      return { status: "skipped", batchId: input.translationBatchId };
     const runtimeConfig = currentTranslationRuntimeConfig(this.runtimeConfig);
 
     let provider: TranslationProvider;
     try {
-      const environment = CommerceEnvironmentSchema.parse(claimed.environment) as CommerceEnvironment;
-      const apiKey = await (await this.credentialResolverFactory()).resolve({
+      const environment = CommerceEnvironmentSchema.parse(
+        claimed.environment,
+      ) as CommerceEnvironment;
+      const apiKey = await (
+        await this.credentialResolverFactory()
+      ).resolve({
         environment,
         provider: claimed.provider,
       });
@@ -129,15 +153,23 @@ export class MerchantPricingTranslationBatchSubmitService {
         apiKey,
       });
     } catch (error) {
-      await this.persistFailure(claimed, "DEFINITE_TERMINAL_NOT_CREATED", error, runtimeConfig);
-      logger.error("background.merchant_pricing_translation.batch_submit_failed", {
-        runId: claimed.runId,
-        batchId: claimed.id,
-        provider: claimed.provider,
-        model: claimed.model,
-        failureCode: translationSubmissionFailureCode(error),
-        durationMs: Date.now() - startedAt,
-      });
+      await this.persistFailure(
+        claimed,
+        "DEFINITE_TERMINAL_NOT_CREATED",
+        error,
+        runtimeConfig,
+      );
+      logger.error(
+        "background.merchant_pricing_translation.batch_submit_failed",
+        {
+          runId: claimed.runId,
+          batchId: claimed.id,
+          provider: claimed.provider,
+          model: claimed.model,
+          failureCode: translationSubmissionFailureCode(error),
+          durationMs: Date.now() - startedAt,
+        },
+      );
       return { status: "skipped", batchId: claimed.id };
     }
 
@@ -146,12 +178,20 @@ export class MerchantPricingTranslationBatchSubmitService {
       inputFileId: claimed.inputFileId,
       provider,
       loadRequests: () => this.loadRequests(claimed.id),
-      persistInputFileId: (inputFileId) => this.persistInputFileId(claimed.id, inputFileId),
+      persistInputFileId: (inputFileId) =>
+        this.persistInputFileId(claimed.id, inputFileId),
       persistSubmitted: ({ providerBatchId, inputFileId }) =>
-        this.persistSubmitted(claimed.id, providerBatchId, inputFileId, runtimeConfig),
+        this.persistSubmitted(
+          claimed.id,
+          providerBatchId,
+          inputFileId,
+          runtimeConfig,
+        ),
       validateInputFileId: (inputFileId) => {
         if (!inputFileId) {
-          throw new Error("Merchant Pricing translation Batch input file is unavailable");
+          throw new Error(
+            "Merchant Pricing translation Batch input file is unavailable",
+          );
         }
       },
     });
@@ -163,16 +203,20 @@ export class MerchantPricingTranslationBatchSubmitService {
         submission.error,
         runtimeConfig,
       );
-      logger.error("background.merchant_pricing_translation.batch_submit_failed", {
-        runId: claimed.runId,
-        batchId: claimed.id,
-        provider: claimed.provider,
-        model: claimed.model,
-        failureCode: translationSubmissionFailureCode(submission.error),
-        classification: submission.classification,
-        durationMs: Date.now() - startedAt,
-      });
-      if (submission.classification === "AMBIGUOUS_CREATE") throw submission.error;
+      logger.error(
+        "background.merchant_pricing_translation.batch_submit_failed",
+        {
+          runId: claimed.runId,
+          batchId: claimed.id,
+          provider: claimed.provider,
+          model: claimed.model,
+          failureCode: translationSubmissionFailureCode(submission.error),
+          classification: submission.classification,
+          durationMs: Date.now() - startedAt,
+        },
+      );
+      if (submission.classification === "AMBIGUOUS_CREATE")
+        throw submission.error;
       return { status: "skipped", batchId: claimed.id };
     }
 
@@ -191,7 +235,9 @@ export class MerchantPricingTranslationBatchSubmitService {
     };
   }
 
-  private async claimReadyBatch(batchId: string): Promise<BatchToSubmit | null> {
+  private async claimReadyBatch(
+    batchId: string,
+  ): Promise<BatchToSubmit | null> {
     return this.database.$transaction(async (transaction) => {
       const rows = await transaction.$queryRaw<BatchToSubmit[]>(Prisma.sql`
         UPDATE "billing"."MerchantPricingTranslationBatch" b
@@ -215,7 +261,8 @@ export class MerchantPricingTranslationBatchSubmitService {
   }
 
   private async loadRequests(batchId: string): Promise<BatchItemRequest[]> {
-    return this.database.$transaction(async (transaction) => transaction.$queryRaw<BatchItemRequest[]>(Prisma.sql`
+    return this.database.$transaction(async (transaction) =>
+      transaction.$queryRaw<BatchItemRequest[]>(Prisma.sql`
       SELECT
         i."translationItemId" AS "translationId",
         i."providerCustomId",
@@ -227,17 +274,24 @@ export class MerchantPricingTranslationBatchSubmitService {
         ON t."id" = i."translationItemId"
       WHERE i."batchId" = ${batchId}
       ORDER BY i."createdAt", i."id"
-    `));
+    `),
+    );
   }
 
-  private async persistInputFileId(batchId: string, inputFileId: string): Promise<void> {
+  private async persistInputFileId(
+    batchId: string,
+    inputFileId: string,
+  ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
       const affected = await transaction.$executeRaw(Prisma.sql`
         UPDATE "billing"."MerchantPricingTranslationBatch"
         SET "inputFileId" = ${inputFileId}, "updatedAt" = NOW()
         WHERE "id" = ${batchId} AND "status" = 'SUBMITTING'
       `);
-      if (affected !== 1) throw new Error("Merchant Pricing translation Batch input file write was stale");
+      if (affected !== 1)
+        throw new Error(
+          "Merchant Pricing translation Batch input file write was stale",
+        );
     });
   }
 
@@ -261,10 +315,13 @@ export class MerchantPricingTranslationBatchSubmitService {
           "updatedAt" = NOW()
         WHERE "id" = ${batchId} AND "status" = 'SUBMITTING'
       `);
-      if (affected !== 1) throw Object.assign(
-        new Error("Accepted Merchant Pricing provider Batch could not be persisted"),
-        { classification: "AMBIGUOUS_CREATE" as const },
-      );
+      if (affected !== 1)
+        throw Object.assign(
+          new Error(
+            "Accepted Merchant Pricing provider Batch could not be persisted",
+          ),
+          { classification: "AMBIGUOUS_CREATE" as const },
+        );
     });
   }
 
@@ -274,16 +331,21 @@ export class MerchantPricingTranslationBatchSubmitService {
     error: unknown,
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<void> {
-    const nextStatus = classification === "AMBIGUOUS_CREATE"
-      ? "SUBMISSION_UNKNOWN"
-      : classification === "DEFINITE_TERMINAL_NOT_CREATED" ||
-          batch.submitAttemptCount >= runtimeConfig.translationSubmitMaxAttempts
-        ? "FAILED"
-        : "READY";
+    const nextStatus =
+      classification === "AMBIGUOUS_CREATE"
+        ? "SUBMISSION_UNKNOWN"
+        : classification === "DEFINITE_TERMINAL_NOT_CREATED" ||
+            batch.submitAttemptCount >=
+              runtimeConfig.translationSubmitMaxAttempts
+          ? "FAILED"
+          : "READY";
     const terminal = nextStatus === "FAILED";
-    const nextSubmitAt = terminal || nextStatus !== "READY"
-      ? null
-      : new Date(Date.now() + runtimeConfig.translationSubmitRetrySeconds * 1000);
+    const nextSubmitAt =
+      terminal || nextStatus !== "READY"
+        ? null
+        : new Date(
+            Date.now() + runtimeConfig.translationSubmitRetrySeconds * 1000,
+          );
     const code = translationSubmissionFailureCode(error);
 
     await this.database.$transaction(async (transaction) => {
@@ -327,17 +389,24 @@ export class MerchantPricingTranslationBatchSubmitService {
         MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_POLL,
         job,
         {
-          jobId: createMerchantPricingTranslationBatchPollJobId(batchId, pollSequence),
+          jobId: createMerchantPricingTranslationBatchPollJobId(
+            batchId,
+            pollSequence,
+          ),
           delay: runtimeConfig.translationInitialPollSeconds * 1000,
         },
       );
     } catch (error) {
-      logger.warn("background.merchant_pricing_translation.poll_enqueue_failed", {
-        batchId,
-        pollSequence,
-        errorMessage: error instanceof Error ? error.message : "unknown failure",
-        error: error,
-      });
+      logger.warn(
+        "background.merchant_pricing_translation.poll_enqueue_failed",
+        {
+          batchId,
+          pollSequence,
+          errorMessage:
+            error instanceof Error ? error.message : "unknown failure",
+          error: error,
+        },
+      );
     }
   }
 }

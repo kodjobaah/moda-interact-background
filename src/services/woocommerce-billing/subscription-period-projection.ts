@@ -12,9 +12,19 @@ import { PermanentSubscriptionEvidenceError } from "./subscription-receipt-evide
 
 type Transaction = Prisma.TransactionClient;
 export type CurrentWooSubscription = Prisma.SubscriptionGetPayload<{
-  include: { plan: true; billingPeriod: { include: { entitlementCounters: true } } };
+  include: {
+    plan: true;
+    billingPeriod: { include: { entitlementCounters: true } };
+  };
 }>;
-export type WooPaidPlan = Pick<BillingPlan, "id" | "name" | "kind" | "shopifyPlanHandle" | "includedRecoveryConversationAllowance">;
+export type WooPaidPlan = Pick<
+  BillingPlan,
+  | "id"
+  | "name"
+  | "kind"
+  | "shopifyPlanHandle"
+  | "includedRecoveryConversationAllowance"
+>;
 
 export async function switchWooSubscriptionPlan(
   transaction: Transaction,
@@ -24,10 +34,16 @@ export async function switchWooSubscriptionPlan(
 ): Promise<void> {
   requirePaidPlan(plan);
   const period = current.billingPeriod;
-  if (!period || current.billingPeriodId !== period.id || period.status !== BillingPeriodStatus.OPEN
-    || current.currentPeriodStart?.getTime() !== period.periodStart.getTime()
-    || current.currentPeriodEnd?.getTime() !== period.periodEnd.getTime()) {
-    throw new PermanentSubscriptionEvidenceError("CURRENT_PAID_PERIOD_INCONSISTENT");
+  if (
+    !period ||
+    current.billingPeriodId !== period.id ||
+    period.status !== BillingPeriodStatus.OPEN ||
+    current.currentPeriodStart?.getTime() !== period.periodStart.getTime() ||
+    current.currentPeriodEnd?.getTime() !== period.periodEnd.getTime()
+  ) {
+    throw new PermanentSubscriptionEvidenceError(
+      "CURRENT_PAID_PERIOD_INCONSISTENT",
+    );
   }
   const counter = await transaction.billingPeriodEntitlementCounter.findUnique({
     where: {
@@ -37,12 +53,23 @@ export async function switchWooSubscriptionPlan(
       },
     },
   });
-  if (!counter || counter.shopId !== current.shopId || counter.grantedQuantity < 0) {
-    throw new PermanentSubscriptionEvidenceError("CURRENT_PAID_COUNTER_MISSING");
+  if (
+    !counter ||
+    counter.shopId !== current.shopId ||
+    counter.grantedQuantity < 0
+  ) {
+    throw new PermanentSubscriptionEvidenceError(
+      "CURRENT_PAID_COUNTER_MISSING",
+    );
   }
-  const obligations = counter.committedQuantity + counter.reservedQuantity + counter.forfeitedQuantity;
+  const obligations =
+    counter.committedQuantity +
+    counter.reservedQuantity +
+    counter.forfeitedQuantity;
   if (obligations > counter.grantedQuantity) {
-    throw new PermanentSubscriptionEvidenceError("CURRENT_PAID_COUNTER_INCONSISTENT");
+    throw new PermanentSubscriptionEvidenceError(
+      "CURRENT_PAID_COUNTER_INCONSISTENT",
+    );
   }
   await transaction.billingPeriod.update({
     where: { id: period.id },
@@ -51,14 +78,19 @@ export async function switchWooSubscriptionPlan(
       shopifyPlanHandleSnapshot: plan.shopifyPlanHandle,
       planNameSnapshot: plan.name,
       planKindSnapshot: BillingPlanKind.PAID_METERED,
-      includedRecoveryCreditsGranted: plan.includedRecoveryConversationAllowance,
+      includedRecoveryCreditsGranted:
+        plan.includedRecoveryConversationAllowance,
     },
   });
   await transaction.billingPeriodEntitlementCounter.update({
     where: { id: counter.id },
     data: {
       currentAllowanceQuantity: plan.includedRecoveryConversationAllowance,
-      grantedQuantity: Math.max(counter.grantedQuantity, obligations, plan.includedRecoveryConversationAllowance!),
+      grantedQuantity: Math.max(
+        counter.grantedQuantity,
+        obligations,
+        plan.includedRecoveryConversationAllowance!,
+      ),
       version: { increment: 1 },
     },
   });
@@ -81,13 +113,24 @@ export async function endWooPaidSubscription(
   now: Date,
 ): Promise<void> {
   const period = current.billingPeriod;
-  if (current.providerSubscriptionId !== contractId || !period || current.billingPeriodId !== period.id
-    || period.status !== BillingPeriodStatus.OPEN || period.planKindSnapshot !== BillingPlanKind.PAID_METERED) {
-    throw new PermanentSubscriptionEvidenceError("TERMINAL_SUBSCRIPTION_STATE_INCONSISTENT");
+  if (
+    current.providerSubscriptionId !== contractId ||
+    !period ||
+    current.billingPeriodId !== period.id ||
+    period.status !== BillingPeriodStatus.OPEN ||
+    period.planKindSnapshot !== BillingPlanKind.PAID_METERED
+  ) {
+    throw new PermanentSubscriptionEvidenceError(
+      "TERMINAL_SUBSCRIPTION_STATE_INCONSISTENT",
+    );
   }
-  const periodEnd = new Date(Math.min(period.periodEnd.getTime(), endAt.getTime()));
+  const periodEnd = new Date(
+    Math.min(period.periodEnd.getTime(), endAt.getTime()),
+  );
   if (periodEnd.getTime() <= period.periodStart.getTime()) {
-    throw new PermanentSubscriptionEvidenceError("TERMINAL_PERIOD_BOUNDARY_INVALID");
+    throw new PermanentSubscriptionEvidenceError(
+      "TERMINAL_PERIOD_BOUNDARY_INVALID",
+    );
   }
   const collision = await transaction.billingPeriod.findUnique({
     where: {
@@ -100,24 +143,31 @@ export async function endWooPaidSubscription(
     select: { id: true },
   });
   if (collision && collision.id !== period.id) {
-    throw new PermanentSubscriptionEvidenceError("TERMINAL_PERIOD_BOUNDARY_CONFLICT");
+    throw new PermanentSubscriptionEvidenceError(
+      "TERMINAL_PERIOD_BOUNDARY_CONFLICT",
+    );
   }
   if (periodEnd.getTime() !== period.periodEnd.getTime()) {
-    await transaction.billingPeriod.update({ where: { id: period.id }, data: { periodEnd } });
+    await transaction.billingPeriod.update({
+      where: { id: period.id },
+      data: { periodEnd },
+    });
   }
   await closeBillingPeriod(transaction, {
     billingPeriodId: period.id,
     planKind: BillingPlanKind.PAID_METERED,
     closedAt: now,
     closeReason: BillingPeriodCloseReason.CONTRACT_ENDED,
-    openPeriodFailureMessage: "Woo terminal billing period changed during close",
+    openPeriodFailureMessage:
+      "Woo terminal billing period changed during close",
   });
   const freePlans = await transaction.billingPlan.findMany({
     where: { kind: BillingPlanKind.FREE, active: true },
     select: { id: true },
     take: 2,
   });
-  if (freePlans.length !== 1) throw new PermanentSubscriptionEvidenceError("FREE_PLAN_NOT_UNIQUE");
+  if (freePlans.length !== 1)
+    throw new PermanentSubscriptionEvidenceError("FREE_PLAN_NOT_UNIQUE");
   await transaction.subscription.update({
     where: { id: current.id },
     data: {
@@ -137,9 +187,15 @@ export async function endWooPaidSubscription(
   });
 }
 
-function requirePaidPlan(plan: WooPaidPlan): asserts plan is WooPaidPlan & { includedRecoveryConversationAllowance: number } {
+function requirePaidPlan(plan: WooPaidPlan): asserts plan is WooPaidPlan & {
+  includedRecoveryConversationAllowance: number;
+} {
   const allowance = plan.includedRecoveryConversationAllowance;
-  if (plan.kind !== BillingPlanKind.PAID_METERED || !Number.isSafeInteger(allowance) || (allowance ?? -1) < 0) {
+  if (
+    plan.kind !== BillingPlanKind.PAID_METERED ||
+    !Number.isSafeInteger(allowance) ||
+    (allowance ?? -1) < 0
+  ) {
     throw new PermanentSubscriptionEvidenceError("TARGET_PAID_PLAN_INVALID");
   }
 }

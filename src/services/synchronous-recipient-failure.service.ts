@@ -8,17 +8,28 @@ import { synchronousRecipientFailureEvidenceService } from "./synchronous-recipi
  */
 export class SynchronousRecipientFailureService {
   constructor(
-    private readonly evidence: Pick<typeof synchronousRecipientFailureEvidenceService, "record"> =
-      synchronousRecipientFailureEvidenceService,
-    private readonly correction: Pick<typeof recoveryDeliveryCompensationService, "reconcileMessage"> =
-      recoveryDeliveryCompensationService,
-    private readonly reachability: Pick<typeof recipientReachabilityFailureService, "afterCorrection"> =
-      recipientReachabilityFailureService,
-    private readonly notification: Pick<typeof recoveryDeliveryMerchantNotificationService, "notify"> =
-      recoveryDeliveryMerchantNotificationService,
+    private readonly evidence: Pick<
+      typeof synchronousRecipientFailureEvidenceService,
+      "record"
+    > = synchronousRecipientFailureEvidenceService,
+    private readonly correction: Pick<
+      typeof recoveryDeliveryCompensationService,
+      "reconcileMessage"
+    > = recoveryDeliveryCompensationService,
+    private readonly reachability: Pick<
+      typeof recipientReachabilityFailureService,
+      "afterCorrection"
+    > = recipientReachabilityFailureService,
+    private readonly notification: Pick<
+      typeof recoveryDeliveryMerchantNotificationService,
+      "notify"
+    > = recoveryDeliveryMerchantNotificationService,
   ) {}
 
-  async afterAutomatedRejection(messageId: string, recipient: string): Promise<void> {
+  async afterAutomatedRejection(
+    messageId: string,
+    recipient: string,
+  ): Promise<void> {
     await this.evidence.record(messageId, recipient);
     await this.afterPersistedRejection(messageId);
   }
@@ -28,9 +39,13 @@ export class SynchronousRecipientFailureService {
    */
   async afterPersistedRejection(messageId: string): Promise<void> {
     const corrected = await this.correction.reconcileMessage(messageId);
-    const reachability = await this.reachability.afterCorrection({ messageId }, corrected);
+    const reachability = await this.reachability.afterCorrection(
+      { messageId },
+      corrected,
+    );
     await this.notification.notify({ messageId }, corrected, reachability);
   }
 }
 
-export const synchronousRecipientFailureService = new SynchronousRecipientFailureService();
+export const synchronousRecipientFailureService =
+  new SynchronousRecipientFailureService();

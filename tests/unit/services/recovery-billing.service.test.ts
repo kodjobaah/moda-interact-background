@@ -13,7 +13,6 @@ import {
 } from "./recovery-billing/recovery-billing.test-support.js";
 
 describe("RecoveryBillingService", () => {
-
   it("uses purchased credits after an onboarded Shopify subscription has ended", async () => {
     const freeReservationService = {
       reserve: vi.fn(),
@@ -74,16 +73,12 @@ describe("RecoveryBillingService", () => {
     expect(freeReservationService.reservePostContract).not.toHaveBeenCalled();
   });
 
-
   it("keeps an onboarded merchant that never subscribed contract-required", async () => {
     const service = new RecoveryBillingService(
       createDatabase() as never,
       {
         resolve: vi.fn(async () => {
-          throw new EffectiveBillingPolicyError(
-            "NO_CONTRACT",
-            "no contract",
-          );
+          throw new EffectiveBillingPolicyError("NO_CONTRACT", "no contract");
         }),
       } as never,
       {
@@ -93,7 +88,12 @@ describe("RecoveryBillingService", () => {
         release: vi.fn(),
         markAmbiguous: vi.fn(),
       } as never,
-      { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      {
+        reserve: vi.fn(),
+        commit: vi.fn(),
+        release: vi.fn(),
+        markAmbiguous: vi.fn(),
+      } as never,
       paidIncludedReservationService() as never,
       unavailablePromotionalReservationService() as never,
       {
@@ -112,25 +112,39 @@ describe("RecoveryBillingService", () => {
   });
   it("denies checkout recovery before any reservation when the feature is absent", async () => {
     const database = createDatabase();
-    const reservation = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const reservation = {
+      reserve: vi.fn(),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
     const service = new RecoveryBillingService(
       database as never,
-      { resolve: vi.fn(async () => ({ ...freePolicy(), features: new Set<string>() })) } as never,
+      {
+        resolve: vi.fn(async () => ({
+          ...freePolicy(),
+          features: new Set<string>(),
+        })),
+      } as never,
       reservation as never,
       reservation as never,
       reservation as never,
       reservation as never,
     );
 
-    await expect(service.admit({ shopId: "shop-1", recoveryId: "feature-disabled" }))
-      .resolves.toEqual({ kind: "blocked", reason: "feature-unavailable" });
+    await expect(
+      service.admit({ shopId: "shop-1", recoveryId: "feature-disabled" }),
+    ).resolves.toEqual({ kind: "blocked", reason: "feature-unavailable" });
     expect(reservation.reserve).not.toHaveBeenCalled();
     expect(database.usageEvent.upsert).not.toHaveBeenCalled();
   });
 
   it("does not reserve paid included capacity while the billing period is draining", async () => {
     const purchasedReservationService = {
-      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
+      reserve: vi.fn(async () => ({
+        kind: "reserved" as const,
+        reservation: {},
+      })),
       commit: vi.fn(),
       release: vi.fn(),
       markAmbiguous: vi.fn(),
@@ -139,40 +153,50 @@ describe("RecoveryBillingService", () => {
     const service = new RecoveryBillingService(
       createDatabase() as never,
       { resolve: vi.fn(async () => paidPolicy("DRAINING")) } as never,
-      { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      {
+        reserve: vi.fn(),
+        commit: vi.fn(),
+        release: vi.fn(),
+        markAmbiguous: vi.fn(),
+      } as never,
       purchasedReservationService as never,
       paidReservationService as never,
       unavailablePromotionalReservationService() as never,
     );
 
-    await expect(service.admit({ shopId: "shop-1", recoveryId: "draining" }))
-      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    await expect(
+      service.admit({ shopId: "shop-1", recoveryId: "draining" }),
+    ).resolves.toMatchObject({
+      kind: "admitted",
+      admission: { kind: "purchased" },
+    });
     expect(paidReservationService.reserve).not.toHaveBeenCalled();
   });
 
   it("blocks an expired paid period with the reconciliation reason", async () => {
     const service = new RecoveryBillingService(
       createDatabase() as never,
-      { resolve: vi.fn(async () => paidPolicy("EXPIRED_RECONCILING")) } as never,
+      {
+        resolve: vi.fn(async () => paidPolicy("EXPIRED_RECONCILING")),
+      } as never,
     );
 
-    await expect(service.admit({ shopId: "shop-1", recoveryId: "expired" }))
-      .resolves.toEqual({ kind: "blocked", reason: "billing-period-reconciliation" });
+    await expect(
+      service.admit({ shopId: "shop-1", recoveryId: "expired" }),
+    ).resolves.toEqual({
+      kind: "blocked",
+      reason: "billing-period-reconciliation",
+    });
   });
-
-
-
-
-
-
-
-
 
   it("blocks exhausted Free admission and upserts one deterministic SYSTEM notification", async () => {
     const database = createDatabase();
     const policyResolver = { resolve: vi.fn(async () => freePolicy()) };
     const reservationService = {
-      reserve: vi.fn(async () => ({ kind: "allowance-exhausted", remaining: 0 })),
+      reserve: vi.fn(async () => ({
+        kind: "allowance-exhausted",
+        remaining: 0,
+      })),
       commit: vi.fn(),
       release: vi.fn(),
       markAmbiguous: vi.fn(),
@@ -190,8 +214,14 @@ describe("RecoveryBillingService", () => {
       purchasedReservationService as never,
     );
 
-    const first = await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
-    const second = await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
+    const first = await service.admit({
+      shopId: "shop-1",
+      recoveryId: "recovery-1",
+    });
+    const second = await service.admit({
+      shopId: "shop-1",
+      recoveryId: "recovery-1",
+    });
 
     expect(first).toEqual({ kind: "blocked", reason: "capacity-exhausted" });
     expect(second).toEqual({ kind: "blocked", reason: "capacity-exhausted" });
@@ -219,62 +249,40 @@ describe("RecoveryBillingService", () => {
       paidReservationService as never,
       unavailablePromotionalReservationService() as never,
     );
-    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
+    const admitted = await service.admit({
+      shopId: "shop-1",
+      recoveryId: "recovery-1",
+    });
     const occurredAt = new Date("2026-09-08T00:45:00.000Z");
 
     await service.commitSuccessfulInitiation({
-      admission: admitted.kind === "admitted" ? admitted.admission : (() => { throw new Error("not admitted"); })(),
+      admission:
+        admitted.kind === "admitted"
+          ? admitted.admission
+          : (() => {
+              throw new Error("not admitted");
+            })(),
       recoveryId: "recovery-1",
       occurredAt,
     });
     await service.commitSuccessfulInitiation({
-      admission: admitted.kind === "admitted" ? admitted.admission : (() => { throw new Error("not admitted"); })(),
+      admission:
+        admitted.kind === "admitted"
+          ? admitted.admission
+          : (() => {
+              throw new Error("not admitted");
+            })(),
       recoveryId: "recovery-1",
       occurredAt: new Date("2026-09-08T00:46:00.000Z"),
     });
 
-      expect(paidReservationService.reserve).toHaveBeenCalledTimes(1);
-      expect(paidReservationService.commit).toHaveBeenCalledTimes(2);
-      expect(paidReservationService.commit).toHaveBeenNthCalledWith(1, {
-        shopId: "shop-1",
-        sourceKey: "paid-included:period-1:recovery:shop-1:recovery-1",
-        occurredAt,
-      });
-      expect(database.usageEvent.upsert).not.toHaveBeenCalled();
+    expect(paidReservationService.reserve).toHaveBeenCalledTimes(1);
+    expect(paidReservationService.commit).toHaveBeenCalledTimes(2);
+    expect(paidReservationService.commit).toHaveBeenNthCalledWith(1, {
+      shopId: "shop-1",
+      sourceKey: "paid-included:period-1:recovery:shop-1:recovery-1",
+      occurredAt,
+    });
+    expect(database.usageEvent.upsert).not.toHaveBeenCalled();
   });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 });

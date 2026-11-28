@@ -10,7 +10,11 @@ const mocks = vi.hoisted(() => ({
   wooLock: { withCheckoutLock: vi.fn() },
   wooOrders: { read: vi.fn() },
   wooRecipient: { resolveStoredRecipient: vi.fn() },
-  outbound: { getProviderAccountId: vi.fn(), sendTemplate: vi.fn(), findExistingAdmission: vi.fn() },
+  outbound: {
+    getProviderAccountId: vi.fn(),
+    sendTemplate: vi.fn(),
+    findExistingAdmission: vi.fn(),
+  },
   automated: { prepare: vi.fn() },
   eligibility: { evaluate: vi.fn() },
   attempt: {
@@ -30,29 +34,60 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: mocks.prisma }));
-vi.mock("../../../../src/services/pending-recovery-candidate.service.js", () => ({
-  pendingRecoveryCandidateService: mocks.lock,
+vi.mock(
+  "../../../../src/services/pending-recovery-candidate.service.js",
+  () => ({
+    pendingRecoveryCandidateService: mocks.lock,
+  }),
+);
+vi.mock(
+  "../../../../src/services/woocommerce-recovery-consent.service.js",
+  () => ({ wooRecoveryConsentReader: mocks.wooRecipient }),
+);
+vi.mock(
+  "../../../../src/services/outbound-whatsapp-admission.service.js",
+  () => ({
+    outboundWhatsAppAdmissionService: mocks.outbound,
+  }),
+);
+vi.mock(
+  "../../../../src/services/recovery-template-integration/automated-recovery-template.service.js",
+  () => ({
+    automatedRecoveryTemplateService: mocks.automated,
+  }),
+);
+vi.mock(
+  "../../../../src/services/shop-execution-eligibility.service.js",
+  () => ({
+    shopExecutionEligibilityService: mocks.eligibility,
+  }),
+);
+vi.mock(
+  "../../../../src/services/recovery-outreach-attempt.service.js",
+  () => ({
+    recoveryOutreachAttemptService: mocks.attempt,
+  }),
+);
+vi.mock("../../../../src/services/recovery-policy.service.js", () => ({
+  recoveryPolicyService: mocks.policy,
 }));
-vi.mock("../../../../src/services/woocommerce-recovery-consent.service.js", () => ({ wooRecoveryConsentReader: mocks.wooRecipient }));
-vi.mock("../../../../src/services/outbound-whatsapp-admission.service.js", () => ({
-  outboundWhatsAppAdmissionService: mocks.outbound,
+vi.mock("../../../../src/services/conversation.message.service.js", () => ({
+  conversationMessageService: mocks.message,
 }));
-vi.mock("../../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
-  automatedRecoveryTemplateService: mocks.automated,
-}));
-vi.mock("../../../../src/services/shop-execution-eligibility.service.js", () => ({
-  shopExecutionEligibilityService: mocks.eligibility,
-}));
-vi.mock("../../../../src/services/recovery-outreach-attempt.service.js", () => ({
-  recoveryOutreachAttemptService: mocks.attempt,
-}));
-vi.mock("../../../../src/services/recovery-policy.service.js", () => ({ recoveryPolicyService: mocks.policy }));
-vi.mock("../../../../src/services/conversation.message.service.js", () => ({ conversationMessageService: mocks.message }));
-vi.mock("../../../../src/services/checkout-recovery/recovery-recipient-resolver.service.js", () => ({ recoveryRecipientResolverService: mocks.recipientResolver }));
-vi.mock("../../../../src/services/recovery-outreach-follow-up.service.js", () => ({ recoveryOutreachFollowUpService: mocks.followUp }));
-vi.mock("../../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js", () => ({
-  recoveryRecipientSuppressionAdmissionService: mocks.suppression,
-}));
+vi.mock(
+  "../../../../src/services/checkout-recovery/recovery-recipient-resolver.service.js",
+  () => ({ recoveryRecipientResolverService: mocks.recipientResolver }),
+);
+vi.mock(
+  "../../../../src/services/recovery-outreach-follow-up.service.js",
+  () => ({ recoveryOutreachFollowUpService: mocks.followUp }),
+);
+vi.mock(
+  "../../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js",
+  () => ({
+    recoveryRecipientSuppressionAdmissionService: mocks.suppression,
+  }),
+);
 
 import type { RecoveryBillingService } from "../../../../src/services/recovery-billing.service.js";
 import { RecoveryOutreachFinalizationService } from "../../../../src/services/checkout-recovery/recovery-outreach-finalization.service.js";
@@ -67,18 +102,46 @@ const recovery = {
   customerId: "customer-1",
   status: "MESSAGE_SENT",
   shop: { domain: "shop.test", status: "ACTIVE", platform: "SHOPIFY" },
-  outreachAttempts: [{ id: "attempt-1", sequence: 1, status: "WAITING_FOR_RESPONSE", sentAt, followUpDueAt: dueAt, outboundMessageId: "message-1" }],
-  conversation: { id: "conversation-1", languageTag: "fr-CA", countryCode: "CA" },
+  outreachAttempts: [
+    {
+      id: "attempt-1",
+      sequence: 1,
+      status: "WAITING_FOR_RESPONSE",
+      sentAt,
+      followUpDueAt: dueAt,
+      outboundMessageId: "message-1",
+    },
+  ],
+  conversation: {
+    id: "conversation-1",
+    languageTag: "fr-CA",
+    countryCode: "CA",
+  },
   customer: { phone: "+15551234567" },
 };
-const attempt = { id: "attempt-2", sequence: 2, recipient: "15551234567", followUpDueAt: null };
+const attempt = {
+  id: "attempt-2",
+  sequence: 2,
+  recipient: "15551234567",
+  followUpDueAt: null,
+};
 const admission = { kind: "paid", sourceKey: "recovery:shop-1:recovery-1" };
-const confirmedMessage = { id: "message-2", conversationId: "conversation-1", status: "SENT", sentAt: new Date("2026-09-16T11:01:00Z") };
+const confirmedMessage = {
+  id: "message-2",
+  conversationId: "conversation-1",
+  status: "SENT",
+  sentAt: new Date("2026-09-16T11:01:00Z"),
+};
 
-function createProcessor(billingOverrides: Partial<RecoveryBillingService> = {}) {
+function createProcessor(
+  billingOverrides: Partial<RecoveryBillingService> = {},
+) {
   const billing = {
     admit: vi.fn(async () => ({ kind: "admitted" as const, admission })),
-    revalidateBeforeProvider: vi.fn(async () => ({ kind: "admitted" as const, admission })),
+    revalidateBeforeProvider: vi.fn(async () => ({
+      kind: "admitted" as const,
+      admission,
+    })),
     releaseBeforeProvider: vi.fn(async () => undefined),
     handleProviderFailure: vi.fn(async () => undefined),
     commitSuccessfulInitiation: vi.fn(async () => undefined),
@@ -87,30 +150,54 @@ function createProcessor(billingOverrides: Partial<RecoveryBillingService> = {})
   const finalizer = new RecoveryOutreachFinalizationService(billing);
   // This suite exercises follow-up behavior after durable ownership/claim checks.
   // Inject those collaborators; their SQL and locks have separate tests.
-  const ownership = { readTurnOwnership: vi.fn(async () => ({ mode: "AI", shopId: "shop-1" })) };
-  const allowance={
-    limits:vi.fn(async()=>({outboundHardLimit:20,terminalMessageReservedSlots:1})),
-    beginFollowUp:vi.fn(async()=>({id:"allowance-2",token:"lease-2"})),
-    attachFollowUp:vi.fn(async()=>{}),
+  const ownership = {
+    readTurnOwnership: vi.fn(async () => ({ mode: "AI", shopId: "shop-1" })),
+  };
+  const allowance = {
+    limits: vi.fn(async () => ({
+      outboundHardLimit: 20,
+      terminalMessageReservedSlots: 1,
+    })),
+    beginFollowUp: vi.fn(async () => ({ id: "allowance-2", token: "lease-2" })),
+    attachFollowUp: vi.fn(async () => {}),
   };
   return {
     allowance,
-    processor: new RecoveryOutreachFollowUpProcessorService(billing, finalizer, mocks.claim as never, ownership as never, mocks.consent as never,allowance, mocks.wooLock, mocks.wooOrders),
+    processor: new RecoveryOutreachFollowUpProcessorService(
+      billing,
+      finalizer,
+      mocks.claim as never,
+      ownership as never,
+      mocks.consent as never,
+      allowance,
+      mocks.wooLock,
+      mocks.wooOrders,
+    ),
     billing,
   };
 }
 
 function setRecovery(value: unknown = recovery) {
   mocks.prisma.checkoutRecovery.findUnique
-    .mockResolvedValueOnce({ shopId: "shop-1", checkoutToken: "checkout-1",
-      shop: { platform: (value as typeof recovery | null)?.shop?.platform ?? "SHOPIFY" } })
+    .mockResolvedValueOnce({
+      shopId: "shop-1",
+      checkoutToken: "checkout-1",
+      shop: {
+        platform:
+          (value as typeof recovery | null)?.shop?.platform ?? "SHOPIFY",
+      },
+    })
     .mockResolvedValueOnce(value);
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.lock.withCheckoutLock.mockImplementation(async (_shopId, _checkoutToken, callback) => callback());
-  mocks.wooLock.withCheckoutLock.mockImplementation(async (_shopId, _checkoutToken, callback) => callback());
+  mocks.lock.withCheckoutLock.mockImplementation(
+    async (_shopId, _checkoutToken, callback) => callback(),
+  );
+  mocks.wooLock.withCheckoutLock.mockImplementation(
+    async (_shopId, _checkoutToken, callback) => callback(),
+  );
   mocks.wooOrders.read.mockResolvedValue({ kind: "none-observed" });
   mocks.wooRecipient.resolveStoredRecipient.mockResolvedValue("15551234567");
   mocks.prisma.checkoutRecovery.findUnique.mockResolvedValue(null);
@@ -124,7 +211,10 @@ beforeEach(() => {
     status: "PENDING",
     outboundMessageId: null,
   });
-  mocks.consent.preflight.mockResolvedValue({ kind: "allowed", snapshot: null });
+  mocks.consent.preflight.mockResolvedValue({
+    kind: "allowed",
+    snapshot: null,
+  });
   mocks.claim.releaseScheduledClaim.mockResolvedValue(true);
   mocks.claim.claimSequenceTwo.mockResolvedValue({
     kind: "claimed",
@@ -136,50 +226,99 @@ beforeEach(() => {
   mocks.outbound.findExistingAdmission.mockResolvedValue(confirmedMessage);
   mocks.automated.prepare.mockResolvedValue({
     kind: "prepared",
-    prepared: { purpose: "FOLLOW_UP_NO_OFFER", providerTemplateName: "follow_up",
-      canonicalLanguageTag: "fr-CA", providerLanguageCode: "fr_CA" },
-    send: { templateName: "follow_up", languageCode: "fr_CA",
+    prepared: {
+      purpose: "FOLLOW_UP_NO_OFFER",
+      providerTemplateName: "follow_up",
+      canonicalLanguageTag: "fr-CA",
+      providerLanguageCode: "fr_CA",
+    },
+    send: {
+      templateName: "follow_up",
+      languageCode: "fr_CA",
       templateRegistration: { shopId: "shop-1", purpose: "FOLLOW_UP_NO_OFFER" },
-      recoveryPromise: { kind: "NO_OFFER" } },
+      recoveryPromise: { kind: "NO_OFFER" },
+    },
   });
   mocks.eligibility.evaluate.mockResolvedValue({ allowed: true });
   mocks.attempt.markNoResponseIfWaiting.mockResolvedValue({ count: 1 });
-  mocks.attempt.getOrCreate.mockResolvedValue({ id: "attempt-1", status: "NO_RESPONSE" });
+  mocks.attempt.getOrCreate.mockResolvedValue({
+    id: "attempt-1",
+    status: "NO_RESPONSE",
+  });
   mocks.attempt.markStatus.mockResolvedValue(undefined);
   mocks.attempt.markEngagedFromInbound.mockResolvedValue(undefined);
   mocks.attempt.markWaitingAfterConfirmedSend.mockResolvedValue({ count: 1 });
   mocks.policy.resolve.mockResolvedValue({});
-  mocks.recipientResolver.resolveForCustomerInShop.mockResolvedValue("15551234567");
-  mocks.message.buildRecoveryTemplateDescriptor.mockReturnValue("follow-up-template");
+  mocks.recipientResolver.resolveForCustomerInShop.mockResolvedValue(
+    "15551234567",
+  );
+  mocks.message.buildRecoveryTemplateDescriptor.mockReturnValue(
+    "follow-up-template",
+  );
   mocks.suppression.evaluate.mockResolvedValue({ kind: "allowed" });
 });
 
 describe("RecoveryOutreachFollowUpProcessorService", () => {
-  const wooRecovery = { ...recovery, shop: { ...recovery.shop, platform: "WOOCOMMERCE" } };
+  const wooRecovery = {
+    ...recovery,
+    shop: { ...recovery.shop, platform: "WOOCOMMERCE" },
+  };
 
   it("dispatches a Woo follow-up through the same claim, allowance and billing path", async () => {
     setRecovery(wooRecovery);
     const { processor, billing, allowance } = createProcessor();
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "sent", attemptId: attempt.id });
-    expect(mocks.wooLock.withCheckoutLock).toHaveBeenCalledWith("shop-1", "checkout-1", expect.any(Function));
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "sent",
+      attemptId: attempt.id,
+    });
+    expect(mocks.wooLock.withCheckoutLock).toHaveBeenCalledWith(
+      "shop-1",
+      "checkout-1",
+      expect.any(Function),
+    );
     expect(mocks.lock.withCheckoutLock).not.toHaveBeenCalled();
-    expect(mocks.wooOrders.read).toHaveBeenCalledWith({ shopId: "shop-1", checkoutToken: "checkout-1" });
-    expect(mocks.wooRecipient.resolveStoredRecipient).toHaveBeenCalledWith("customer-1", "shop-1");
-    expect(mocks.recipientResolver.resolveForCustomerInShop).not.toHaveBeenCalled();
-    expect(mocks.consent.preflight).toHaveBeenCalledWith({ shopId: "shop-1", recoveryId: recovery.id, recipient: attempt.recipient });
-    expect(mocks.claim.claimSequenceTwo).toHaveBeenCalledWith(expect.objectContaining({ initiator: "scheduled_no_response", recoveryId: recovery.id, recipient: attempt.recipient }));
+    expect(mocks.wooOrders.read).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      checkoutToken: "checkout-1",
+    });
+    expect(mocks.wooRecipient.resolveStoredRecipient).toHaveBeenCalledWith(
+      "customer-1",
+      "shop-1",
+    );
+    expect(
+      mocks.recipientResolver.resolveForCustomerInShop,
+    ).not.toHaveBeenCalled();
+    expect(mocks.consent.preflight).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      recoveryId: recovery.id,
+      recipient: attempt.recipient,
+    });
+    expect(mocks.claim.claimSequenceTwo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        initiator: "scheduled_no_response",
+        recoveryId: recovery.id,
+        recipient: attempt.recipient,
+      }),
+    );
     expect(allowance.beginFollowUp).toHaveBeenCalledOnce();
     expect(billing.admit).toHaveBeenCalledOnce();
     expect(mocks.outbound.sendTemplate).toHaveBeenCalledOnce();
     expect(billing.commitSuccessfulInitiation).toHaveBeenCalledOnce();
   });
 
-  it.each([{ kind: "order-paid", orderId: "woo-order" }, { kind: "ambiguous", reason: "conflicting-events" }])(
-    "suppresses Woo observed order evidence before claiming or charging: $kind", async (order) => {
+  it.each([
+    { kind: "order-paid", orderId: "woo-order" },
+    { kind: "ambiguous", reason: "conflicting-events" },
+  ])(
+    "suppresses Woo observed order evidence before claiming or charging: $kind",
+    async (order) => {
       setRecovery(wooRecovery);
       mocks.wooOrders.read.mockResolvedValueOnce(order);
       const { processor, billing } = createProcessor();
-      await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "observed-order-terminal" });
+      await expect(processor.process(recovery.id)).resolves.toEqual({
+        kind: "suppressed",
+        reason: "observed-order-terminal",
+      });
       expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
       expect(billing.admit).not.toHaveBeenCalled();
       expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
@@ -188,9 +327,15 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
   it("does not claim or send when current Woo consent is denied", async () => {
     setRecovery(wooRecovery);
-    mocks.consent.preflight.mockResolvedValueOnce({ kind: "denied", reason: "stored-consent-denied" });
+    mocks.consent.preflight.mockResolvedValueOnce({
+      kind: "denied",
+      reason: "stored-consent-denied",
+    });
     const { processor, billing } = createProcessor();
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "stored-consent-denied" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "stored-consent-denied",
+    });
     expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
     expect(billing.admit).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
@@ -199,90 +344,130 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
   it("suppresses a missing recovery before acquiring a checkout lock", async () => {
     const { processor } = createProcessor();
 
-    await expect(processor.process("missing")).resolves.toEqual({ kind: "suppressed", reason: "missing-recovery" });
+    await expect(processor.process("missing")).resolves.toEqual({
+      kind: "suppressed",
+      reason: "missing-recovery",
+    });
 
     expect(mocks.lock.withCheckoutLock).not.toHaveBeenCalled();
   });
 
   it("keeps due prerequisites ahead of terminal and engagement checks", async () => {
-    const notDue = { ...recovery, outreachAttempts: [{ ...recovery.outreachAttempts[0], followUpDueAt: new Date("2999-01-01") }] };
+    const notDue = {
+      ...recovery,
+      outreachAttempts: [
+        {
+          ...recovery.outreachAttempts[0],
+          followUpDueAt: new Date("2999-01-01"),
+        },
+      ],
+    };
     setRecovery(notDue);
     const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "not-due" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "not-due",
+    });
 
     expect(mocks.prisma.conversationMessage.findFirst).not.toHaveBeenCalled();
     expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
   });
 
-  it.each([["131026", "recipient-undeliverable"], ["131049", "initial-delivery-failed"],
-    [null, "initial-delivery-failed"]] as const)("suppresses a due follow-up after initial failure %s", async (providerFailureCode, reason) => {
-    setRecovery();
-    mocks.prisma.conversationMessage.findUnique.mockResolvedValueOnce({
-      status: "FAILED",
-      providerFailureCode,
-    });
-    const { processor, billing } = createProcessor();
+  it.each([
+    ["131026", "recipient-undeliverable"],
+    ["131049", "initial-delivery-failed"],
+    [null, "initial-delivery-failed"],
+  ] as const)(
+    "suppresses a due follow-up after initial failure %s",
+    async (providerFailureCode, reason) => {
+      setRecovery();
+      mocks.prisma.conversationMessage.findUnique.mockResolvedValueOnce({
+        status: "FAILED",
+        providerFailureCode,
+      });
+      const { processor, billing } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({
-      kind: "suppressed",
-      reason,
-    });
+      await expect(processor.process(recovery.id)).resolves.toEqual({
+        kind: "suppressed",
+        reason,
+      });
 
-    expect(mocks.prisma.conversationMessage.findUnique).toHaveBeenCalledWith({
-      where: { id: "message-1" },
-      select: { status: true, providerFailureCode: true },
-    });
-    expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
-    expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
-    expect(mocks.policy.resolve).not.toHaveBeenCalled();
-    expect(mocks.automated.prepare).not.toHaveBeenCalled();
-    expect(billing.admit).not.toHaveBeenCalled();
-    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
-  });
+      expect(mocks.prisma.conversationMessage.findUnique).toHaveBeenCalledWith({
+        where: { id: "message-1" },
+        select: { status: true, providerFailureCode: true },
+      });
+      expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
+      expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
+      expect(mocks.policy.resolve).not.toHaveBeenCalled();
+      expect(mocks.automated.prepare).not.toHaveBeenCalled();
+      expect(billing.admit).not.toHaveBeenCalled();
+      expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ["SENT", null],
     ["DELIVERED", "131026"],
-  ])("continues normal follow-up handling for %s message code %s", async (status, providerFailureCode) => {
-    setRecovery();
-    mocks.prisma.conversationMessage.findUnique.mockResolvedValueOnce({
-      status,
-      providerFailureCode,
-    });
-    const { processor } = createProcessor();
+  ])(
+    "continues normal follow-up handling for %s message code %s",
+    async (status, providerFailureCode) => {
+      setRecovery();
+      mocks.prisma.conversationMessage.findUnique.mockResolvedValueOnce({
+        status,
+        providerFailureCode,
+      });
+      const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({
-      kind: "sent",
-      attemptId: attempt.id,
-    });
+      await expect(processor.process(recovery.id)).resolves.toEqual({
+        kind: "sent",
+        attemptId: attempt.id,
+      });
 
-    expect(mocks.attempt.markNoResponseIfWaiting).toHaveBeenCalledWith("attempt-1");
-    expect(mocks.outbound.sendTemplate).toHaveBeenCalledOnce();
-  });
+      expect(mocks.attempt.markNoResponseIfWaiting).toHaveBeenCalledWith(
+        "attempt-1",
+      );
+      expect(mocks.outbound.sendTemplate).toHaveBeenCalledOnce();
+    },
+  );
 
-  it.each([null, "+19999999999"])("uses the current Shop-scoped phone when legacy Customer.phone is %s", async (legacyPhone) => {
-    setRecovery({ ...recovery, customer: { phone: legacyPhone } });
-    const { processor } = createProcessor();
+  it.each([null, "+19999999999"])(
+    "uses the current Shop-scoped phone when legacy Customer.phone is %s",
+    async (legacyPhone) => {
+      setRecovery({ ...recovery, customer: { phone: legacyPhone } });
+      const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "sent", attemptId: attempt.id });
+      await expect(processor.process(recovery.id)).resolves.toEqual({
+        kind: "sent",
+        attemptId: attempt.id,
+      });
 
-    expect(mocks.recipientResolver.resolveForCustomerInShop).toHaveBeenCalledWith("customer-1", "shop-1");
-    expect(mocks.claim.claimSequenceTwo).toHaveBeenCalledWith(expect.objectContaining({
-      recoveryId: recovery.id,
-      initiator: "scheduled_no_response",
-      initiationKey: `scheduled-no-response:${recovery.id}`,
-      recipient: "15551234567",
-    }));
-    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: attempt.recipient }));
-  });
+      expect(
+        mocks.recipientResolver.resolveForCustomerInShop,
+      ).toHaveBeenCalledWith("customer-1", "shop-1");
+      expect(mocks.claim.claimSequenceTwo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          recoveryId: recovery.id,
+          initiator: "scheduled_no_response",
+          initiationKey: `scheduled-no-response:${recovery.id}`,
+          recipient: "15551234567",
+        }),
+      );
+      expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(
+        expect.objectContaining({ to: attempt.recipient }),
+      );
+    },
+  );
 
   it("does not claim, create an attempt, bill, or send when no current recipient exists", async () => {
     setRecovery();
     mocks.recipientResolver.resolveForCustomerInShop.mockResolvedValue(null);
     const { processor, billing } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "no-recipient" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "no-recipient",
+    });
 
     expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
     expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
@@ -292,14 +477,20 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
   it("denies revoked stored permission before the one sequence-two claim or billing", async () => {
     setRecovery();
-    mocks.consent.preflight.mockResolvedValue({ kind: "denied", reason: "stored-consent-denied" });
+    mocks.consent.preflight.mockResolvedValue({
+      kind: "denied",
+      reason: "stored-consent-denied",
+    });
     const { processor, billing } = createProcessor();
 
     await expect(processor.process(recovery.id)).resolves.toEqual({
-      kind: "suppressed", reason: "stored-consent-denied",
+      kind: "suppressed",
+      reason: "stored-consent-denied",
     });
     expect(mocks.consent.preflight).toHaveBeenCalledWith({
-      shopId: recovery.shopId, recoveryId: recovery.id, recipient: attempt.recipient,
+      shopId: recovery.shopId,
+      recoveryId: recovery.id,
+      recipient: attempt.recipient,
     });
     expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
     expect(billing.admit).not.toHaveBeenCalled();
@@ -307,12 +498,17 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
   });
 
   it.each(["PROVIDER_UNAVAILABLE", "PROVIDER_DRIFT", "NO_APPROVED_ASSIGNMENT"])(
-    "refuses %s before claiming sequence two or reserving credits", async (reason) => {
+    "refuses %s before claiming sequence two or reserving credits",
+    async (reason) => {
       setRecovery();
-      mocks.automated.prepare.mockResolvedValue({ kind: "unavailable", reason });
+      mocks.automated.prepare.mockResolvedValue({
+        kind: "unavailable",
+        reason,
+      });
       const { processor, billing } = createProcessor();
       await expect(processor.process(recovery.id)).resolves.toEqual({
-        kind: "suppressed", reason: "template-unavailable",
+        kind: "suppressed",
+        reason: "template-unavailable",
       });
       expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
       expect(billing.admit).not.toHaveBeenCalled();
@@ -322,12 +518,22 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
   it("releases a claimed sequence two after final stored consent revocation without a send", async () => {
     setRecovery();
-    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "conversation-invalid" });
+    mocks.outbound.sendTemplate.mockResolvedValue({
+      kind: "suppressed",
+      reason: "conversation-invalid",
+    });
     const { processor, billing } = createProcessor();
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "conversation-invalid" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "conversation-invalid",
+    });
     expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
     expect(mocks.claim.releaseScheduledClaim).toHaveBeenCalledOnce();
-    expect(mocks.attempt.markStatus).not.toHaveBeenCalledWith(attempt.id, "FAILED", expect.anything());
+    expect(mocks.attempt.markStatus).not.toHaveBeenCalledWith(
+      attempt.id,
+      "FAILED",
+      expect.anything(),
+    );
   });
 
   it("reschedules an actively suppressed follow-up without claiming, billing, or sending", async () => {
@@ -355,25 +561,46 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     setRecovery({ ...recovery, status: "CANCELLED" });
     const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "terminal" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "terminal",
+    });
 
     expect(mocks.prisma.conversationMessage.findFirst).not.toHaveBeenCalled();
   });
 
   it("suppresses only a waiting sequence-two attempt as already sent", async () => {
-    setRecovery({ ...recovery, outreachAttempts: [...recovery.outreachAttempts, { sequence: 2, status: "WAITING_FOR_RESPONSE" }] });
+    setRecovery({
+      ...recovery,
+      outreachAttempts: [
+        ...recovery.outreachAttempts,
+        { sequence: 2, status: "WAITING_FOR_RESPONSE" },
+      ],
+    });
     const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "already-sent" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "already-sent",
+    });
 
     expect(mocks.prisma.conversationMessage.findFirst).not.toHaveBeenCalled();
   });
 
   it("does not treat other sequence-two statuses as already sent", async () => {
-    setRecovery({ ...recovery, outreachAttempts: [...recovery.outreachAttempts, { sequence: 2, status: "FAILED" }] });
+    setRecovery({
+      ...recovery,
+      outreachAttempts: [
+        ...recovery.outreachAttempts,
+        { sequence: 2, status: "FAILED" },
+      ],
+    });
     const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "sent", attemptId: attempt.id });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "sent",
+      attemptId: attempt.id,
+    });
 
     expect(mocks.prisma.conversationMessage.findFirst).toHaveBeenCalledOnce();
     expect(mocks.claim.claimSequenceTwo).toHaveBeenCalledOnce();
@@ -381,30 +608,51 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
   it("detects inbound engagement before claiming no-response", async () => {
     setRecovery();
-    mocks.prisma.conversationMessage.findFirst.mockResolvedValue({ createdAt: new Date("2026-09-16T10:30:00Z") });
+    mocks.prisma.conversationMessage.findFirst.mockResolvedValue({
+      createdAt: new Date("2026-09-16T10:30:00Z"),
+    });
     const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "engaged" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "engaged",
+    });
 
-    expect(mocks.attempt.markEngagedFromInbound).toHaveBeenCalledWith(recovery.id, expect.any(Date));
+    expect(mocks.attempt.markEngagedFromInbound).toHaveBeenCalledWith(
+      recovery.id,
+      expect.any(Date),
+    );
     expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
   });
 
   it("converges a lost no-response CAS by rereading engagement state", async () => {
     setRecovery();
     mocks.attempt.markNoResponseIfWaiting.mockResolvedValue({ count: 0 });
-    mocks.attempt.getOrCreate.mockResolvedValue({ id: "attempt-1", status: "ENGAGED" });
+    mocks.attempt.getOrCreate.mockResolvedValue({
+      id: "attempt-1",
+      status: "ENGAGED",
+    });
     const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "engaged" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "engaged",
+    });
 
-    expect(mocks.attempt.getOrCreate).toHaveBeenCalledWith({ recoveryId: recovery.id, sequence: 1, policy: {} });
+    expect(mocks.attempt.getOrCreate).toHaveBeenCalledWith({
+      recoveryId: recovery.id,
+      sequence: 1,
+      policy: {},
+    });
     expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
   });
 
   it("does not read or send sequence two when durable claim denies it", async () => {
     setRecovery();
-    mocks.claim.claimSequenceTwo.mockResolvedValue({ kind: "suppressed", reason: "human-controlled" });
+    mocks.claim.claimSequenceTwo.mockResolvedValue({
+      kind: "suppressed",
+      reason: "human-controlled",
+    });
     const { processor, billing } = createProcessor();
 
     await expect(processor.process(recovery.id)).resolves.toEqual({
@@ -413,17 +661,25 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     });
 
     expect(mocks.claim.claimSequenceTwo).toHaveBeenCalledOnce();
-    expect(mocks.prisma.recoveryOutreachAttempt.findUnique).not.toHaveBeenCalled();
+    expect(
+      mocks.prisma.recoveryOutreachAttempt.findUnique,
+    ).not.toHaveBeenCalled();
     expect(billing.admit).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
   it("cancels sequence two when shop execution is denied", async () => {
     setRecovery();
-    mocks.eligibility.evaluate.mockResolvedValue({ allowed: false, reason: "SUBSCRIPTION_FROZEN" });
+    mocks.eligibility.evaluate.mockResolvedValue({
+      allowed: false,
+      reason: "SUBSCRIPTION_FROZEN",
+    });
     const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "SUBSCRIPTION_FROZEN" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "SUBSCRIPTION_FROZEN",
+    });
 
     expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
     expect(mocks.automated.prepare).not.toHaveBeenCalled();
@@ -431,23 +687,46 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
   it("uses durable conversation locale and marks unavailable templates failed", async () => {
     setRecovery();
-    mocks.automated.prepare.mockResolvedValue({ kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" });
+    mocks.automated.prepare.mockResolvedValue({
+      kind: "unavailable",
+      reason: "NO_APPROVED_ASSIGNMENT",
+    });
     const { processor } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "template-unavailable" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "template-unavailable",
+    });
 
-    expect(mocks.automated.prepare).toHaveBeenCalledWith(expect.objectContaining({ stage: "FOLLOW_UP", conversationLanguageTag: "fr-CA" }));
+    expect(mocks.automated.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: "FOLLOW_UP",
+        conversationLanguageTag: "fr-CA",
+      }),
+    );
     expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
   it("marks initial admission blocks on the attempt without durable recovery blocking", async () => {
     setRecovery();
-    const { processor } = createProcessor({ admit: vi.fn(async () => ({ kind: "blocked" as const, reason: "capacity-exhausted" })) });
+    const { processor } = createProcessor({
+      admit: vi.fn(async () => ({
+        kind: "blocked" as const,
+        reason: "capacity-exhausted",
+      })),
+    });
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "capacity-blocked", reason: "capacity-exhausted" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "capacity-blocked",
+      reason: "capacity-exhausted",
+    });
 
-    expect(mocks.claim.releaseScheduledClaim).toHaveBeenCalledWith({ recoveryId: recovery.id, attemptId: attempt.id, initiationKey: `scheduled-no-response:${recovery.id}` });
+    expect(mocks.claim.releaseScheduledClaim).toHaveBeenCalledWith({
+      recoveryId: recovery.id,
+      attemptId: attempt.id,
+      initiationKey: `scheduled-no-response:${recovery.id}`,
+    });
     expect(mocks.prisma.checkoutRecovery.updateMany).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
@@ -455,10 +734,16 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
   it("marks revalidation blocks without releasing or durably blocking recovery", async () => {
     setRecovery();
     const { processor, billing } = createProcessor({
-      revalidateBeforeProvider: vi.fn(async () => ({ kind: "blocked" as const, reason: "policy-changed" })),
+      revalidateBeforeProvider: vi.fn(async () => ({
+        kind: "blocked" as const,
+        reason: "policy-changed",
+      })),
     });
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "capacity-blocked", reason: "policy-changed" });
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "capacity-blocked",
+      reason: "policy-changed",
+    });
 
     expect(mocks.claim.releaseScheduledClaim).toHaveBeenCalledOnce();
     // Billing revalidation has already handled the blocked credit release.
@@ -474,72 +759,131 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
     await expect(processor.process(recovery.id)).rejects.toBe(error);
 
-    expect(billing.handleProviderFailure).toHaveBeenCalledWith({ admission, error });
-    expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "FAILED", { failureCode: "PROVIDER_FAILURE" });
+    expect(billing.handleProviderFailure).toHaveBeenCalledWith({
+      admission,
+      error,
+    });
+    expect(mocks.attempt.markStatus).toHaveBeenCalledWith(
+      attempt.id,
+      "FAILED",
+      { failureCode: "PROVIDER_FAILURE" },
+    );
   });
 
   it("converges a duplicate only from a confirmed durable message", async () => {
     setRecovery();
-    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
+    mocks.outbound.sendTemplate.mockResolvedValue({
+      kind: "suppressed",
+      reason: "duplicate",
+    });
     const { processor, billing } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "sent", attemptId: attempt.id });
-
-    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: `recovery-outreach:${attempt.id}` }));
-    expect(billing.commitSuccessfulInitiation).toHaveBeenCalledWith({ admission, recoveryId: recovery.id, occurredAt: confirmedMessage.sentAt });
-    expect(mocks.attempt.markWaitingAfterConfirmedSend).toHaveBeenCalledWith(attempt.id, {
-      sentAt: confirmedMessage.sentAt,
-      outboundMessageId: confirmedMessage.id,
-      followUpDueAt: null,
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "sent",
+      attemptId: attempt.id,
     });
+
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        idempotencyKey: `recovery-outreach:${attempt.id}`,
+      }),
+    );
+    expect(billing.commitSuccessfulInitiation).toHaveBeenCalledWith({
+      admission,
+      recoveryId: recovery.id,
+      occurredAt: confirmedMessage.sentAt,
+    });
+    expect(mocks.attempt.markWaitingAfterConfirmedSend).toHaveBeenCalledWith(
+      attempt.id,
+      {
+        sentAt: confirmedMessage.sentAt,
+        outboundMessageId: confirmedMessage.id,
+        followUpDueAt: null,
+      },
+    );
   });
 
   it.each([
-    ["pending", { ...confirmedMessage, status: "PENDING", sentAt: null }, /still pending/],
+    [
+      "pending",
+      { ...confirmedMessage, status: "PENDING", sentAt: null },
+      /still pending/,
+    ],
     ["missing", null, /has no durable message/],
-  ])("does not converge duplicate %s durable admission", async (_label, durableMessage, expectedError) => {
-    setRecovery();
-    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
-    mocks.outbound.findExistingAdmission.mockResolvedValue(durableMessage);
-    const { processor, billing } = createProcessor();
+  ])(
+    "does not converge duplicate %s durable admission",
+    async (_label, durableMessage, expectedError) => {
+      setRecovery();
+      mocks.outbound.sendTemplate.mockResolvedValue({
+        kind: "suppressed",
+        reason: "duplicate",
+      });
+      mocks.outbound.findExistingAdmission.mockResolvedValue(durableMessage);
+      const { processor, billing } = createProcessor();
 
-    await expect(processor.process(recovery.id)).rejects.toThrow(expectedError);
+      await expect(processor.process(recovery.id)).rejects.toThrow(
+        expectedError,
+      );
 
-    expect(billing.handleProviderFailure).not.toHaveBeenCalled();
-    expect(billing.commitSuccessfulInitiation).not.toHaveBeenCalled();
-  });
+      expect(billing.handleProviderFailure).not.toHaveBeenCalled();
+      expect(billing.commitSuccessfulInitiation).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ["missing", undefined],
     ["null", null],
     ["unrelated", "131027"],
-  ])("keeps a FAILED duplicate with %s provider code on the generic path", async (_label, providerFailureCode) => {
-    setRecovery();
-    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
-    mocks.outbound.findExistingAdmission.mockResolvedValue({
-      ...confirmedMessage, status: "FAILED", sentAt: null, providerFailureCode,
-    });
-    const { processor, billing } = createProcessor();
+  ])(
+    "keeps a FAILED duplicate with %s provider code on the generic path",
+    async (_label, providerFailureCode) => {
+      setRecovery();
+      mocks.outbound.sendTemplate.mockResolvedValue({
+        kind: "suppressed",
+        reason: "duplicate",
+      });
+      mocks.outbound.findExistingAdmission.mockResolvedValue({
+        ...confirmedMessage,
+        status: "FAILED",
+        sentAt: null,
+        providerFailureCode,
+      });
+      const { processor, billing } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "duplicate" });
+      await expect(processor.process(recovery.id)).resolves.toEqual({
+        kind: "suppressed",
+        reason: "duplicate",
+      });
 
-    expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
-    expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "FAILED", { failureCode: "duplicate" });
-    expect(mocks.claim.releaseScheduledClaim).not.toHaveBeenCalled();
-    expect(billing.handleProviderFailure).not.toHaveBeenCalled();
-    expect(mocks.outbound.sendTemplate).toHaveBeenCalledTimes(1);
-  });
+      expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
+      expect(mocks.attempt.markStatus).toHaveBeenCalledWith(
+        attempt.id,
+        "FAILED",
+        { failureCode: "duplicate" },
+      );
+      expect(mocks.claim.releaseScheduledClaim).not.toHaveBeenCalled();
+      expect(billing.handleProviderFailure).not.toHaveBeenCalled();
+      expect(mocks.outbound.sendTemplate).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("preserves exact persisted 131026 on a compensated FAILED duplicate", async () => {
     setRecovery();
-    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
+    mocks.outbound.sendTemplate.mockResolvedValue({
+      kind: "suppressed",
+      reason: "duplicate",
+    });
     mocks.outbound.findExistingAdmission.mockResolvedValue({
-      ...confirmedMessage, status: "FAILED", sentAt: null, providerFailureCode: "131026",
+      ...confirmedMessage,
+      status: "FAILED",
+      sentAt: null,
+      providerFailureCode: "131026",
     });
     const { processor, billing } = createProcessor();
 
     await expect(processor.process(recovery.id)).resolves.toEqual({
-      kind: "suppressed", reason: "recipient-undeliverable",
+      kind: "suppressed",
+      reason: "recipient-undeliverable",
     });
 
     expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
@@ -552,15 +896,27 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     setRecovery();
     const { processor, billing } = createProcessor();
 
-    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "sent", attemptId: attempt.id });
-
-    expect(mocks.attempt.markWaitingAfterConfirmedSend).toHaveBeenCalledWith(attempt.id, {
-      sentAt: confirmedMessage.sentAt,
-      outboundMessageId: confirmedMessage.id,
-      followUpDueAt: null,
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "sent",
+      attemptId: attempt.id,
     });
-    expect(billing.commitSuccessfulInitiation).toHaveBeenCalledBefore(mocks.attempt.markWaitingAfterConfirmedSend);
+
+    expect(mocks.attempt.markWaitingAfterConfirmedSend).toHaveBeenCalledWith(
+      attempt.id,
+      {
+        sentAt: confirmedMessage.sentAt,
+        outboundMessageId: confirmedMessage.id,
+        followUpDueAt: null,
+      },
+    );
+    expect(billing.commitSuccessfulInitiation).toHaveBeenCalledBefore(
+      mocks.attempt.markWaitingAfterConfirmedSend,
+    );
     expect(mocks.followUp.schedule).not.toHaveBeenCalled();
-    expect(mocks.lock.withCheckoutLock).toHaveBeenCalledWith("shop-1", "checkout-1", expect.any(Function));
+    expect(mocks.lock.withCheckoutLock).toHaveBeenCalledWith(
+      "shop-1",
+      "checkout-1",
+      expect.any(Function),
+    );
   });
 });

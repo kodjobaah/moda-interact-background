@@ -30,7 +30,12 @@ describe("classifyObservedPlanProjection", () => {
   });
 
   it("preserves the existing inactive-plan diagnostic while removing reporting-handle validation", () => {
-    expect(classifyObservedPlanProjection(provider as never, { ...activePlan, active: false } as never)).toEqual({
+    expect(
+      classifyObservedPlanProjection(
+        provider as never,
+        { ...activePlan, active: false } as never,
+      ),
+    ).toEqual({
       planUsable: false,
       executableMapped: false,
       status: SubscriptionProjectionStatus.UNMAPPED,
@@ -39,7 +44,9 @@ describe("classifyObservedPlanProjection", () => {
   });
 
   it("accepts an active Paid plan even when its optional App Events reporting handle is absent", () => {
-    expect(classifyObservedPlanProjection(provider as never, activePlan as never)).toEqual({
+    expect(
+      classifyObservedPlanProjection(provider as never, activePlan as never),
+    ).toEqual({
       planUsable: true,
       executableMapped: true,
       status: SubscriptionProjectionStatus.ACTIVE,

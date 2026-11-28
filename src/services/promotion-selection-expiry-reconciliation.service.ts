@@ -30,10 +30,7 @@ export class PromotionSelectionExpiryReconciliationService {
           },
         },
       },
-      orderBy: [
-        { updatedAt: "asc" },
-        { id: "asc" },
-      ],
+      orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
       take: runtimeConfig.billingReconciliationShopBatchSize,
       select: {
         id: true,
@@ -45,18 +42,19 @@ export class PromotionSelectionExpiryReconciliationService {
     let released = 0;
     let raced = 0;
     for (const candidate of candidates) {
-      const deletion = await this.database.merchantPromotionSelection.deleteMany({
-        where: {
-          id: candidate.id,
-          shopId: candidate.shopId,
-          promotionalCreditGrantId: candidate.promotionalCreditGrantId,
-          promotionalCreditGrant: {
-            campaign: {
-              expiresAt: { lte: cutoff },
+      const deletion =
+        await this.database.merchantPromotionSelection.deleteMany({
+          where: {
+            id: candidate.id,
+            shopId: candidate.shopId,
+            promotionalCreditGrantId: candidate.promotionalCreditGrantId,
+            promotionalCreditGrant: {
+              campaign: {
+                expiresAt: { lte: cutoff },
+              },
             },
           },
-        },
-      });
+        });
 
       if (deletion.count === 1) released += 1;
       else raced += 1;

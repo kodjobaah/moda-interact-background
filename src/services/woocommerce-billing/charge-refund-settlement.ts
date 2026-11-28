@@ -39,7 +39,11 @@ export async function settleWooRefundReceipt(
   now: Date,
 ): Promise<string | null> {
   const refunds = await transaction.recoveryCreditRefund.findMany({
-    where: { purchaseId: link.purchase.id, provider: "WOOCOMMERCE", status: { in: [...WOO_REFUND_STATES] } },
+    where: {
+      purchaseId: link.purchase.id,
+      provider: "WOOCOMMERCE",
+      status: { in: [...WOO_REFUND_STATES] },
+    },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: 2,
     select: {
@@ -55,41 +59,97 @@ export async function settleWooRefundReceipt(
       version: true,
     },
   });
-  if (refunds.length === 0) return markReceiptError(transaction, receipt.id, "WOO_REFUND_REQUEST_NOT_FOUND", link.operation.id);
-  if (refunds.length !== 1) return markReceiptError(transaction, receipt.id, "WOO_REFUND_REQUEST_AMBIGUOUS", link.operation.id);
+  if (refunds.length === 0)
+    return markReceiptError(
+      transaction,
+      receipt.id,
+      "WOO_REFUND_REQUEST_NOT_FOUND",
+      link.operation.id,
+    );
+  if (refunds.length !== 1)
+    return markReceiptError(
+      transaction,
+      receipt.id,
+      "WOO_REFUND_REQUEST_AMBIGUOUS",
+      link.operation.id,
+    );
   const refund = refunds[0] as RefundForSettlement;
 
   if (refund.status === RecoveryCreditRefundStatus.REJECTED) {
-    return markReceiptError(transaction, receipt.id, "WOO_REFUND_AFTER_REJECTION_CONFLICT", link.operation.id);
+    return markReceiptError(
+      transaction,
+      receipt.id,
+      "WOO_REFUND_AFTER_REJECTION_CONFLICT",
+      link.operation.id,
+    );
   }
   if (refund.status === RecoveryCreditRefundStatus.COMPLETED) {
-    if (link.purchase.status !== RecoveryCreditPurchaseStatus.REFUNDED
-      || refund.providerReference !== providerContractId) {
-      return markReceiptError(transaction, receipt.id, "WOO_REFUND_STATE_CONFLICT", link.operation.id);
+    if (
+      link.purchase.status !== RecoveryCreditPurchaseStatus.REFUNDED ||
+      refund.providerReference !== providerContractId
+    ) {
+      return markReceiptError(
+        transaction,
+        receipt.id,
+        "WOO_REFUND_STATE_CONFLICT",
+        link.operation.id,
+      );
     }
-    await markReceiptProcessed(transaction, receipt.id, receipt.receivedAt, link.operation.id);
+    await markReceiptProcessed(
+      transaction,
+      receipt.id,
+      receipt.receivedAt,
+      link.operation.id,
+    );
     return null;
   }
   if (refund.status !== RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED) {
-    return markReceiptError(transaction, receipt.id, "WOO_REFUND_HOLD_NOT_READY", link.operation.id);
+    return markReceiptError(
+      transaction,
+      receipt.id,
+      "WOO_REFUND_HOLD_NOT_READY",
+      link.operation.id,
+    );
   }
 
   const quantity = refund.finalCreditQuantity;
   const counter = link.counter;
-  if (refund.shopId !== link.shop.id || refund.purchaseId !== link.purchase.id
-    || refund.provider !== "WOOCOMMERCE" || quantity === null || quantity <= 0
-    || refund.expectedProviderAmount !== null || refund.expectedProviderCurrency !== null
-    || link.operation.state !== "CONFIRMED"
-    || link.purchase.provider !== "WOOCOMMERCE"
-    || link.purchase.providerReference !== providerContractId
-    || link.purchase.status !== RecoveryCreditPurchaseStatus.WITHDRAWN
-    || link.purchase.reservedAmount !== 0 || link.purchase.currentAmount !== quantity
-    || !counter || counter.refundingQuantity < quantity || counter.grantedQuantity < quantity) {
+  if (
+    refund.shopId !== link.shop.id ||
+    refund.purchaseId !== link.purchase.id ||
+    refund.provider !== "WOOCOMMERCE" ||
+    quantity === null ||
+    quantity <= 0 ||
+    refund.expectedProviderAmount !== null ||
+    refund.expectedProviderCurrency !== null ||
+    link.operation.state !== "CONFIRMED" ||
+    link.purchase.provider !== "WOOCOMMERCE" ||
+    link.purchase.providerReference !== providerContractId ||
+    link.purchase.status !== RecoveryCreditPurchaseStatus.WITHDRAWN ||
+    link.purchase.reservedAmount !== 0 ||
+    link.purchase.currentAmount !== quantity ||
+    !counter ||
+    counter.refundingQuantity < quantity ||
+    counter.grantedQuantity < quantity
+  ) {
     await transaction.recoveryCreditRefund.updateMany({
-      where: { id: refund.id, status: RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED, version: refund.version },
-      data: { status: RecoveryCreditRefundStatus.NEEDS_ATTENTION, reason: "WOO_REFUND_STATE_CONFLICT", version: { increment: 1 } },
+      where: {
+        id: refund.id,
+        status: RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED,
+        version: refund.version,
+      },
+      data: {
+        status: RecoveryCreditRefundStatus.NEEDS_ATTENTION,
+        reason: "WOO_REFUND_STATE_CONFLICT",
+        version: { increment: 1 },
+      },
     });
-    return markReceiptError(transaction, receipt.id, "WOO_REFUND_STATE_CONFLICT", link.operation.id);
+    return markReceiptError(
+      transaction,
+      receipt.id,
+      "WOO_REFUND_STATE_CONFLICT",
+      link.operation.id,
+    );
   }
 
   const purchaseUpdate = await transaction.recoveryCreditPurchase.updateMany({
@@ -102,7 +162,11 @@ export async function settleWooRefundReceipt(
       reservedAmount: 0,
       currentAmount: quantity,
     },
-    data: { status: RecoveryCreditPurchaseStatus.REFUNDED, currentAmount: 0, version: { increment: 1 } },
+    data: {
+      status: RecoveryCreditPurchaseStatus.REFUNDED,
+      currentAmount: 0,
+      version: { increment: 1 },
+    },
   });
   const counterUpdate = await transaction.shopEntitlementCounter.updateMany({
     where: {
@@ -130,13 +194,19 @@ export async function settleWooRefundReceipt(
       providerActionKind: "REFUND",
       providerConfirmedAt: receipt.receivedAt,
       providerConfirmedByPlatformAdminId: null,
-      ...(money ? { providerAmount: money.amount, providerCurrency: money.currency } : {}),
+      ...(money
+        ? { providerAmount: money.amount, providerCurrency: money.currency }
+        : {}),
       status: RecoveryCreditRefundStatus.COMPLETED,
       completedAt: now,
       version: { increment: 1 },
     },
   });
-  if (purchaseUpdate.count !== 1 || counterUpdate.count !== 1 || refundUpdate.count !== 1) {
+  if (
+    purchaseUpdate.count !== 1 ||
+    counterUpdate.count !== 1 ||
+    refundUpdate.count !== 1
+  ) {
     throw new Error("Woo refund allowance settlement compare-and-set failed");
   }
   await createRefundCompletionSupportMessage(transaction, {
@@ -157,7 +227,10 @@ async function markReceiptError(
 ): Promise<string> {
   await transaction.wooCommerceBillingWebhookReceipt.updateMany({
     where: { id: receiptId, processedAt: null },
-    data: { processingError: code, ...(operationId ? { billingOperationId: operationId } : {}) },
+    data: {
+      processingError: code,
+      ...(operationId ? { billingOperationId: operationId } : {}),
+    },
   });
   return code;
 }
@@ -168,9 +241,16 @@ async function markReceiptProcessed(
   processedAt: Date,
   operationId: string,
 ): Promise<void> {
-  const updated = await transaction.wooCommerceBillingWebhookReceipt.updateMany({
-    where: { id: receiptId, processedAt: null },
-    data: { processedAt, processingError: null, billingOperationId: operationId },
-  });
-  if (updated.count !== 1) throw new Error("Woo refund receipt claim was lost before completion");
+  const updated = await transaction.wooCommerceBillingWebhookReceipt.updateMany(
+    {
+      where: { id: receiptId, processedAt: null },
+      data: {
+        processedAt,
+        processingError: null,
+        billingOperationId: operationId,
+      },
+    },
+  );
+  if (updated.count !== 1)
+    throw new Error("Woo refund receipt claim was lost before completion");
 }

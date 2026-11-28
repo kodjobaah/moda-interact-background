@@ -67,17 +67,17 @@ const service = new CheckoutRecoveryService();
 
 function installPrismaTransaction() {
   const txFake = {
-          updateMany: vi.fn(async () => ({ count: 1 })),
+    updateMany: vi.fn(async () => ({ count: 1 })),
     statusHistoryCreate: vi.fn(async () => ({})),
-      };
+  };
 
-    prismaMock.$transaction = vi.fn(async (fn) => {
-      const tx = {
-        checkoutRecovery: {
-          findUnique: prismaMock.checkoutRecovery.findUnique,
-          findFirst: prismaMock.checkoutRecovery.findFirst,
-          updateMany: txFake.updateMany,
-        },
+  prismaMock.$transaction = vi.fn(async (fn) => {
+    const tx = {
+      checkoutRecovery: {
+        findUnique: prismaMock.checkoutRecovery.findUnique,
+        findFirst: prismaMock.checkoutRecovery.findFirst,
+        updateMany: txFake.updateMany,
+      },
       checkoutRecoveryStatusHistory: {
         create: txFake.statusHistoryCreate,
       },
@@ -110,7 +110,10 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
     redisMock.get.mockResolvedValue(null);
     redisMock.del.mockResolvedValue(1);
 
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "ACTIVE" });
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "ACTIVE",
+    });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
       id: "recovery-1",
       status: "MESSAGE_SENT",
@@ -119,7 +122,9 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
       prismaMock.checkoutRecovery.findUnique(args),
     );
     pendingCandidateServiceMock.resolveCandidate.mockResolvedValue(null);
-    pendingCandidateServiceMock.cancelCandidate.mockResolvedValue({ removed: true });
+    pendingCandidateServiceMock.cancelCandidate.mockResolvedValue({
+      removed: true,
+    });
     pendingCandidateServiceMock.markOrderProcessed.mockResolvedValue(undefined);
     pendingCandidateServiceMock.hasOrderProcessed.mockResolvedValue(false);
     pendingCandidateServiceMock.withCheckoutLock.mockImplementation(
@@ -145,7 +150,9 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
       kind: "cancelled-candidate",
       checkoutToken: "checkout_1",
     });
-    expect(pendingCandidateServiceMock.cancelCandidate).toHaveBeenCalledTimes(1);
+    expect(pendingCandidateServiceMock.cancelCandidate).toHaveBeenCalledTimes(
+      1,
+    );
     expect(pendingCandidateServiceMock.markOrderProcessed).toHaveBeenCalledWith(
       "shop_1",
       "checkout_1",
@@ -176,7 +183,9 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
       kind: "cancelled-candidate",
       checkoutToken: "checkout_1",
     });
-    expect(pendingCandidateServiceMock.cancelCandidate).toHaveBeenCalledTimes(1);
+    expect(pendingCandidateServiceMock.cancelCandidate).toHaveBeenCalledTimes(
+      1,
+    );
     expect(pendingCandidateServiceMock.markOrderProcessed).toHaveBeenCalledWith(
       "shop_1",
       "checkout_1",
@@ -184,7 +193,10 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
   });
 
   it("stops an inactive order before candidate or recovery work", async () => {
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "UNINSTALLED",
+    });
 
     const result = await service.handleOrderCompleted(buildInput());
 
@@ -195,7 +207,9 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
     });
     expect(pendingCandidateServiceMock.resolveCandidate).not.toHaveBeenCalled();
     expect(pendingCandidateServiceMock.cancelCandidate).not.toHaveBeenCalled();
-    expect(pendingCandidateServiceMock.markOrderProcessed).not.toHaveBeenCalled();
+    expect(
+      pendingCandidateServiceMock.markOrderProcessed,
+    ).not.toHaveBeenCalled();
   });
 
   it("completes an eligible existing recovery and transitions it once to COMPLETED", async () => {
@@ -207,7 +221,7 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
       kind: "completed",
       recoveryId: "recovery-1",
       fromStatus: "MESSAGE_SENT",
-});
+    });
     expect(txFake.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -232,10 +246,14 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
   it("completes an eligible recovery using the event completion timestamp", async () => {
     const txFake = installPrismaTransaction();
 
-    await service.handleOrderCompleted(buildInput({ completedAt: "2026-08-28T09:15:00Z" }));
+    await service.handleOrderCompleted(
+      buildInput({ completedAt: "2026-08-28T09:15:00Z" }),
+    );
 
     const updateManyArgs = txFake.updateMany.mock.calls[0][0];
-    expect(updateManyArgs.data.completedAt).toEqual(new Date("2026-08-28T09:15:00Z"));
+    expect(updateManyArgs.data.completedAt).toEqual(
+      new Date("2026-08-28T09:15:00Z"),
+    );
   });
 
   it("does not reopen a terminal recovery", async () => {
@@ -307,6 +325,3 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
     );
   });
 });
-
-
-

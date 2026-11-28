@@ -22,26 +22,26 @@ The full billing internals, template preparation/MCP/pricing implementations, ge
 
 These are application-level Prisma delegate/raw calls, not SQL statement counts. Relation `include`/`select`, nested mutations, Prisma implementation, transaction controls and instrumentation can cause a different SQL count. Redis/BullMQ calls and timer-driven process configuration refreshes are excluded. Transaction counts are listed separately. Counts assume real Prisma delegates, normal successful dependency results and the exact branch described.
 
-| Branch | Calls | Transactions | Main evidence |
-| --- | ---: | ---: | --- |
-| Shopify checkout-created, eligible shop, schedule/refresh candidate | 3; 4 with FIXED non-null discount | 0 | pending service 114–139; eligibility 37–55; policy 25–56 |
-| Shopify checkout-updated, existing delayed candidate, newer activity | 3; 4 with FIXED non-null discount | 0 | orchestrator 111–159; activity 169–204; pending service 93–94 |
-| Shopify checkout-updated, existing candidate, stale activity with no missing-context enrichment | 1 | 0 | orchestrator 111–159; activity 109–127 |
-| Shopify checkout-updated, no candidate and no recovery, eligible shop, schedule candidate | 5; 6 with FIXED non-null discount | 0 | orchestrator 111–178; latest-recovery 3–7; pending service 251–284 |
-| Shopify cart activity, absent candidate or unmodified stale candidate | 1 | 0 | orchestrator 295–318; eligibility 58–76; activity 82–127 |
-| Shopify cart activity, newer activity on delayed candidate | 3; 4 with FIXED non-null discount | 0 | same plus activity 169–204 and policy |
-| Shopify order, neither checkout nor cart correlation | 0 | 0 | order correlation 26–29 |
-| Shopify order, absent/inactive shop, or successful pending-candidate cancellation | 1 | 0 | order correlation 31–77 |
-| Shopify order, no candidate and absent/terminal recovery | 2 | 1 | order correlation 31–34, 90–105 |
-| Shopify order, successful recovery completion | 4 | 1 | order correlation 31–34, 90–141 |
-| Shopify candidate maturity, existing active recovery and no suppression-specific replay | 4 | 0 | materialization 50–62, 68–72, 98–109 |
-| Woo ordinary new checkout, no durable recovery/order observation, eligible shop and scheduling | 5; 6 with FIXED non-null discount | 0 | orchestrator 43–45; composition 86–88; activity 149–154, 227–243, 413–414 |
-| Woo checkout duplicate/stale against an active durable recovery, returns from watermark boundary | 2 | 0 | platform assertion + activity existing-recovery read, then activity 169–180 |
-| Woo order, no durable recovery | 3 | 1 | platform assertion; order reconciliation 221–225 and 300–306 |
-| Woo order, durable recovery already terminal, no recorded-order-ID conflict | 4 | 1 | same plus history lookup 227–231, terminal return 307–309 |
-| Woo order, successful active recovery transition | 7 | 1 | platform + pre-read + history-read + transactional read/update/history/attempt-cancel |
-| Capacity repair sweep returning S eligible/available shops | 1 + S | 0 | recovery-capacity-resume.service.ts 54–75; each eligibility uses a subscription query |
-| Expiry full page of 100 successful transitions | 301 | 100 | expiry 32–76: page read plus 3 calls per successful row; next loop adds its own read |
+| Branch                                                                                           |                             Calls | Transactions | Main evidence                                                                         |
+| ------------------------------------------------------------------------------------------------ | --------------------------------: | -----------: | ------------------------------------------------------------------------------------- |
+| Shopify checkout-created, eligible shop, schedule/refresh candidate                              | 3; 4 with FIXED non-null discount |            0 | pending service 114–139; eligibility 37–55; policy 25–56                              |
+| Shopify checkout-updated, existing delayed candidate, newer activity                             | 3; 4 with FIXED non-null discount |            0 | orchestrator 111–159; activity 169–204; pending service 93–94                         |
+| Shopify checkout-updated, existing candidate, stale activity with no missing-context enrichment  |                                 1 |            0 | orchestrator 111–159; activity 109–127                                                |
+| Shopify checkout-updated, no candidate and no recovery, eligible shop, schedule candidate        | 5; 6 with FIXED non-null discount |            0 | orchestrator 111–178; latest-recovery 3–7; pending service 251–284                    |
+| Shopify cart activity, absent candidate or unmodified stale candidate                            |                                 1 |            0 | orchestrator 295–318; eligibility 58–76; activity 82–127                              |
+| Shopify cart activity, newer activity on delayed candidate                                       | 3; 4 with FIXED non-null discount |            0 | same plus activity 169–204 and policy                                                 |
+| Shopify order, neither checkout nor cart correlation                                             |                                 0 |            0 | order correlation 26–29                                                               |
+| Shopify order, absent/inactive shop, or successful pending-candidate cancellation                |                                 1 |            0 | order correlation 31–77                                                               |
+| Shopify order, no candidate and absent/terminal recovery                                         |                                 2 |            1 | order correlation 31–34, 90–105                                                       |
+| Shopify order, successful recovery completion                                                    |                                 4 |            1 | order correlation 31–34, 90–141                                                       |
+| Shopify candidate maturity, existing active recovery and no suppression-specific replay          |                                 4 |            0 | materialization 50–62, 68–72, 98–109                                                  |
+| Woo ordinary new checkout, no durable recovery/order observation, eligible shop and scheduling   | 5; 6 with FIXED non-null discount |            0 | orchestrator 43–45; composition 86–88; activity 149–154, 227–243, 413–414             |
+| Woo checkout duplicate/stale against an active durable recovery, returns from watermark boundary |                                 2 |            0 | platform assertion + activity existing-recovery read, then activity 169–180           |
+| Woo order, no durable recovery                                                                   |                                 3 |            1 | platform assertion; order reconciliation 221–225 and 300–306                          |
+| Woo order, durable recovery already terminal, no recorded-order-ID conflict                      |                                 4 |            1 | same plus history lookup 227–231, terminal return 307–309                             |
+| Woo order, successful active recovery transition                                                 |                                 7 |            1 | platform + pre-read + history-read + transactional read/update/history/attempt-cancel |
+| Capacity repair sweep returning S eligible/available shops                                       |                             1 + S |            0 | recovery-capacity-resume.service.ts 54–75; each eligibility uses a subscription query |
+| Expiry full page of 100 successful transitions                                                   |                               301 |          100 | expiry 32–76: page read plus 3 calls per successful row; next loop adds its own read  |
 
 For expiry, a failed compare-and-set makes only its update call inside the transaction, so 301 is specifically the all-success full page. For policy counts, the extra platform lookup is conditional on `configuredOfferMode === "FIXED" && discount !== null`; the common three-call and five-call totals are not universal constants.
 

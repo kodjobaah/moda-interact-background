@@ -7,9 +7,11 @@
  * startup exception; it must never cause the suite to be run again.
  */
 export function isDisposablePostgresReadinessTimeout(error) {
-  return error instanceof Error &&
+  return (
+    error instanceof Error &&
     error.message.startsWith("Unable to start ephemeral PostgreSQL (") &&
-    error.message.includes("PostgreSQL readiness timed out after ");
+    error.message.includes("PostgreSQL readiness timed out after ")
+  );
 }
 
 const defaultDelay = () => new Promise((resolve) => setTimeout(resolve, 2_000));
@@ -26,20 +28,28 @@ const defaultDelay = () => new Promise((resolve) => setTimeout(resolve, 2_000));
  * @param {() => Promise<void>} [delay]
  * @returns {Promise<T>}
  */
-export async function runWithPostgresStartupRetry(run, logger, delay = defaultDelay) {
+export async function runWithPostgresStartupRetry(
+  run,
+  logger,
+  delay = defaultDelay,
+) {
   let firstError;
   try {
     return await run();
   } catch (error) {
     if (!isDisposablePostgresReadinessTimeout(error)) {
       logger.error("background.integration.infrastructure.failed", {
-        stage: "first-attempt", errorKind: "unexpected", errorName: safeErrorName(error),
+        stage: "first-attempt",
+        errorKind: "unexpected",
+        errorName: safeErrorName(error),
       });
       throw error;
     }
     firstError = error;
     logger.warn("background.integration.postgres_startup.retry", {
-      attempt: 1, maxAttempts: 2, errorKind: "postgres-readiness-timeout",
+      attempt: 1,
+      maxAttempts: 2,
+      errorKind: "postgres-readiness-timeout",
     });
   }
 
@@ -57,7 +67,8 @@ export async function runWithPostgresStartupRetry(run, logger, delay = defaultDe
     });
     if (repeated) {
       throw new AggregateError(
-        [firstError, error], "Disposable PostgreSQL readiness failed on both attempts",
+        [firstError, error],
+        "Disposable PostgreSQL readiness failed on both attempts",
         { cause: error },
       );
     }
@@ -68,5 +79,6 @@ export async function runWithPostgresStartupRetry(run, logger, delay = defaultDe
 function safeErrorName(error) {
   const name = error instanceof Error ? error.name : undefined;
   return typeof name === "string" && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name)
-    ? name : "UnknownError";
+    ? name
+    : "UnknownError";
 }

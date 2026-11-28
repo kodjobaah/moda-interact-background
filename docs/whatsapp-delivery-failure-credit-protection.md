@@ -66,6 +66,7 @@ follow-up slot and the same recovery/conversation. This is a separate schema
 and cross-consumer change, not a BullMQ retry of the old provider permit.
 
 Implementation acceptance boundary for phase 2:
+
 - Persist retry send identity, ordinal, cause, next eligible time, bounded
   retry budget and durable lease; guarantee one eligible retry per logical
   outreach slot and deduplicate webhook and scheduler replay.

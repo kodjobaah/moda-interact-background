@@ -1,9 +1,20 @@
-import { verifiedRecoveryShopHeader, verifiedShopWebsite } from "../conversation-wrappers/recovery-shop-header.js";
-import type { PreparedOutreachBrand, PreparedOutreachBrandMediaItem } from "@modainteract/moda-interact-shared/commerce/outreach";
+import {
+  verifiedRecoveryShopHeader,
+  verifiedShopWebsite,
+} from "../conversation-wrappers/recovery-shop-header.js";
 import type {
-  BrandMediaResolver, BrandMediaRole, MediaApprovedHosts, RecoveryTemplatePreparationInput,
+  PreparedOutreachBrand,
+  PreparedOutreachBrandMediaItem,
+} from "@modainteract/moda-interact-shared/commerce/outreach";
+import type {
+  BrandMediaResolver,
+  BrandMediaRole,
+  MediaApprovedHosts,
+  RecoveryTemplatePreparationInput,
   RecoveryTemplateHeaderMediaRole,
-  ShopBrandRow, SourceBoundPromotionalProduct, TemplateUnavailableReason,
+  ShopBrandRow,
+  SourceBoundPromotionalProduct,
+  TemplateUnavailableReason,
 } from "./recovery-template.types.js";
 import { isIP } from "node:net";
 import { isCheckoutRecoveryWithinLifetime } from "../recovery-lifetime/checkout-recovery-lifetime.js";
@@ -17,57 +28,109 @@ export class BindingUnavailable extends Error {
 }
 
 const BRAND_TEXT_KEYS = [
-  "shopBrand.brandName", "shopBrand.logoAltText", "shopBrand.logoWidth",
-  "shopBrand.logoHeight", "shopBrand.squareLogoAltText",
+  "shopBrand.brandName",
+  "shopBrand.logoAltText",
+  "shopBrand.logoWidth",
+  "shopBrand.logoHeight",
+  "shopBrand.squareLogoAltText",
 ] as const;
 const BRAND_URL_KEYS = [
-  "shopBrand.logoUrl", "shopBrand.squareLogoUrl", "shopBrand.coverImageUrl",
+  "shopBrand.logoUrl",
+  "shopBrand.squareLogoUrl",
+  "shopBrand.coverImageUrl",
 ] as const;
 export const BRAND_KEYS = [...BRAND_TEXT_KEYS, ...BRAND_URL_KEYS] as const;
 
 export type SemanticKey =
   | (typeof BRAND_KEYS)[number]
-  | "customer.firstName" | "shop.name" | "shop.websiteUrl" | "shop.categoryName" | "checkout.url" | "checkout.itemsSummary"
-  | "offer.code" | "offer.description" | "offer.codes"
-  | "promotion.productName" | "promotion.productUrl" | "promotion.offerDescription" | "promotion.code";
+  | "customer.firstName"
+  | "shop.name"
+  | "shop.websiteUrl"
+  | "shop.categoryName"
+  | "checkout.url"
+  | "checkout.itemsSummary"
+  | "offer.code"
+  | "offer.description"
+  | "offer.codes"
+  | "promotion.productName"
+  | "promotion.productUrl"
+  | "promotion.offerDescription"
+  | "promotion.code";
 
 export function isSemanticKey(value: unknown): value is SemanticKey {
-  return typeof value === "string" && (
-    BRAND_KEYS.some((key) => key === value) ||
-    ["customer.firstName", "shop.name", "shop.websiteUrl", "shop.categoryName", "checkout.url", "checkout.itemsSummary",
-      "offer.code", "offer.codes", "offer.description", "promotion.productName", "promotion.productUrl",
-      "promotion.offerDescription", "promotion.code"].includes(value)
+  return (
+    typeof value === "string" &&
+    (BRAND_KEYS.some((key) => key === value) ||
+      [
+        "customer.firstName",
+        "shop.name",
+        "shop.websiteUrl",
+        "shop.categoryName",
+        "checkout.url",
+        "checkout.itemsSummary",
+        "offer.code",
+        "offer.codes",
+        "offer.description",
+        "promotion.productName",
+        "promotion.productUrl",
+        "promotion.offerDescription",
+        "promotion.code",
+      ].includes(value))
   );
 }
 
 function checkoutLineItemsAreSafe(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 100) return false;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100)
+    return false;
   const safeTitle = (candidate: unknown) => {
     if (typeof candidate !== "string") return false;
     const text = candidate.normalize("NFC").trim().replace(/\s+/gu, " ");
-    if (!text || text.length > 160 || /[\p{Cc}\p{Cf}{}]/u.test(text)) return false;
-    try { encodeURIComponent(text); return true; } catch { return false; }
+    if (!text || text.length > 160 || /[\p{Cc}\p{Cf}{}]/u.test(text))
+      return false;
+    try {
+      encodeURIComponent(text);
+      return true;
+    } catch {
+      return false;
+    }
   };
   return value.every((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return false;
     const item = entry as Record<string, unknown>;
-    return safeTitle(item.title) && typeof item.quantity === "number" &&
-      Number.isSafeInteger(item.quantity) && item.quantity >= 1 && item.quantity <= 99999 &&
-      (item.variantTitle == null || safeTitle(item.variantTitle));
+    return (
+      safeTitle(item.title) &&
+      typeof item.quantity === "number" &&
+      Number.isSafeInteger(item.quantity) &&
+      item.quantity >= 1 &&
+      item.quantity <= 99999 &&
+      (item.variantTitle == null || safeTitle(item.variantTitle))
+    );
   });
 }
 
 function hasForbiddenControls(value: string): boolean {
   return Array.from(value).some((character) => {
     const codePoint = character.codePointAt(0);
-    return codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f ||
-      codePoint === 0x2028 || codePoint === 0x2029);
+    return (
+      codePoint !== undefined &&
+      (codePoint <= 0x1f ||
+        codePoint === 0x7f ||
+        codePoint === 0x2028 ||
+        codePoint === 0x2029)
+    );
   });
 }
 
 function boundedText(value: unknown, limit: number): string {
-  if (typeof value !== "string" || !value.trim() || value.length > limit ||
-      hasForbiddenControls(value) || value.includes("{{") || value.includes("}}")) {
+  if (
+    typeof value !== "string" ||
+    !value.trim() ||
+    value.length > limit ||
+    hasForbiddenControls(value) ||
+    value.includes("{{") ||
+    value.includes("}}")
+  ) {
     throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
   }
   return value.trim();
@@ -76,9 +139,16 @@ function boundedText(value: unknown, limit: number): string {
 function validHttps(value: string, hosts: readonly string[]): URL | null {
   if (!URL.canParse(value)) return null;
   const url = new URL(value);
-  if (url.protocol !== "https:" || url.username || url.password || url.hash ||
-      !url.hostname.includes(".") || !hosts.includes(url.hostname.toLowerCase()) ||
-      url.href.length > 2048) return null;
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.hash ||
+    !url.hostname.includes(".") ||
+    !hosts.includes(url.hostname.toLowerCase()) ||
+    url.href.length > 2048
+  )
+    return null;
   return url;
 }
 
@@ -88,19 +158,26 @@ function validHttps(value: string, hosts: readonly string[]): URL | null {
  * shopId, cached per preparation, and never shared between shops.
  */
 export class RecoveryVariableResolver {
-  private commonMode=false;
-  useCommonLayout():void{this.commonMode=true;}
+  private commonMode = false;
+  useCommonLayout(): void {
+    this.commonMode = true;
+  }
   private brandRead: Promise<ShopBrandRow | null> | undefined;
   private categoryRead: Promise<string | null> | undefined;
   private readonly mediaReads = new Map<BrandMediaRole, Promise<string>>();
 
   constructor(
     private readonly input: RecoveryTemplatePreparationInput,
-    private readonly readBrand: (shopId: string) => Promise<ShopBrandRow | null>,
+    private readonly readBrand: (
+      shopId: string,
+    ) => Promise<ShopBrandRow | null>,
     private readonly resolveMedia: BrandMediaResolver,
     private readonly mediaApprovedHosts: MediaApprovedHosts,
     private readonly clock: () => Date,
-    private readonly readCategory: (shopId: string, languageTag: string) => Promise<string | null>,
+    private readonly readCategory: (
+      shopId: string,
+      languageTag: string,
+    ) => Promise<string | null>,
     private readonly languageTag: string,
     private readonly readyProductImageUrl?: string,
     private readonly validateProductImageBeforeBinding?: () => Promise<boolean>,
@@ -114,25 +191,42 @@ export class RecoveryVariableResolver {
 
   async preparedBrand(): Promise<PreparedOutreachBrand> {
     const saved = await this.brand();
-    return { shopId: this.input.shopId, brandName: saved?.brandName ?? null,
-      logoAltText: saved?.logoAltText ?? null, logoWidth: saved?.logoWidth ?? null,
-      logoHeight: saved?.logoHeight ?? null, squareLogoAltText: saved?.squareLogoAltText ?? null };
+    return {
+      shopId: this.input.shopId,
+      brandName: saved?.brandName ?? null,
+      logoAltText: saved?.logoAltText ?? null,
+      logoWidth: saved?.logoWidth ?? null,
+      logoHeight: saved?.logoHeight ?? null,
+      squareLogoAltText: saved?.squareLogoAltText ?? null,
+    };
   }
 
-  async preparedBrandMedia(role: BrandMediaRole): Promise<PreparedOutreachBrandMediaItem> {
+  async preparedBrandMedia(
+    role: BrandMediaRole,
+  ): Promise<PreparedOutreachBrandMediaItem> {
     // readyMedia checks the actual host-owned derivative's tenant, role,
     // status, kind and configured host before this immutable projection.
-    return { shopId: this.input.shopId, role, status: "READY", kind: "R2_DERIVATIVE", httpsUrl: await this.readyMedia(role) };
+    return {
+      shopId: this.input.shopId,
+      role,
+      status: "READY",
+      kind: "R2_DERIVATIVE",
+      httpsUrl: await this.readyMedia(role),
+    };
   }
 
   checkout(): string {
     const checkout = this.input.checkout;
-    if (!checkout || checkout.shopId !== this.input.shopId ||
-        !isCheckoutRecoveryWithinLifetime({
-          lastExternalActivityAt: checkout.lastExternalActivityAt,
-          now: this.clock(),
-          checkoutRecoveryLifetimeDays: checkout.checkoutRecoveryLifetimeDays,
-        })) throw new BindingUnavailable("CHECKOUT_UNAVAILABLE");
+    if (
+      !checkout ||
+      checkout.shopId !== this.input.shopId ||
+      !isCheckoutRecoveryWithinLifetime({
+        lastExternalActivityAt: checkout.lastExternalActivityAt,
+        now: this.clock(),
+        checkoutRecoveryLifetimeDays: checkout.checkoutRecoveryLifetimeDays,
+      })
+    )
+      throw new BindingUnavailable("CHECKOUT_UNAVAILABLE");
     return checkout.url;
   }
 
@@ -144,8 +238,13 @@ export class RecoveryVariableResolver {
 
   encodePromotionButtonSuffix(approvedPrefix: string): string {
     const product = this.promotionalProduct();
-    if (!approvedPrefix || !/[/?=&]$/.test(approvedPrefix) || approvedPrefix.includes("{{") ||
-        approvedPrefix.includes("}}") || approvedPrefix.length > 1900) {
+    if (
+      !approvedPrefix ||
+      !/[/?=&]$/.test(approvedPrefix) ||
+      approvedPrefix.includes("{{") ||
+      approvedPrefix.includes("}}") ||
+      approvedPrefix.length > 1900
+    ) {
       throw new BindingUnavailable("PROMOTION_PRODUCT_URL_UNAVAILABLE");
     }
     return encodeURIComponent(product.product.url!);
@@ -154,8 +253,11 @@ export class RecoveryVariableResolver {
   checkStaticButtonUrl(url: string): void {
     const checkout = this.input.checkout;
     // A static destination still needs to be owned by the authenticated shop.
-    if (!checkout || checkout.shopId !== this.input.shopId ||
-        !validHttps(url, checkout.approvedHosts)) {
+    if (
+      !checkout ||
+      checkout.shopId !== this.input.shopId ||
+      !validHttps(url, checkout.approvedHosts)
+    ) {
       throw new BindingUnavailable("CHECKOUT_UNTRUSTED");
     }
   }
@@ -165,11 +267,18 @@ export class RecoveryVariableResolver {
     if (!promise) {
       promise = (async () => {
         const media = await this.resolveMedia(this.input.shopId, role);
-        const approvedHosts = typeof this.mediaApprovedHosts === "function"
-          ? await this.mediaApprovedHosts() : this.mediaApprovedHosts;
-        if (!media || media.status !== "READY" || media.kind !== "R2_DERIVATIVE" ||
-            media.shopId !== this.input.shopId || media.role !== role ||
-            !validHttps(media.httpsUrl, approvedHosts)) {
+        const approvedHosts =
+          typeof this.mediaApprovedHosts === "function"
+            ? await this.mediaApprovedHosts()
+            : this.mediaApprovedHosts;
+        if (
+          !media ||
+          media.status !== "READY" ||
+          media.kind !== "R2_DERIVATIVE" ||
+          media.shopId !== this.input.shopId ||
+          media.role !== role ||
+          !validHttps(media.httpsUrl, approvedHosts)
+        ) {
           throw new BindingUnavailable("MEDIA_NOT_READY");
         }
         return media.httpsUrl;
@@ -183,8 +292,11 @@ export class RecoveryVariableResolver {
     // The role is frozen by Admin in parameterBindingsSnapshot, not guessed
     // from an original merchant URL, another field or caller preference.
     if (role === "CHECKOUT_PRODUCT") {
-      if (!this.readyProductImageUrl || !this.validateProductImageBeforeBinding ||
-          !(await this.validateProductImageBeforeBinding())) {
+      if (
+        !this.readyProductImageUrl ||
+        !this.validateProductImageBeforeBinding ||
+        !(await this.validateProductImageBeforeBinding())
+      ) {
         throw new BindingUnavailable("MEDIA_NOT_READY");
       }
       return this.readyProductImageUrl;
@@ -197,7 +309,18 @@ export class RecoveryVariableResolver {
       case "customer.firstName":
         return boundedText(this.input.customerFirstName, 200);
       case "shop.name":
-        if(this.commonMode){const identity=this.shopDomain?verifiedRecoveryShopHeader(this.input.shopId,this.shopDomain,(await this.brand())?.brandName):null;if(!identity)throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");return identity.name??new URL(identity.websiteUrl).hostname;}
+        if (this.commonMode) {
+          const identity = this.shopDomain
+            ? verifiedRecoveryShopHeader(
+                this.input.shopId,
+                this.shopDomain,
+                (await this.brand())?.brandName,
+              )
+            : null;
+          if (!identity)
+            throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+          return identity.name ?? new URL(identity.websiteUrl).hostname;
+        }
         if (this.input.shopName?.shopId !== this.input.shopId) {
           throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         }
@@ -205,26 +328,39 @@ export class RecoveryVariableResolver {
         // shop domain remains a safe, tenant-scoped fallback (including Woo).
         try {
           const configuredName = (await this.brand())?.brandName;
-          if (configuredName !== null && configuredName !== undefined) return boundedText(configuredName, 200);
+          if (configuredName !== null && configuredName !== undefined)
+            return boundedText(configuredName, 200);
         } catch (error) {
           if (!(error instanceof BindingUnavailable)) throw error;
         }
         return boundedText(this.input.shopName.value, 200);
       case "shop.websiteUrl": {
-        const url=this.shopDomain?verifiedShopWebsite(this.shopDomain):null;if(!url)throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");return url;
+        const url = this.shopDomain
+          ? verifiedShopWebsite(this.shopDomain)
+          : null;
+        if (!url) throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+        return url;
       }
       case "shop.categoryName":
         // Only the active category for this shop, resolved for the selected
         // provider-template language, is eligible. Missing data fails closed.
-        this.categoryRead ??= this.readCategory(this.input.shopId, this.languageTag);
+        this.categoryRead ??= this.readCategory(
+          this.input.shopId,
+          this.languageTag,
+        );
         return boundedText(await this.categoryRead, 200);
       case "checkout.url":
         return this.checkout();
       case "offer.codes": {
         const offer = this.input.verifiedOffer;
-        if (this.input.offerPresentation !== "CODE_OFFER" || !offer?.verified ||
-            offer.shopId !== this.input.shopId || !Array.isArray(offer.codes) ||
-            offer.codes.length < 1 || offer.codes.length > 3) {
+        if (
+          this.input.offerPresentation !== "CODE_OFFER" ||
+          !offer?.verified ||
+          offer.shopId !== this.input.shopId ||
+          !Array.isArray(offer.codes) ||
+          offer.codes.length < 1 ||
+          offer.codes.length > 3
+        ) {
           throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         }
         return offer.codes.map((code) => boundedText(code, 100)).join(", ");
@@ -237,7 +373,11 @@ export class RecoveryVariableResolver {
         return boundedText(this.input.verifiedOffer?.description, 200);
       case "promotion.code": {
         const offer = this.input.verifiedOffer;
-        if (!offer?.verified || offer.shopId !== this.input.shopId || offer.kind !== "CODE_OFFER") {
+        if (
+          !offer?.verified ||
+          offer.shopId !== this.input.shopId ||
+          offer.kind !== "CODE_OFFER"
+        ) {
           throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         }
         return boundedText(offer.code, 100);
@@ -250,31 +390,46 @@ export class RecoveryVariableResolver {
         if (!checkoutLineItemsAreSafe(items.lineItems)) {
           throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         }
-        return boundedText(formatCheckoutItemsSummary(items.lineItems, this.languageTag), 500);
+        return boundedText(
+          formatCheckoutItemsSummary(items.lineItems, this.languageTag),
+          500,
+        );
       }
       case "offer.code":
       case "offer.description": {
         const offer = this.input.verifiedOffer;
         const now = this.clock().getTime();
-        if (this.input.offerPresentation === "NO_OFFER" || !offer?.verified ||
-            offer.shopId !== this.input.shopId ||
-            offer.kind !== this.input.offerPresentation ||
-            !(offer.verifiedAt instanceof Date) || offer.verifiedAt.getTime() > now ||
-            (offer.expiresAt !== null &&
-              (!(offer.expiresAt instanceof Date) || offer.expiresAt.getTime() <= now))) {
+        if (
+          this.input.offerPresentation === "NO_OFFER" ||
+          !offer?.verified ||
+          offer.shopId !== this.input.shopId ||
+          offer.kind !== this.input.offerPresentation ||
+          !(offer.verifiedAt instanceof Date) ||
+          offer.verifiedAt.getTime() > now ||
+          (offer.expiresAt !== null &&
+            (!(offer.expiresAt instanceof Date) ||
+              offer.expiresAt.getTime() <= now))
+        ) {
           throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         }
         if (key === "offer.code" && offer.kind !== "CODE_OFFER") {
           throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         }
-        return boundedText(key === "offer.code" ? offer.code : offer.description, 200);
+        return boundedText(
+          key === "offer.code" ? offer.code : offer.description,
+          200,
+        );
       }
       default: {
         if (BRAND_URL_KEYS.some((candidate) => candidate === key)) {
           // A text binding requesting a logo URL receives the verified derivative,
           // never the original ShopBrand URL. This is not an IMAGE header.
-          const role: BrandMediaRole = key === "shopBrand.logoUrl" ? "LOGO" :
-            key === "shopBrand.squareLogoUrl" ? "SQUARE_LOGO" : "COVER_IMAGE";
+          const role: BrandMediaRole =
+            key === "shopBrand.logoUrl"
+              ? "LOGO"
+              : key === "shopBrand.squareLogoUrl"
+                ? "SQUARE_LOGO"
+                : "COVER_IMAGE";
           return this.readyMedia(role);
         }
         const brand = await this.brand();
@@ -282,7 +437,12 @@ export class RecoveryVariableResolver {
         const brandField = key.slice("shopBrand.".length) as keyof ShopBrandRow;
         const value = brand[brandField];
         if (key === "shopBrand.logoWidth" || key === "shopBrand.logoHeight") {
-          if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > 10000) {
+          if (
+            typeof value !== "number" ||
+            !Number.isSafeInteger(value) ||
+            value <= 0 ||
+            value > 10000
+          ) {
             throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
           }
           return String(value);
@@ -294,11 +454,16 @@ export class RecoveryVariableResolver {
 
   private promotionalProduct(): SourceBoundPromotionalProduct {
     const source = this.input.promotionalProduct;
-    if (this.input.promotionTarget !== "ALTERNATIVE_PRODUCT" || !source ||
-        source.sourceTool !== "commerce_get_product" ||
-        source.authenticatedShopId !== this.input.shopId || source.product.productId.trim() === "" ||
-      (source.product.variantId !== null && source.product.variantId.trim() === "") ||
-      !isSafePromotionalUrl(source.product.url)) {
+    if (
+      this.input.promotionTarget !== "ALTERNATIVE_PRODUCT" ||
+      !source ||
+      source.sourceTool !== "commerce_get_product" ||
+      source.authenticatedShopId !== this.input.shopId ||
+      source.product.productId.trim() === "" ||
+      (source.product.variantId !== null &&
+        source.product.variantId.trim() === "") ||
+      !isSafePromotionalUrl(source.product.url)
+    ) {
       throw new BindingUnavailable("PROMOTION_PRODUCT_URL_UNAVAILABLE");
     }
     return source;
@@ -306,15 +471,32 @@ export class RecoveryVariableResolver {
 }
 
 function isSafePromotionalUrl(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 2048 ||
-  Array.from(value).some((character) => character.trim().length === 0 || hasForbiddenControls(character))) return false;
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 2048 ||
+    Array.from(value).some(
+      (character) =>
+        character.trim().length === 0 || hasForbiddenControls(character),
+    )
+  )
+    return false;
   try {
     const authority = /^https:\/\/([^/?#]+)/i.exec(value)?.[1];
-    if (!authority || authority.includes("@") || /:\d+$/.test(authority)) return false;
+    if (!authority || authority.includes("@") || /:\d+$/.test(authority))
+      return false;
     const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password && !url.port && !url.hash &&
-      !isIP(url.hostname) && url.hostname !== "localhost" && !url.hostname.endsWith(".localhost") &&
-      url.hostname.includes(".");
+    return (
+      url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      !url.hash &&
+      !isIP(url.hostname) &&
+      url.hostname !== "localhost" &&
+      !url.hostname.endsWith(".localhost") &&
+      url.hostname.includes(".")
+    );
   } catch {
     return false;
   }

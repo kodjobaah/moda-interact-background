@@ -3,7 +3,10 @@ import {
   CommerceToolOutputs,
   InitialOutreachCheckoutOfferSetSchema,
 } from "@modainteract/moda-interact-shared/commerce";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import type {
   InitialOutreachAgentContext,
   InitialOutreachAgentResult,
@@ -18,18 +21,25 @@ import { productTargetMatches } from "../../agents/initial-outreach-offer-produc
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import type { InitialOutreachAgentContextService } from "./initial-outreach-agent-context.service.js";
 import { RecoveryOutreachMcpSelectorService } from "./recovery-outreach-mcp-selector.service.js";
-import type { DiscountSourceFence, DiscountSourceFenceResult } from "./current-discount-source-fence.js";
+import type {
+  DiscountSourceFence,
+  DiscountSourceFenceResult,
+} from "./current-discount-source-fence.js";
 import { readCurrentDiscountSourceFence } from "./current-discount-source-fence.js";
 import type { CheckoutPriceReconciliation } from "../recovery-pricing/checkout-price-reconciliation.types.js";
 import { isSafePromotionProductUrl } from "./promotion-product-url.js";
 
 const MCP_READ_BUDGET_MS = 15_000;
 const logger = createLogger({
-  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
 });
 
 type ContextBuilder = Pick<InitialOutreachAgentContextService, "build">;
-type Selector = Pick<RecoveryOutreachMcpSelectorService, "connect" | "tools" | "call" | "close">;
+type Selector = Pick<
+  RecoveryOutreachMcpSelectorService,
+  "connect" | "tools" | "call" | "close"
+>;
 
 export type CurrentOutreachOfferAdmissionToken = Readonly<{
   shopId: string;
@@ -44,19 +54,39 @@ export type CurrentOutreachOfferAdmissionToken = Readonly<{
 }>;
 
 export type CurrentOutreachOfferDecision =
-  | Readonly<{ kind: "VALIDATED"; result: Exclude<InitialOutreachAgentResult,
-      { kind: "FAILURE" | "NO_VERIFIED_OFFER" }>; context: InitialOutreachAgentContext;
-      admissionToken: CurrentOutreachOfferAdmissionToken }>
-  | Readonly<{ kind: "NO_VERIFIED_OFFER"; result: Extract<InitialOutreachAgentResult,
-      { kind: "NO_VERIFIED_OFFER" }>; context: InitialOutreachAgentContext;
-      admissionToken: CurrentOutreachOfferAdmissionToken }>
+  | Readonly<{
+      kind: "VALIDATED";
+      result: Exclude<
+        InitialOutreachAgentResult,
+        { kind: "FAILURE" | "NO_VERIFIED_OFFER" }
+      >;
+      context: InitialOutreachAgentContext;
+      admissionToken: CurrentOutreachOfferAdmissionToken;
+    }>
+  | Readonly<{
+      kind: "NO_VERIFIED_OFFER";
+      result: Extract<
+        InitialOutreachAgentResult,
+        { kind: "NO_VERIFIED_OFFER" }
+      >;
+      context: InitialOutreachAgentContext;
+      admissionToken: CurrentOutreachOfferAdmissionToken;
+    }>
   | Readonly<{ kind: "FAILURE"; reasonCode: string; retryable: boolean }>;
 
 export type CurrentOutreachOfferRevalidationDependencies = Readonly<{
   contextBuilder: ContextBuilder;
-  createSelector?: (input: { shopId: string; signal: AbortSignal; maxProductDetailReads?: number }) => Selector;
+  createSelector?: (input: {
+    shopId: string;
+    signal: AbortSignal;
+    maxProductDetailReads?: number;
+  }) => Selector;
   readFence?: (input: {
-    shopId: string; checkoutRecoveryId: string; selectedOfferIds: readonly string[]; mode?: InitialOutreachAgentContext["mode"]; signal: AbortSignal;
+    shopId: string;
+    checkoutRecoveryId: string;
+    selectedOfferIds: readonly string[];
+    mode?: InitialOutreachAgentContext["mode"];
+    signal: AbortSignal;
     maxReadMs?: number;
   }) => Promise<DiscountSourceFenceResult>;
   readBudgetMs?: number;
@@ -64,14 +94,19 @@ export type CurrentOutreachOfferRevalidationDependencies = Readonly<{
   logger?: Pick<StructuredLogger, "warn" | "error">;
 }>;
 
-function fenceMatches(left: DiscountSourceFence, right: DiscountSourceFence): boolean {
-  return left.shopId === right.shopId && left.platform === right.platform &&
+function fenceMatches(
+  left: DiscountSourceFence,
+  right: DiscountSourceFence,
+): boolean {
+  return (
+    left.shopId === right.shopId &&
+    left.platform === right.platform &&
     left.syncGeneration === right.syncGeneration &&
-    JSON.stringify(left.selectedOfferIds) === JSON.stringify(right.selectedOfferIds) &&
-    left.snapshotDigest === right.snapshotDigest;
+    JSON.stringify(left.selectedOfferIds) ===
+      JSON.stringify(right.selectedOfferIds) &&
+    left.snapshotDigest === right.snapshotDigest
+  );
 }
-
-
 
 function tokenFor(
   context: InitialOutreachAgentContext,
@@ -134,11 +169,17 @@ function makeCheckoutResult(
     proposedOfferIds: proposed.offerSet.offers.map((offer) => offer.offerId),
   });
   if (group.verdict !== "SUPPORTED" || group.offerIds.length < 1) return null;
-  const byId = new Map(candidates.map((candidate) => [candidate.offer.offerId, candidate]));
+  const byId = new Map(
+    candidates.map((candidate) => [candidate.offer.offerId, candidate]),
+  );
   const offers = group.offerIds.map((offerId) => {
     const candidate = byId.get(offerId);
-    if (!candidate || candidate.eligibility.verdict !== "SUPPORTED" ||
-        candidate.details.providerDiscountId === null) return null;
+    if (
+      !candidate ||
+      candidate.eligibility.verdict !== "SUPPORTED" ||
+      candidate.details.providerDiscountId === null
+    )
+      return null;
     return {
       offerId,
       providerDiscountId: candidate.details.providerDiscountId,
@@ -148,7 +189,8 @@ function makeCheckoutResult(
   });
   if (offers.some((offer) => offer === null)) return null;
   const offerSet = InitialOutreachCheckoutOfferSetSchema.safeParse({
-    schemaVersion: "moda.outreach.checkout-offers.v1", offers,
+    schemaVersion: "moda.outreach.checkout-offers.v1",
+    offers,
   });
   if (!offerSet.success) return null;
   const members = group.offerIds.map((offerId) => {
@@ -163,84 +205,162 @@ function makeCheckoutResult(
     };
   });
   return {
-    kind: "CHECKOUT_DISCOUNT", offerSet: offerSet.data, members, group,
-    shopId: context.shopId, checkoutRecoveryId: context.checkoutRecoveryId,
-    outreachAttemptId: context.outreachAttemptId, generation: context.basket.generation,
-    fingerprint: context.basket.fingerprint, priceReconciliation: context.priceReconciliation,
+    kind: "CHECKOUT_DISCOUNT",
+    offerSet: offerSet.data,
+    members,
+    group,
+    shopId: context.shopId,
+    checkoutRecoveryId: context.checkoutRecoveryId,
+    outreachAttemptId: context.outreachAttemptId,
+    generation: context.basket.generation,
+    fingerprint: context.basket.fingerprint,
+    priceReconciliation: context.priceReconciliation,
     discoveryIncomplete,
   };
 }
 
-function expectedSourceIds(proposed: InitialOutreachAgentResult): readonly string[] | null {
-  if (proposed.kind === "CHECKOUT_DISCOUNT") return proposed.offerSet.offers.map((offer) => offer.offerId);
-  if (proposed.kind === "ALTERNATIVE_PRODUCT_PROMOTION") return [proposed.offerId];
+function expectedSourceIds(
+  proposed: InitialOutreachAgentResult,
+): readonly string[] | null {
+  if (proposed.kind === "CHECKOUT_DISCOUNT")
+    return proposed.offerSet.offers.map((offer) => offer.offerId);
+  if (proposed.kind === "ALTERNATIVE_PRODUCT_PROMOTION")
+    return [proposed.offerId];
   return [];
 }
 
 export class CurrentOutreachOfferRevalidationService {
-  private readonly createSelector: NonNullable<CurrentOutreachOfferRevalidationDependencies["createSelector"]>;
-  private readonly readFence: NonNullable<CurrentOutreachOfferRevalidationDependencies["readFence"]>;
+  private readonly createSelector: NonNullable<
+    CurrentOutreachOfferRevalidationDependencies["createSelector"]
+  >;
+  private readonly readFence: NonNullable<
+    CurrentOutreachOfferRevalidationDependencies["readFence"]
+  >;
   private readonly readBudgetMs: number;
   private readonly clock: () => Date;
   private readonly log: Pick<StructuredLogger, "warn" | "error">;
 
-  constructor(private readonly dependencies: CurrentOutreachOfferRevalidationDependencies) {
-    this.createSelector = dependencies.createSelector ?? ((input) => new RecoveryOutreachMcpSelectorService(input));
+  constructor(
+    private readonly dependencies: CurrentOutreachOfferRevalidationDependencies,
+  ) {
+    this.createSelector =
+      dependencies.createSelector ??
+      ((input) => new RecoveryOutreachMcpSelectorService(input));
     this.readFence = dependencies.readFence ?? readCurrentDiscountSourceFence;
     this.readBudgetMs = dependencies.readBudgetMs ?? MCP_READ_BUDGET_MS;
     this.clock = dependencies.clock ?? (() => new Date());
     this.log = dependencies.logger ?? logger;
   }
 
-  async revalidateCurrentOutreachOffer(input: Readonly<{
-    shopId: string;
-    checkoutRecoveryId: string;
-    outreachAttemptId: string;
-    proposed: InitialOutreachAgentResult;
-    signal: AbortSignal;
-    readBudgetMs?: number;
-    discountSourceReadTimeoutMs?: number;
-    maxProductDetailReads?: number;
-  }>): Promise<CurrentOutreachOfferDecision> {
+  async revalidateCurrentOutreachOffer(
+    input: Readonly<{
+      shopId: string;
+      checkoutRecoveryId: string;
+      outreachAttemptId: string;
+      proposed: InitialOutreachAgentResult;
+      signal: AbortSignal;
+      readBudgetMs?: number;
+      discountSourceReadTimeoutMs?: number;
+      maxProductDetailReads?: number;
+    }>,
+  ): Promise<CurrentOutreachOfferDecision> {
     const initial = await this.dependencies.contextBuilder.build(input);
-    if (initial.shopId !== input.shopId || initial.checkoutRecoveryId !== input.checkoutRecoveryId ||
-        initial.outreachAttemptId !== input.outreachAttemptId) {
-      return { kind: "FAILURE", reasonCode: "CURRENT_CONTEXT_IDENTITY_MISMATCH", retryable: false };
+    if (
+      initial.shopId !== input.shopId ||
+      initial.checkoutRecoveryId !== input.checkoutRecoveryId ||
+      initial.outreachAttemptId !== input.outreachAttemptId
+    ) {
+      return {
+        kind: "FAILURE",
+        reasonCode: "CURRENT_CONTEXT_IDENTITY_MISMATCH",
+        retryable: false,
+      };
     }
     if (input.proposed.kind === "FAILURE") {
-      return { kind: "FAILURE", reasonCode: input.proposed.reasonCode, retryable: input.proposed.retryable };
+      return {
+        kind: "FAILURE",
+        reasonCode: input.proposed.reasonCode,
+        retryable: input.proposed.retryable,
+      };
     }
     const ids = expectedSourceIds(input.proposed);
-    if (input.proposed.kind === "NO_VERIFIED_OFFER" || initial.mode === "NONE") {
-      if (initial.mode !== "NONE" && input.proposed.kind === "NO_VERIFIED_OFFER" &&
-          input.proposed.discoveryIncomplete) {
-        return { kind: "FAILURE", reasonCode: "OFFER_DISCOVERY_INCOMPLETE", retryable: true };
+    if (
+      input.proposed.kind === "NO_VERIFIED_OFFER" ||
+      initial.mode === "NONE"
+    ) {
+      if (
+        initial.mode !== "NONE" &&
+        input.proposed.kind === "NO_VERIFIED_OFFER" &&
+        input.proposed.discoveryIncomplete
+      ) {
+        return {
+          kind: "FAILURE",
+          reasonCode: "OFFER_DISCOVERY_INCOMPLETE",
+          retryable: true,
+        };
       }
-      return noOffer(initial, input.proposed.kind === "NO_VERIFIED_OFFER" ? input.proposed.reason : "POLICY_NONE",
-        false, null);
+      return noOffer(
+        initial,
+        input.proposed.kind === "NO_VERIFIED_OFFER"
+          ? input.proposed.reason
+          : "POLICY_NONE",
+        false,
+        null,
+      );
     }
-    if (!ids || ids.length < 1 || ids.length > 3 || new Set(ids).size !== ids.length ||
-        initial.mode === "FIXED" && ids.some((id) => !initial.authorisedDiscountIds.includes(id)) ||
-        input.proposed.shopId !== input.shopId || input.proposed.checkoutRecoveryId !== input.checkoutRecoveryId ||
-        input.proposed.outreachAttemptId !== input.outreachAttemptId ||
-        input.proposed.generation !== initial.basket.generation ||
-        input.proposed.fingerprint !== initial.basket.fingerprint) {
-      return { kind: "FAILURE", reasonCode: "PROPOSED_OFFER_STALE_OR_UNAUTHORISED", retryable: false };
+    if (
+      !ids ||
+      ids.length < 1 ||
+      ids.length > 3 ||
+      new Set(ids).size !== ids.length ||
+      (initial.mode === "FIXED" &&
+        ids.some((id) => !initial.authorisedDiscountIds.includes(id))) ||
+      input.proposed.shopId !== input.shopId ||
+      input.proposed.checkoutRecoveryId !== input.checkoutRecoveryId ||
+      input.proposed.outreachAttemptId !== input.outreachAttemptId ||
+      input.proposed.generation !== initial.basket.generation ||
+      input.proposed.fingerprint !== initial.basket.fingerprint
+    ) {
+      return {
+        kind: "FAILURE",
+        reasonCode: "PROPOSED_OFFER_STALE_OR_UNAUTHORISED",
+        retryable: false,
+      };
     }
 
-    const first = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode,
-      ...(input.discountSourceReadTimeoutMs !== undefined ? { maxReadMs: input.discountSourceReadTimeoutMs } : {}) });
+    const first = await this.readFence({
+      ...input,
+      selectedOfferIds: ids,
+      mode: initial.mode,
+      ...(input.discountSourceReadTimeoutMs !== undefined
+        ? { maxReadMs: input.discountSourceReadTimeoutMs }
+        : {}),
+    });
     if (first.kind !== "AVAILABLE") {
       this.log.warn("recovery_offer.current_source.fence_unavailable", {
-        shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
-        attemptId: input.outreachAttemptId, stage: "F1", reasonCode: first.reasonCode,
+        shopId: input.shopId,
+        recoveryId: input.checkoutRecoveryId,
+        attemptId: input.outreachAttemptId,
+        stage: "F1",
+        reasonCode: first.reasonCode,
       });
-      return { kind: "FAILURE", reasonCode: `SOURCE_FENCE_F1_${first.reasonCode}`, retryable: true };
+      return {
+        kind: "FAILURE",
+        reasonCode: `SOURCE_FENCE_F1_${first.reasonCode}`,
+        retryable: true,
+      };
     }
-    const deadline = AbortSignal.timeout(input.readBudgetMs ?? this.readBudgetMs);
+    const deadline = AbortSignal.timeout(
+      input.readBudgetMs ?? this.readBudgetMs,
+    );
     const signal = AbortSignal.any([input.signal, deadline]);
-    const selector = this.createSelector({ shopId: input.shopId, signal,
-      ...(input.maxProductDetailReads !== undefined ? { maxProductDetailReads: input.maxProductDetailReads } : {}) });
+    const selector = this.createSelector({
+      shopId: input.shopId,
+      signal,
+      ...(input.maxProductDetailReads !== undefined
+        ? { maxProductDetailReads: input.maxProductDetailReads }
+        : {}),
+    });
     let primaryError: unknown;
     let closeError: unknown;
     let discoveryIncomplete = false;
@@ -249,71 +369,133 @@ export class CurrentOutreachOfferRevalidationService {
     try {
       await selector.connect();
       await selector.tools();
-      const proposedMembers = input.proposed.kind === "CHECKOUT_DISCOUNT"
-        ? new Map(input.proposed.members.map((member) => [member.offerId, member])) : null;
+      const proposedMembers =
+        input.proposed.kind === "CHECKOUT_DISCOUNT"
+          ? new Map(
+              input.proposed.members.map((member) => [member.offerId, member]),
+            )
+          : null;
       for (const offerId of ids) {
         signal.throwIfAborted();
-        const result = await selector.call("commerce_get_discount_details", { offerId }, signal);
+        const result = await selector.call(
+          "commerce_get_discount_details",
+          { offerId },
+          signal,
+        );
         if (result.status !== "OK") {
           discoveryIncomplete = true;
-          this.log.warn("recovery_offer.current_source.mcp_member_unavailable", {
-            shopId: input.shopId, attemptId: input.outreachAttemptId,
-            tool: "commerce_get_discount_details", reasonCode: result.code,
-          });
+          this.log.warn(
+            "recovery_offer.current_source.mcp_member_unavailable",
+            {
+              shopId: input.shopId,
+              attemptId: input.outreachAttemptId,
+              tool: "commerce_get_discount_details",
+              reasonCode: result.code,
+            },
+          );
           continue;
         }
-        const parsed = CommerceToolOutputs.commerce_get_discount_details.safeParse(result.data);
+        const parsed =
+          CommerceToolOutputs.commerce_get_discount_details.safeParse(
+            result.data,
+          );
         if (parsed.success && "outcome" in parsed.data) {
-          this.log.warn("recovery_offer.current_source.mcp_member_unavailable", {
-            shopId: input.shopId, attemptId: input.outreachAttemptId,
-            tool: "commerce_get_discount_details",
-            reasonCode: "CATALOGUE_LOOKUP_UNAVAILABLE",
-            sourceOutcome: "UNAVAILABLE",
-            sourceReasonCode: parsed.data.reasonCode,
-          });
-          return { kind: "FAILURE", reasonCode: "OFFER_DISCOVERY_INCOMPLETE", retryable: true };
+          this.log.warn(
+            "recovery_offer.current_source.mcp_member_unavailable",
+            {
+              shopId: input.shopId,
+              attemptId: input.outreachAttemptId,
+              tool: "commerce_get_discount_details",
+              reasonCode: "CATALOGUE_LOOKUP_UNAVAILABLE",
+              sourceOutcome: "UNAVAILABLE",
+              sourceReasonCode: parsed.data.reasonCode,
+            },
+          );
+          return {
+            kind: "FAILURE",
+            reasonCode: "OFFER_DISCOVERY_INCOMPLETE",
+            retryable: true,
+          };
         }
-        const details = parsed.success && !("outcome" in parsed.data) ? parsed.data.details : null;
-        if (!details || details.offer.offerId !== offerId || !details.providerDiscountId) {
+        const details =
+          parsed.success && !("outcome" in parsed.data)
+            ? parsed.data.details
+            : null;
+        if (
+          !details ||
+          details.offer.offerId !== offerId ||
+          !details.providerDiscountId
+        ) {
           discoveryIncomplete = true;
           continue;
         }
         const previous = proposedMembers?.get(offerId);
-        const proposedPromotion = input.proposed.kind === "ALTERNATIVE_PRODUCT_PROMOTION"
-          ? input.proposed : null;
-        if (previous && (details.providerDiscountId !== previous.providerDiscountId ||
+        const proposedPromotion =
+          input.proposed.kind === "ALTERNATIVE_PRODUCT_PROMOTION"
+            ? input.proposed
+            : null;
+        if (
+          previous &&
+          (details.providerDiscountId !== previous.providerDiscountId ||
             details.offer.method !== previous.method ||
-            (details.offer.method === "CODE" && details.offer.code !== previous.code))) {
+            (details.offer.method === "CODE" &&
+              details.offer.code !== previous.code))
+        ) {
           discoveryIncomplete = true;
           continue;
         }
-        if (proposedPromotion && (details.providerDiscountId !== proposedPromotion.providerDiscountId ||
+        if (
+          proposedPromotion &&
+          (details.providerDiscountId !==
+            proposedPromotion.providerDiscountId ||
             details.offer.method !== proposedPromotion.method ||
-            (details.offer.method === "CODE" && details.offer.code !== proposedPromotion.code))) {
+            (details.offer.method === "CODE" &&
+              details.offer.code !== proposedPromotion.code))
+        ) {
           discoveryIncomplete = true;
           continue;
         }
-        freshCandidates.push(candidateFromDetails(initial, details as InitialOutreachCommerceDiscountDetails, this.clock));
+        freshCandidates.push(
+          candidateFromDetails(
+            initial,
+            details as InitialOutreachCommerceDiscountDetails,
+            this.clock,
+          ),
+        );
       }
 
       if (input.proposed.kind === "ALTERNATIVE_PRODUCT_PROMOTION") {
         signal.throwIfAborted();
-        const result = await selector.call("commerce_get_product", {
-          productId: input.proposed.productId, variantId: input.proposed.variantId,
-        }, signal);
+        const result = await selector.call(
+          "commerce_get_product",
+          {
+            productId: input.proposed.productId,
+            variantId: input.proposed.variantId,
+          },
+          signal,
+        );
         if (result.status === "OK") {
-          const parsed = CommerceToolOutputs.commerce_get_product.safeParse(result.data);
+          const parsed = CommerceToolOutputs.commerce_get_product.safeParse(
+            result.data,
+          );
           const product = parsed.success ? parsed.data.product : null;
-          if (product && product.productId === input.proposed.productId &&
-              product.variantId === input.proposed.variantId) freshProduct = product as InitialOutreachCommerceProduct;
+          if (
+            product &&
+            product.productId === input.proposed.productId &&
+            product.variantId === input.proposed.variantId
+          )
+            freshProduct = product as InitialOutreachCommerceProduct;
         }
         if (!freshProduct) discoveryIncomplete = true;
       }
     } catch (error) {
       primaryError = error;
       this.log.error("recovery_offer.current_source.mcp_read_failed", {
-        shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
-        attemptId: input.outreachAttemptId, source: "authenticated_mcp", error,
+        shopId: input.shopId,
+        recoveryId: input.checkoutRecoveryId,
+        attemptId: input.outreachAttemptId,
+        source: "authenticated_mcp",
+        error,
       });
       throw error;
     } finally {
@@ -321,69 +503,145 @@ export class CurrentOutreachOfferRevalidationService {
         await selector.close();
       } catch (error) {
         if (primaryError === undefined) closeError = error;
-        else this.log.warn("recovery_offer.current_source.mcp_close_failed", {
-          shopId: input.shopId, attemptId: input.outreachAttemptId, source: "authenticated_mcp", error,
-        });
+        else
+          this.log.warn("recovery_offer.current_source.mcp_close_failed", {
+            shopId: input.shopId,
+            attemptId: input.outreachAttemptId,
+            source: "authenticated_mcp",
+            error,
+          });
       }
     }
     if (closeError !== undefined) {
       this.log.error("recovery_offer.current_source.mcp_close_failed", {
-        shopId: input.shopId, attemptId: input.outreachAttemptId, source: "authenticated_mcp", error: closeError,
+        shopId: input.shopId,
+        attemptId: input.outreachAttemptId,
+        source: "authenticated_mcp",
+        error: closeError,
       });
       throw closeError;
     }
     if (input.signal.aborted) {
-      return { kind: "FAILURE", reasonCode: "CURRENT_SOURCE_READ_CANCELLED", retryable: false };
+      return {
+        kind: "FAILURE",
+        reasonCode: "CURRENT_SOURCE_READ_CANCELLED",
+        retryable: false,
+      };
     }
     if (deadline.aborted) {
-      return { kind: "FAILURE", reasonCode: "CURRENT_SOURCE_READ_DEADLINE", retryable: true };
+      return {
+        kind: "FAILURE",
+        reasonCode: "CURRENT_SOURCE_READ_DEADLINE",
+        retryable: true,
+      };
     }
-    const second = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode,
-      ...(input.discountSourceReadTimeoutMs !== undefined ? { maxReadMs: input.discountSourceReadTimeoutMs } : {}) });
+    const second = await this.readFence({
+      ...input,
+      selectedOfferIds: ids,
+      mode: initial.mode,
+      ...(input.discountSourceReadTimeoutMs !== undefined
+        ? { maxReadMs: input.discountSourceReadTimeoutMs }
+        : {}),
+    });
     if (second.kind !== "AVAILABLE") {
       this.log.warn("recovery_offer.current_source.fence_unavailable", {
-        shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
-        attemptId: input.outreachAttemptId, stage: "F2", reasonCode: second.reasonCode,
+        shopId: input.shopId,
+        recoveryId: input.checkoutRecoveryId,
+        attemptId: input.outreachAttemptId,
+        stage: "F2",
+        reasonCode: second.reasonCode,
       });
-      return { kind: "FAILURE", reasonCode: `SOURCE_FENCE_F2_${second.reasonCode}`, retryable: true };
+      return {
+        kind: "FAILURE",
+        reasonCode: `SOURCE_FENCE_F2_${second.reasonCode}`,
+        retryable: true,
+      };
     }
     if (!fenceMatches(first.fence, second.fence)) {
       this.log.warn("recovery_offer.current_source.fence_changed", {
-        shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
-        attemptId: input.outreachAttemptId, stage: "F2",
+        shopId: input.shopId,
+        recoveryId: input.checkoutRecoveryId,
+        attemptId: input.outreachAttemptId,
+        stage: "F2",
         firstDigestPrefix: first.fence.snapshotDigest.slice(0, 12),
         secondDigestPrefix: second.fence.snapshotDigest.slice(0, 12),
         reasonCode: "SOURCE_CHANGED",
       });
-      return { kind: "FAILURE", reasonCode: "SOURCE_FENCE_F2_CHANGED", retryable: true };
+      return {
+        kind: "FAILURE",
+        reasonCode: "SOURCE_FENCE_F2_CHANGED",
+        retryable: true,
+      };
     }
     const context = await this.dependencies.contextBuilder.build(input);
-    if (context.mode !== initial.mode ||
-        JSON.stringify(context.authorisedDiscountIds) !== JSON.stringify(initial.authorisedDiscountIds) ||
-        context.basket.generation !== initial.basket.generation ||
-        context.basket.fingerprint !== initial.basket.fingerprint ||
-        !sameReconciledPrices(context.priceReconciliation, initial.priceReconciliation)) {
-      return { kind: "FAILURE", reasonCode: "CURRENT_CONTEXT_CHANGED_DURING_SOURCE_READ", retryable: true };
+    if (
+      context.mode !== initial.mode ||
+      JSON.stringify(context.authorisedDiscountIds) !==
+        JSON.stringify(initial.authorisedDiscountIds) ||
+      context.basket.generation !== initial.basket.generation ||
+      context.basket.fingerprint !== initial.basket.fingerprint ||
+      !sameReconciledPrices(
+        context.priceReconciliation,
+        initial.priceReconciliation,
+      )
+    ) {
+      return {
+        kind: "FAILURE",
+        reasonCode: "CURRENT_CONTEXT_CHANGED_DURING_SOURCE_READ",
+        retryable: true,
+      };
     }
     const admissionToken = tokenFor(context, second.fence);
     if (input.proposed.kind === "CHECKOUT_DISCOUNT") {
-      const result = makeCheckoutResult(context, input.proposed, freshCandidates, discoveryIncomplete);
-      if (!result) return noOffer(context, "NO_CURRENT_COMPATIBLE_OFFER", discoveryIncomplete, second.fence);
+      const result = makeCheckoutResult(
+        context,
+        input.proposed,
+        freshCandidates,
+        discoveryIncomplete,
+      );
+      if (!result)
+        return noOffer(
+          context,
+          "NO_CURRENT_COMPATIBLE_OFFER",
+          discoveryIncomplete,
+          second.fence,
+        );
       return { kind: "VALIDATED", result, context, admissionToken };
     }
     if (input.proposed.kind !== "ALTERNATIVE_PRODUCT_PROMOTION") {
-      return { kind: "FAILURE", reasonCode: "PROPOSED_OUTCOME_INVALID", retryable: false };
+      return {
+        kind: "FAILURE",
+        reasonCode: "PROPOSED_OUTCOME_INVALID",
+        retryable: false,
+      };
     }
-    const alternative = input.proposed as Extract<InitialOutreachAgentResult,
-      { kind: "ALTERNATIVE_PRODUCT_PROMOTION" }>;
+    const alternative = input.proposed as Extract<
+      InitialOutreachAgentResult,
+      { kind: "ALTERNATIVE_PRODUCT_PROMOTION" }
+    >;
 
-    const candidate = freshCandidates.find((entry) => entry.offer.offerId === alternative.offerId);
-    if (!candidate || !freshProduct ||
-        !productTargetMatches(candidate, freshProduct, this.clock())) {
-      return noOffer(context, "ALTERNATIVE_PRODUCT_NO_LONGER_VERIFIABLE", true, second.fence);
+    const candidate = freshCandidates.find(
+      (entry) => entry.offer.offerId === alternative.offerId,
+    );
+    if (
+      !candidate ||
+      !freshProduct ||
+      !productTargetMatches(candidate, freshProduct, this.clock())
+    ) {
+      return noOffer(
+        context,
+        "ALTERNATIVE_PRODUCT_NO_LONGER_VERIFIABLE",
+        true,
+        second.fence,
+      );
     }
     if (!freshProduct.url || !isSafePromotionProductUrl(freshProduct.url)) {
-      return noOffer(context, "PROMOTION_PRODUCT_URL_UNAVAILABLE", true, second.fence);
+      return noOffer(
+        context,
+        "PROMOTION_PRODUCT_URL_UNAVAILABLE",
+        true,
+        second.fence,
+      );
     }
     const validated = {
       kind: "ALTERNATIVE_PRODUCT_PROMOTION" as const,
@@ -394,12 +652,22 @@ export class CurrentOutreachOfferRevalidationService {
       description: candidate.offer.title,
       productId: freshProduct.productId,
       variantId: freshProduct.variantId,
-      product: { sourceTool: "commerce_get_product" as const, authenticatedShopId: input.shopId,
-        shopId: input.shopId, product: freshProduct },
-      shopId: input.shopId, checkoutRecoveryId: input.checkoutRecoveryId,
-      outreachAttemptId: input.outreachAttemptId, generation: context.basket.generation,
-      fingerprint: context.basket.fingerprint, discoveryIncomplete: false,
-    } satisfies Extract<InitialOutreachAgentResult, { kind: "ALTERNATIVE_PRODUCT_PROMOTION" }>;
+      product: {
+        sourceTool: "commerce_get_product" as const,
+        authenticatedShopId: input.shopId,
+        shopId: input.shopId,
+        product: freshProduct,
+      },
+      shopId: input.shopId,
+      checkoutRecoveryId: input.checkoutRecoveryId,
+      outreachAttemptId: input.outreachAttemptId,
+      generation: context.basket.generation,
+      fingerprint: context.basket.fingerprint,
+      discoveryIncomplete: false,
+    } satisfies Extract<
+      InitialOutreachAgentResult,
+      { kind: "ALTERNATIVE_PRODUCT_PROMOTION" }
+    >;
     return { kind: "VALIDATED", result: validated, context, admissionToken };
   }
 
@@ -408,34 +676,59 @@ export class CurrentOutreachOfferRevalidationService {
     signal: AbortSignal,
   ): Promise<boolean> {
     const context = await this.dependencies.contextBuilder.build({
-      shopId: token.shopId, checkoutRecoveryId: token.checkoutRecoveryId,
-      outreachAttemptId: token.outreachAttemptId, signal,
+      shopId: token.shopId,
+      checkoutRecoveryId: token.checkoutRecoveryId,
+      outreachAttemptId: token.outreachAttemptId,
+      signal,
     });
-    if (context.shopId !== token.shopId || context.checkoutRecoveryId !== token.checkoutRecoveryId ||
-        context.outreachAttemptId !== token.outreachAttemptId || context.basket.generation !== token.generation ||
-        context.basket.fingerprint !== token.fingerprint || context.mode !== token.mode ||
-        JSON.stringify(context.authorisedDiscountIds) !== JSON.stringify(token.authorisedDiscountIds) ||
-        !sameReconciledPrices(context.priceReconciliation, token.priceReconciliation)) {
+    if (
+      context.shopId !== token.shopId ||
+      context.checkoutRecoveryId !== token.checkoutRecoveryId ||
+      context.outreachAttemptId !== token.outreachAttemptId ||
+      context.basket.generation !== token.generation ||
+      context.basket.fingerprint !== token.fingerprint ||
+      context.mode !== token.mode ||
+      JSON.stringify(context.authorisedDiscountIds) !==
+        JSON.stringify(token.authorisedDiscountIds) ||
+      !sameReconciledPrices(
+        context.priceReconciliation,
+        token.priceReconciliation,
+      )
+    ) {
       this.log.warn("recovery_offer.current_source.admission_changed", {
-        shopId: token.shopId, recoveryId: token.checkoutRecoveryId,
-        attemptId: token.outreachAttemptId, stage: "F3", reasonCode: "CONTEXT_CHANGED",
+        shopId: token.shopId,
+        recoveryId: token.checkoutRecoveryId,
+        attemptId: token.outreachAttemptId,
+        stage: "F3",
+        reasonCode: "CONTEXT_CHANGED",
         digestPrefix: token.sourceFence?.snapshotDigest.slice(0, 12) ?? null,
       });
       return false;
     }
     if (!token.sourceFence) return true;
     const current = await this.readFence({
-      shopId: token.shopId, checkoutRecoveryId: token.checkoutRecoveryId,
-      selectedOfferIds: token.sourceFence.selectedOfferIds, mode: context.mode, signal,
+      shopId: token.shopId,
+      checkoutRecoveryId: token.checkoutRecoveryId,
+      selectedOfferIds: token.sourceFence.selectedOfferIds,
+      mode: context.mode,
+      signal,
     });
-    const matches = current.kind === "AVAILABLE" && fenceMatches(token.sourceFence, current.fence);
+    const matches =
+      current.kind === "AVAILABLE" &&
+      fenceMatches(token.sourceFence, current.fence);
     if (!matches) {
       this.log.warn("recovery_offer.current_source.admission_changed", {
-        shopId: token.shopId, recoveryId: token.checkoutRecoveryId,
-        attemptId: token.outreachAttemptId, stage: "F3",
-        reasonCode: current.kind === "AVAILABLE" ? "SOURCE_CHANGED" : current.reasonCode,
+        shopId: token.shopId,
+        recoveryId: token.checkoutRecoveryId,
+        attemptId: token.outreachAttemptId,
+        stage: "F3",
+        reasonCode:
+          current.kind === "AVAILABLE" ? "SOURCE_CHANGED" : current.reasonCode,
         digestPrefix: token.sourceFence.snapshotDigest.slice(0, 12),
-        currentDigestPrefix: current.kind === "AVAILABLE" ? current.fence.snapshotDigest.slice(0, 12) : null,
+        currentDigestPrefix:
+          current.kind === "AVAILABLE"
+            ? current.fence.snapshotDigest.slice(0, 12)
+            : null,
       });
     }
     return matches;

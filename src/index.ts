@@ -55,8 +55,11 @@ async function startDevelopmentWorker(): Promise<void> {
     import("./workers/whatsapp.worker.js"),
     import("./workers/shopify-discount-sync.worker.js"),
   ]);
-  const { createWooRecoveryRuntime } = await import("./services/woocommerce-recovery/woo-recovery-composition.js");
-  const eventWooRecovery = createWooRecoveryRuntime("moda-shopify-event-worker");
+  const { createWooRecoveryRuntime } =
+    await import("./services/woocommerce-recovery/woo-recovery-composition.js");
+  const eventWooRecovery = createWooRecoveryRuntime(
+    "moda-shopify-event-worker",
+  );
   const recoveryWooRecovery = createWooRecoveryRuntime("moda-recovery-worker");
   const closeHumanDispatcher = await startHumanCommandDispatcher();
   const workers = [

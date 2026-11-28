@@ -17,7 +17,9 @@ export type WooCheckoutRef = Readonly<{
   checkoutToken: string;
 }>;
 
-type WooCheckoutItem = NonNullable<WooCheckoutCapture["checkout"]["items"]>[number];
+type WooCheckoutItem = NonNullable<
+  WooCheckoutCapture["checkout"]["items"]
+>[number];
 
 /**
  * `nonempty` requires a validated, bounded checkout snapshot with >=1 item.
@@ -40,7 +42,7 @@ export type WooBasketEvidence =
 /** Internal candidate only: never derive a restore URL or Woo session token. */
 export type WooPendingCandidate = Readonly<
   WooCheckoutRef & {
-  source: "woocommerce";
+    source: "woocommerce";
     /** Required identity component for the Woo candidate v2 job format. */
     generation: number;
     /** Last *accepted* Woo checkout event ID (not a fabricated revision). */
@@ -61,8 +63,14 @@ export type WooTerminalObservation =
 
 /** BG001: candidate storage/index adapter; absence is not proof of checkout safety. */
 export interface WooCandidateManager {
-  getPending(ref: WooCheckoutRef, expectedGeneration?: number): Promise<WooPendingCandidate | null>;
-  cancelPending(ref: WooCheckoutRef, expectedGeneration?: number): Promise<"cancelled" | "absent">;
+  getPending(
+    ref: WooCheckoutRef,
+    expectedGeneration?: number,
+  ): Promise<WooPendingCandidate | null>;
+  cancelPending(
+    ref: WooCheckoutRef,
+    expectedGeneration?: number,
+  ): Promise<"cancelled" | "absent">;
 }
 
 /** BG002: observed order evidence, never an HTTP/live Woo provider lookup. */
@@ -80,10 +88,24 @@ export interface WooCheckoutCoordinator {
 }
 
 export type WooCheckoutActivityOutcome =
-  | Readonly<{ kind: "scheduled" | "rescheduled"; dueAt: string; generation: number }>
-  | Readonly<{ kind: "resumed"; previousRecoveryId: string; nextGeneration: number;
-      candidateOutcome: "scheduled" | "rescheduled" | "cancelled-empty" | "deferred-ambiguous"; dueAt?: string }>
-  | Readonly<{ kind: "repair-existing-initial"; recoveryId: string; generation: number }>
+  | Readonly<{
+      kind: "scheduled" | "rescheduled";
+      dueAt: string;
+      generation: number;
+    }>
+  | Readonly<{
+      kind: "resumed";
+      previousRecoveryId: string;
+      nextGeneration: number;
+      candidateOutcome:
+        "scheduled" | "rescheduled" | "cancelled-empty" | "deferred-ambiguous";
+      dueAt?: string;
+    }>
+  | Readonly<{
+      kind: "repair-existing-initial";
+      recoveryId: string;
+      generation: number;
+    }>
   | Readonly<{ kind: "existing-recovery"; recoveryId: string }>
   | Readonly<{
       kind:
@@ -97,7 +119,9 @@ export type WooCheckoutActivityOutcome =
 
 /** BG001: scheduling and candidate lifecycle, not recovery admission. */
 export interface WooCheckoutActivityHandler {
-  handleCheckout(event: WooCheckoutCapture): Promise<WooCheckoutActivityOutcome>;
+  handleCheckout(
+    event: WooCheckoutCapture,
+  ): Promise<WooCheckoutActivityOutcome>;
 }
 
 export type WooOrderReconciliationOutcome =
@@ -106,18 +130,30 @@ export type WooOrderReconciliationOutcome =
       recoveryId?: string;
     }>
   | Readonly<{
-      kind: "already-terminal" | "ignored-duplicate" | "ignored-stale" | "deferred-conflict";
+      kind:
+        | "already-terminal"
+        | "ignored-duplicate"
+        | "ignored-stale"
+        | "deferred-conflict";
       reason: string;
     }>;
 
 /** BG002: order events can suppress outreach without implying payment. */
 export interface WooOrderReconciler {
-  reconcileOrder(event: WooOrderCapture): Promise<WooOrderReconciliationOutcome>;
+  reconcileOrder(
+    event: WooOrderCapture,
+  ): Promise<WooOrderReconciliationOutcome>;
 }
 
 export type WooAdmissionOutcome =
   | Readonly<{ kind: "created"; recoveryId: string; generation: number }>
-  | Readonly<{ kind: "already-exists"; recoveryId: string; status: string; generation: number; repairInitial: boolean }>
+  | Readonly<{
+      kind: "already-exists";
+      recoveryId: string;
+      status: string;
+      generation: number;
+      repairInitial: boolean;
+    }>
   | Readonly<{ kind: "superseded" | "denied" | "deferred"; reason: string }>;
 
 /** BG003: idempotent mature-candidate evaluation and row-only admission. */
@@ -131,12 +167,18 @@ export interface WooRecoveryAdmissionEvaluator {
 /** Enqueue is not evidence of dispatch or billing. */
 export type WooOutreachEnqueueOutcome =
   | Readonly<{ kind: "queued" | "already-initialized"; attemptId?: string }>
-  | Readonly<{ kind: "deferred" | "suppressed" | "failed-retryable"; reason: string }>;
+  | Readonly<{
+      kind: "deferred" | "suppressed" | "failed-retryable";
+      reason: string;
+    }>;
 
 /** A successful dispatch has a durable attempt ID; deferrals do not imply send. */
 export type WooOutreachDispatchOutcome =
   | Readonly<{ kind: "sent" | "already-initialized"; attemptId: string }>
-  | Readonly<{ kind: "deferred" | "suppressed" | "failed-retryable"; reason: string }>;
+  | Readonly<{
+      kind: "deferred" | "suppressed" | "failed-retryable";
+      reason: string;
+    }>;
 
 /**
  * BG004: accepts only an existing, committed CheckoutRecovery ID. Implementors

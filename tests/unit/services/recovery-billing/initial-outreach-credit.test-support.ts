@@ -1,4 +1,7 @@
-import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type LogRecord,
+} from "@modainteract/moda-interact-shared/logging";
 
 export const input = {
   shopId: "shop-1",

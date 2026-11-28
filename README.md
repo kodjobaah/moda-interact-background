@@ -313,12 +313,12 @@ The `UsageService.record` method accepts the following input:
 
 ```typescript
 interface RecordUsageInput {
-      shopId: string;
-      metric: UsageMetric;
-      quantity: number;
-      idempotencyKey: string;
-      sourceType?: string;
-      sourceId?: string;
+  shopId: string;
+  metric: UsageMetric;
+  quantity: number;
+  idempotencyKey: string;
+  sourceType?: string;
+  sourceId?: string;
 }
 ```
 
@@ -326,12 +326,12 @@ For example:
 
 ```typescript
 await usageService.record({
-      shopId,
-      metric: "monthly_recoveries",
-      quantity: 1,
-      idempotencyKey: `checkout-recovery:${recovery.id}`,
-      sourceType: "CheckoutRecovery",
-      sourceId: recovery.id,
+  shopId,
+  metric: "monthly_recoveries",
+  quantity: 1,
+  idempotencyKey: `checkout-recovery:${recovery.id}`,
+  sourceType: "CheckoutRecovery",
+  sourceId: recovery.id,
 });
 ```
 
@@ -355,21 +355,21 @@ Production uses three independently deployable processes. The commands are the
 same in test and production; deployment configuration supplies each
 environment's credentials and state connections.
 
-| Logical service | Command | Owned queues/workers |
-| --- | --- | --- |
-| `moda-shopify-event-worker` | `npm run start:shopify-event-worker` | `checkout-events` and `order-events` |
-| `moda-recovery-worker` | `npm run start:recovery-worker` | `pending-recovery-candidates` |
-| `moda-messaging-worker` | `npm run start:messaging-worker` | `whatsapp-events`, including the current CommerceAgent workflow |
+| Logical service             | Command                              | Owned queues/workers                                            |
+| --------------------------- | ------------------------------------ | --------------------------------------------------------------- |
+| `moda-shopify-event-worker` | `npm run start:shopify-event-worker` | `checkout-events` and `order-events`                            |
+| `moda-recovery-worker`      | `npm run start:recovery-worker`      | `pending-recovery-candidates`                                   |
+| `moda-messaging-worker`     | `npm run start:messaging-worker`     | `whatsapp-events`, including the current CommerceAgent workflow |
 
 Before importing its BullMQ consumers, each production entrypoint performs the
 same bounded, non-mutating dependency preflight available through these
 diagnostic commands:
 
-| Logical service | Readiness command | Required dependencies |
-| --- | --- | --- |
-| `moda-shopify-event-worker` | `npm run readiness:shopify-event-worker` | Redis and PostgreSQL |
-| `moda-recovery-worker` | `npm run readiness:recovery-worker` | Redis and PostgreSQL |
-| `moda-messaging-worker` | `npm run readiness:messaging-worker` | Redis and PostgreSQL |
+| Logical service             | Readiness command                        | Required dependencies |
+| --------------------------- | ---------------------------------------- | --------------------- |
+| `moda-shopify-event-worker` | `npm run readiness:shopify-event-worker` | Redis and PostgreSQL  |
+| `moda-recovery-worker`      | `npm run readiness:recovery-worker`      | Redis and PostgreSQL  |
+| `moda-messaging-worker`     | `npm run readiness:messaging-worker`     | Redis and PostgreSQL  |
 
 The Redis probe issues `PING`; the PostgreSQL probe issues `SELECT 1`. Both use
 environment-provided connection configuration and a five-second operation

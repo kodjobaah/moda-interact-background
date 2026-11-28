@@ -4,7 +4,10 @@ import {
   parseCredentialKeyring,
   type CredentialEnvelope,
 } from "@modainteract/moda-interact-shared/security/credentials/node";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import { parseShopifyCustomerIdentity } from "@modainteract/moda-interact-shared/identity";
 import type { ShopifyConsentReceiptAttribute } from "../domain/abandoned-checkout.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
@@ -73,13 +76,21 @@ export function verifyShopifyConsentReceipt(input: {
     operation: "verify_checkout_consent_receipt",
     stage: "receipt_verification",
   };
-  if (input.attribute.kind === "MISSING") return { status: "NO_EXPLICIT_CHOICE" };
-  if (input.attribute.kind === "INVALID" || !SHOP_ID_PATTERN.test(input.shopId)) {
+  if (input.attribute.kind === "MISSING")
+    return { status: "NO_EXPLICIT_CHOICE" };
+  if (
+    input.attribute.kind === "INVALID" ||
+    !SHOP_ID_PATTERN.test(input.shopId)
+  ) {
     logger.warn("shopify.consent.receipt.decrypt_rejected", {
       ...logContext,
       outcome: "invalid",
-      reasonCode: input.attribute.kind === "INVALID" ? "ATTRIBUTE_INVALID" : "SHOP_ID_INVALID",
-      message: "Consent attribute or authenticated shop identity failed validation.",
+      reasonCode:
+        input.attribute.kind === "INVALID"
+          ? "ATTRIBUTE_INVALID"
+          : "SHOP_ID_INVALID",
+      message:
+        "Consent attribute or authenticated shop identity failed validation.",
     });
     return { status: "INVALID_OR_AMBIGUOUS_RECEIPT" };
   }
@@ -88,21 +99,24 @@ export function verifyShopifyConsentReceipt(input: {
       ...logContext,
       outcome: "invalid",
       reasonCode: "SHOP_PLAN_UNAVAILABLE",
-      message: "Shop plan could not be verified for consent receipt validation.",
+      message:
+        "Shop plan could not be verified for consent receipt validation.",
     });
     return { status: "INVALID_OR_AMBIGUOUS_RECEIPT" };
   }
 
   const kind = input.shopifyPlus ? "x" : "c";
-  const bindingToken = kind === "c"
-    ? input.cartToken?.split("?", 1)[0]?.trim()
-    : input.checkoutToken.trim();
+  const bindingToken =
+    kind === "c"
+      ? input.cartToken?.split("?", 1)[0]?.trim()
+      : input.checkoutToken.trim();
   if (!bindingToken) {
     logger.info("shopify.consent.receipt.identity_deferred", {
       ...logContext,
       outcome: "deferred",
       reasonCode: "TRUSTED_CHECKOUT_BINDING_MISSING",
-      message: "Consent receipt was not evaluated because the authenticated checkout binding is missing.",
+      message:
+        "Consent receipt was not evaluated because the authenticated checkout binding is missing.",
     });
     return { status: "DEFER_CHECKOUT_BINDING" };
   }
@@ -114,27 +128,34 @@ export function verifyShopifyConsentReceipt(input: {
   }
 
   const serialized = input.attribute.value;
-  if (Buffer.byteLength(serialized, "utf8") > RECEIPT_ATTRIBUTE_MAX_BYTES ||
-      !/^[\x21-\x7e]+$/.test(serialized)) {
+  if (
+    Buffer.byteLength(serialized, "utf8") > RECEIPT_ATTRIBUTE_MAX_BYTES ||
+    !/^[\x21-\x7e]+$/.test(serialized)
+  ) {
     logger.warn("shopify.consent.receipt.decrypt_rejected", {
       ...logContext,
       outcome: "invalid",
       reasonCode: "ENVELOPE_FORMAT_INVALID",
-      message: "Consent receipt envelope is overlong or contains non-ASCII characters.",
+      message:
+        "Consent receipt envelope is overlong or contains non-ASCII characters.",
     });
     return { status: "INVALID_OR_AMBIGUOUS_RECEIPT" };
   }
   const fields = serialized.split(".");
-  if (fields.length !== 5 || fields[0] !== "v1" ||
-      !KEY_ID_PATTERN.test(fields[1] ?? "") ||
-      !isCanonicalBase64Url(fields[2] ?? "") ||
-      !isCanonicalBase64Url(fields[3] ?? "") ||
-      !isCanonicalBase64Url(fields[4] ?? "")) {
+  if (
+    fields.length !== 5 ||
+    fields[0] !== "v1" ||
+    !KEY_ID_PATTERN.test(fields[1] ?? "") ||
+    !isCanonicalBase64Url(fields[2] ?? "") ||
+    !isCanonicalBase64Url(fields[3] ?? "") ||
+    !isCanonicalBase64Url(fields[4] ?? "")
+  ) {
     logger.warn("shopify.consent.receipt.decrypt_rejected", {
       ...logContext,
       outcome: "invalid",
       reasonCode: "ENVELOPE_FORMAT_INVALID",
-      message: "Consent receipt envelope does not match the canonical v1 format.",
+      message:
+        "Consent receipt envelope does not match the canonical v1 format.",
     });
     return { status: "INVALID_OR_AMBIGUOUS_RECEIPT" };
   }
@@ -146,7 +167,8 @@ export function verifyShopifyConsentReceipt(input: {
       ...logContext,
       outcome: "invalid",
       reasonCode: "ENVELOPE_LENGTH_INVALID",
-      message: "Consent receipt nonce, ciphertext, or authentication tag length is invalid.",
+      message:
+        "Consent receipt nonce, ciphertext, or authentication tag length is invalid.",
     });
     return { status: "INVALID_OR_AMBIGUOUS_RECEIPT" };
   }
@@ -159,7 +181,11 @@ export function verifyShopifyConsentReceipt(input: {
       reasonCode: "KEYRING_MISSING",
       error,
     });
-    return { status: "KEYRING_CONFIGURATION_FAILURE", reason: "KEYRING_MISSING", cause: error };
+    return {
+      status: "KEYRING_CONFIGURATION_FAILURE",
+      reason: "KEYRING_MISSING",
+      cause: error,
+    };
   }
 
   let keyring: ReturnType<typeof parseCredentialKeyring>;
@@ -172,7 +198,11 @@ export function verifyShopifyConsentReceipt(input: {
       reasonCode: "KEYRING_INVALID",
       error,
     });
-    return { status: "KEYRING_CONFIGURATION_FAILURE", reason: "KEYRING_INVALID", cause: error };
+    return {
+      status: "KEYRING_CONFIGURATION_FAILURE",
+      reason: "KEYRING_INVALID",
+      cause: error,
+    };
   }
 
   let plaintext: string;
@@ -213,27 +243,49 @@ export function verifyShopifyConsentReceipt(input: {
     });
     return { status: "INVALID_OR_AMBIGUOUS_RECEIPT" };
   }
-  if (!Array.isArray(claims) || claims.length !== 9 ||
-      JSON.stringify(claims) !== plaintext) {
+  if (
+    !Array.isArray(claims) ||
+    claims.length !== 9 ||
+    JSON.stringify(claims) !== plaintext
+  ) {
     logger.warn("shopify.consent.receipt.claim_invalid", {
       ...logContext,
       outcome: "invalid",
       reasonCode: "CLAIM_SHAPE_INVALID",
-      message: "Authenticated receipt claims are not the exact nine-member v1 JSON array.",
+      message:
+        "Authenticated receipt claims are not the exact nine-member v1 JSON array.",
     });
     return { status: "INVALID_OR_AMBIGUOUS_RECEIPT" };
   }
   const value = claims as ReceiptClaims;
-  const [version, shopId, claimKind, claimDigest, decision, disclosure, locale, acceptedAt, customerId] = value;
-  if (version !== 1 || shopId !== input.shopId || claimKind !== kind ||
-      claimDigest !== bindingDigest || (decision !== "G" && decision !== "R") ||
-      disclosure !== "1" || typeof locale !== "string" ||
-      !LOCALE_PATTERN.test(locale) || !isCanonicalLocale(locale) ||
-      typeof acceptedAt !== "number" || !Number.isSafeInteger(acceptedAt) ||
-      acceptedAt <= 0 ||
-      acceptedAt > Math.floor((input.now ?? new Date()).getTime() / 1000) + 300 ||
-      typeof customerId !== "string" ||
-      (customerId !== "-" && !CUSTOMER_ID_PATTERN.test(customerId))) {
+  const [
+    version,
+    shopId,
+    claimKind,
+    claimDigest,
+    decision,
+    disclosure,
+    locale,
+    acceptedAt,
+    customerId,
+  ] = value;
+  if (
+    version !== 1 ||
+    shopId !== input.shopId ||
+    claimKind !== kind ||
+    claimDigest !== bindingDigest ||
+    (decision !== "G" && decision !== "R") ||
+    disclosure !== "1" ||
+    typeof locale !== "string" ||
+    !LOCALE_PATTERN.test(locale) ||
+    !isCanonicalLocale(locale) ||
+    typeof acceptedAt !== "number" ||
+    !Number.isSafeInteger(acceptedAt) ||
+    acceptedAt <= 0 ||
+    acceptedAt > Math.floor((input.now ?? new Date()).getTime() / 1000) + 300 ||
+    typeof customerId !== "string" ||
+    (customerId !== "-" && !CUSTOMER_ID_PATTERN.test(customerId))
+  ) {
     logger.warn("shopify.consent.receipt.claim_invalid", {
       ...logContext,
       outcome: "invalid",
@@ -251,18 +303,22 @@ export function verifyShopifyConsentReceipt(input: {
         ...logContext,
         outcome: "deferred",
         reasonCode: "VERIFIED_CUSTOMER_MISSING",
-        message: "Signed customer identity cannot be matched because Shopify returned no verified customer.",
+        message:
+          "Signed customer identity cannot be matched because Shopify returned no verified customer.",
       });
       return { status: "DEFER_IDENTITY_OR_RECIPIENT" };
     }
     try {
-      const verifiedIdentity = parseShopifyCustomerIdentity(input.verifiedShopifyCustomerId);
+      const verifiedIdentity = parseShopifyCustomerIdentity(
+        input.verifiedShopifyCustomerId,
+      );
       if (verifiedIdentity.numericId !== customerId) {
         logger.info("shopify.consent.receipt.identity_deferred", {
           ...logContext,
           outcome: "deferred",
           reasonCode: "SIGNED_CUSTOMER_MISMATCH",
-          message: "Signed receipt customer does not match the verified Shopify customer.",
+          message:
+            "Signed receipt customer does not match the verified Shopify customer.",
         });
         return { status: "DEFER_IDENTITY_OR_RECIPIENT" };
       }
@@ -295,9 +351,11 @@ export function verifyShopifyConsentReceipt(input: {
 }
 
 function isCanonicalBase64Url(value: string): boolean {
-  return value.length > 0 &&
+  return (
+    value.length > 0 &&
     /^[A-Za-z0-9_-]+$/.test(value) &&
-    Buffer.from(value, "base64url").toString("base64url") === value;
+    Buffer.from(value, "base64url").toString("base64url") === value
+  );
 }
 
 function isCanonicalLocale(value: string): boolean {

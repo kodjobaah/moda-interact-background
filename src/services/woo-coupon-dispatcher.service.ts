@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
-import { defaultWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
+import {
+  defaultWooCouponSyncConfig,
+  type WooCouponSyncConfig,
+} from "./woo-coupon-sync-config.js";
 
 import prisma from "../lib/db.js";
 
@@ -20,7 +26,10 @@ const logger = createLogger({
   environment: resolveDeploymentEnvironmentName(),
 });
 
-type DispatchDatabase = Pick<PrismaClient, "shop" | "shopifyDiscountCatalogue" | "$queryRaw">;
+type DispatchDatabase = Pick<
+  PrismaClient,
+  "shop" | "shopifyDiscountCatalogue" | "$queryRaw"
+>;
 type DispatchQueue = Pick<Queue, "addBulk">;
 type ReservedShop = { shopId: string; requestedAt: Date };
 
@@ -37,9 +46,13 @@ type DueBacklog = { backlog: number; oldestDueSeconds: number | null };
  * older job is still waiting; retries of the same reservation keep the ID.
  * Only internal shop identity and the canonical reservation timestamp are hashed.
  */
-export function createWooCouponJobId(shopId: string, requestedAt: string): string {
+export function createWooCouponJobId(
+  shopId: string,
+  requestedAt: string,
+): string {
   return `woo-coupon-${createHash("sha256")
-    .update(JSON.stringify([shopId, requestedAt]), "utf8").digest("hex")}`;
+    .update(JSON.stringify([shopId, requestedAt]), "utf8")
+    .digest("hex")}`;
 }
 
 /**
@@ -53,14 +66,26 @@ export class WooCouponDispatcherService {
     private readonly database: DispatchDatabase = prisma,
     private readonly queue?: DispatchQueue,
     private readonly settings: WooCouponSyncConfig = defaultWooCouponSyncConfig(),
-    private readonly reporting: Pick<StructuredLogger, "info" | "warn"> = logger,
+    private readonly reporting: Pick<
+      StructuredLogger,
+      "info" | "warn"
+    > = logger,
   ) {}
 
-  async dispatch(batchSize = this.settings.dispatchBatchSize): Promise<WooCouponDispatchResult> {
-    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > this.settings.dispatchBatchSize) {
-      throw new RangeError(`Woo coupon dispatch batchSize must be between 1 and ${this.settings.dispatchBatchSize}`);
+  async dispatch(
+    batchSize = this.settings.dispatchBatchSize,
+  ): Promise<WooCouponDispatchResult> {
+    if (
+      !Number.isInteger(batchSize) ||
+      batchSize < 1 ||
+      batchSize > this.settings.dispatchBatchSize
+    ) {
+      throw new RangeError(
+        `Woo coupon dispatch batchSize must be between 1 and ${this.settings.dispatchBatchSize}`,
+      );
     }
-    if (!this.queue) throw new Error("Woo coupon sync queue has not been configured");
+    if (!this.queue)
+      throw new Error("Woo coupon sync queue has not been configured");
 
     // Installation discovery does NOT require an ACTIVE read grant. The future
     // worker checks the grant each time it processes the shop.
@@ -75,12 +100,16 @@ export class WooCouponDispatcherService {
       orderBy: { id: "asc" },
       take: batchSize,
     });
-    const created = missing.length > 0
-      ? await this.database.shopifyDiscountCatalogue.createMany({
-          data: missing.map((shop) => ({ shopId: shop.id, status: "SYNC_REQUIRED" as const })),
-          skipDuplicates: true,
-        })
-      : { count: 0 };
+    const created =
+      missing.length > 0
+        ? await this.database.shopifyDiscountCatalogue.createMany({
+            data: missing.map((shop) => ({
+              shopId: shop.id,
+              status: "SYNC_REQUIRED" as const,
+            })),
+            skipDuplicates: true,
+          })
+        : { count: 0 };
 
     // Claim a bounded, fair batch atomically. A competing dispatcher, a retry,
     // or a superseded global lease holder cannot reserve the same rows at once.
@@ -120,28 +149,44 @@ export class WooCouponDispatcherService {
     let jobsPublished = 0;
     try {
       if (reserved.length > 0) {
-        await this.queue.addBulk(reserved.map(({ shopId, requestedAt }) => ({
-        name: WOO_COUPON_SYNC_JOB_NAME,
-        data: { shopId, requestedAt: requestedAt.toISOString() },
-        opts: {
-          jobId: createWooCouponJobId(shopId, requestedAt.toISOString()),
-          attempts: 3,
-          backoff: { type: "exponential" as const, delay: 30_000 },
-          removeOnComplete: true,
-          removeOnFail: true,
-        },
-      })));
+        await this.queue.addBulk(
+          reserved.map(({ shopId, requestedAt }) => ({
+            name: WOO_COUPON_SYNC_JOB_NAME,
+            data: { shopId, requestedAt: requestedAt.toISOString() },
+            opts: {
+              jobId: createWooCouponJobId(shopId, requestedAt.toISOString()),
+              attempts: 3,
+              backoff: { type: "exponential" as const, delay: 30_000 },
+              removeOnComplete: true,
+              removeOnFail: true,
+            },
+          })),
+        );
         jobsPublished = reserved.length;
       }
     } finally {
       // Operational reporting must never become a database/queue correctness dependency.
-      await this.reportCycle(created.count, missing.length, reserved.length, jobsPublished);
+      await this.reportCycle(
+        created.count,
+        missing.length,
+        reserved.length,
+        jobsPublished,
+      );
     }
 
-    return { cataloguesCreated: created.count, shopsReserved: reserved.length, jobsPublished };
+    return {
+      cataloguesCreated: created.count,
+      shopsReserved: reserved.length,
+      jobsPublished,
+    };
   }
 
-  private async reportCycle(created: number, discovered: number, reserved: number, published: number): Promise<void> {
+  private async reportCycle(
+    created: number,
+    discovered: number,
+    reserved: number,
+    published: number,
+  ): Promise<void> {
     let backlog: number | null = null;
     let oldestDueSeconds: number | null = null;
     try {
@@ -165,19 +210,32 @@ export class WooCouponDispatcherService {
       const value = rows[0];
       if (value && Number.isSafeInteger(value.backlog) && value.backlog >= 0) {
         backlog = value.backlog;
-        oldestDueSeconds = value.oldestDueSeconds === null ? null :
-          Number.isFinite(value.oldestDueSeconds) ? Math.max(0, Math.round(value.oldestDueSeconds)) : null;
+        oldestDueSeconds =
+          value.oldestDueSeconds === null
+            ? null
+            : Number.isFinite(value.oldestDueSeconds)
+              ? Math.max(0, Math.round(value.oldestDueSeconds))
+              : null;
       }
-    } catch { /* Telemetry queries must not interrupt dispatch. */ }
+    } catch {
+      /* Telemetry queries must not interrupt dispatch. */
+    }
     // The reservation count and the backlog query come from different database
     // snapshots. Their sum is an estimate, never a count of rows actually scanned.
     // If backlog reporting fails, do not invent an estimate from reserved alone.
     const dueEstimate = backlog === null ? null : reserved + backlog;
     try {
       this.reporting.info("woo.coupon_sync.dispatch_cycle", {
-        cataloguesCreated: created, discovered, reserved, published,
-        dueEstimate, backlog, oldestDueSeconds,
+        cataloguesCreated: created,
+        discovered,
+        reserved,
+        published,
+        dueEstimate,
+        backlog,
+        oldestDueSeconds,
       });
-    } catch { /* Logging failures are isolated from the business workflow. */ }
+    } catch {
+      /* Logging failures are isolated from the business workflow. */
+    }
   }
 }

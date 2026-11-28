@@ -6,25 +6,36 @@ import {
   postContractPolicy,
 } from "./recovery-capacity-admission.test-support.js";
 
-function harness(input: {
-  freeReserve?: unknown;
-  freeReservePostContract?: unknown;
-  purchasedReserve?: unknown;
-} = {}) {
+function harness(
+  input: {
+    freeReserve?: unknown;
+    freeReservePostContract?: unknown;
+    purchasedReserve?: unknown;
+  } = {},
+) {
   const free = {
-    reserve: vi.fn(async () =>
-      input.freeReserve ?? { kind: "allowance-exhausted" as const, remaining: 0 },
+    reserve: vi.fn(
+      async () =>
+        input.freeReserve ?? {
+          kind: "allowance-exhausted" as const,
+          remaining: 0,
+        },
     ),
-    reservePostContract: vi.fn(async () =>
-      input.freeReservePostContract ?? {
-        kind: "allowance-exhausted" as const,
-        remaining: 0,
-      },
+    reservePostContract: vi.fn(
+      async () =>
+        input.freeReservePostContract ?? {
+          kind: "allowance-exhausted" as const,
+          remaining: 0,
+        },
     ),
   };
   const purchased = {
-    reserve: vi.fn(async () =>
-      input.purchasedReserve ?? { kind: "credits-exhausted" as const, available: 0 },
+    reserve: vi.fn(
+      async () =>
+        input.purchasedReserve ?? {
+          kind: "credits-exhausted" as const,
+          available: 0,
+        },
     ),
   };
   return {
@@ -196,19 +207,25 @@ describe("RecoveryDurableCreditAdmissionService", () => {
         counter: "PURCHASED_RECOVERY_CREDITS" as const,
       },
     },
-  ])("blocks ambiguous replay ownership from $entry entry", async ({ entry, outcome }) => {
-    const h = harness(
-      entry === "purchased" ? { purchasedReserve: outcome } : { freeReserve: outcome },
-    );
-    const result = entry === "purchased"
-      ? h.service.admitPurchased({ ...base, policy: freePolicy() })
-      : h.service.admitLifetimeFree({ ...base, policy: freePolicy() });
+  ])(
+    "blocks ambiguous replay ownership from $entry entry",
+    async ({ entry, outcome }) => {
+      const h = harness(
+        entry === "purchased"
+          ? { purchasedReserve: outcome }
+          : { freeReserve: outcome },
+      );
+      const result =
+        entry === "purchased"
+          ? h.service.admitPurchased({ ...base, policy: freePolicy() })
+          : h.service.admitLifetimeFree({ ...base, policy: freePolicy() });
 
-    await expect(result).resolves.toEqual({
-      kind: "blocked",
-      reason: "reservation-in-flight",
-    });
-  });
+      await expect(result).resolves.toEqual({
+        kind: "blocked",
+        reason: "reservation-in-flight",
+      });
+    },
+  );
 
   it("propagates a paused lifetime reservation as paused", async () => {
     const h = harness({ freeReserve: { kind: "paused" as const } });

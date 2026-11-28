@@ -59,9 +59,7 @@ function activatedHarness(events: string[]) {
     shopEntitlementCounter: {},
     usageEvent: {},
     $transaction: vi.fn(
-      async (
-        callback: (tx: typeof transaction) => Promise<unknown>,
-      ) => {
+      async (callback: (tx: typeof transaction) => Promise<unknown>) => {
         events.push("transaction-start");
         const result = await callback(transaction);
         events.push("transaction-complete");
@@ -98,9 +96,7 @@ function zeroActivationHarness(events: string[]) {
     shopEntitlementCounter: {},
     usageEvent: {},
     $transaction: vi.fn(
-      async (
-        callback: (tx: typeof transaction) => Promise<unknown>,
-      ) => {
+      async (callback: (tx: typeof transaction) => Promise<unknown>) => {
         events.push("transaction-start");
         const result = await callback(transaction);
         events.push("transaction-complete");
@@ -154,8 +150,12 @@ describe("RecoveryCreditPurchaseService capacity-resume hint", () => {
       shopId: "shop-1",
       trigger: "purchase-activation-period-1",
     });
-    expect(test.transaction.recoveryCreditPurchase.updateMany).toHaveBeenCalledTimes(1);
-    expect(test.transaction.shopEntitlementCounter.upsert).toHaveBeenCalledTimes(1);
+    expect(
+      test.transaction.recoveryCreditPurchase.updateMany,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      test.transaction.shopEntitlementCounter.upsert,
+    ).toHaveBeenCalledTimes(1);
   });
 
   it("does not schedule a resume hint when reconciliation activates no purchase", async () => {
@@ -181,8 +181,12 @@ describe("RecoveryCreditPurchaseService capacity-resume hint", () => {
       "method-return",
     ]);
     expect(hoisted.schedule).not.toHaveBeenCalled();
-    expect(test.transaction.recoveryCreditPurchase.updateMany).not.toHaveBeenCalled();
-    expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expect(
+      test.transaction.recoveryCreditPurchase.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      test.transaction.shopEntitlementCounter.upsert,
+    ).not.toHaveBeenCalled();
   });
 
   it("returns the committed activation result when resume scheduling fails after commit", async () => {
@@ -197,7 +201,9 @@ describe("RecoveryCreditPurchaseService capacity-resume hint", () => {
       throw error;
     });
 
-    await expect(test.service.reconcileProviderConfirmed(input)).resolves.toMatchObject({
+    await expect(
+      test.service.reconcileProviderConfirmed(input),
+    ).resolves.toMatchObject({
       activatedCount: 1,
       confirmedDelta: 1,
     });
@@ -210,8 +216,12 @@ describe("RecoveryCreditPurchaseService capacity-resume hint", () => {
       "method-return",
     ]);
     expect(test.database.$transaction).toHaveBeenCalledTimes(1);
-    expect(test.transaction.recoveryCreditPurchase.updateMany).toHaveBeenCalledTimes(1);
-    expect(test.transaction.shopEntitlementCounter.upsert).toHaveBeenCalledTimes(1);
+    expect(
+      test.transaction.recoveryCreditPurchase.updateMany,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      test.transaction.shopEntitlementCounter.upsert,
+    ).toHaveBeenCalledTimes(1);
     expect(consoleError).toHaveBeenCalledWith(
       "Failed to schedule capacity resume after purchase activation for shop shop-1",
       error,

@@ -1,7 +1,9 @@
 import { expect, it } from "vitest";
 import type { ConversationTurnFacadeContext } from "../conversation-turn-processor.service.test.js";
 
-export function registerClaimAndStateCases(context: ConversationTurnFacadeContext) {
+export function registerClaimAndStateCases(
+  context: ConversationTurnFacadeContext,
+) {
   const { harness, state, PROCESSING_LEASE_MS } = context;
 
   it("keeps the processing lease system-managed", () => {
@@ -79,14 +81,19 @@ export function registerClaimAndStateCases(context: ConversationTurnFacadeContex
 
   it("suppresses a pre-takeover turn after HUMAN-to-AI resume changes the revision", async () => {
     const test = harness();
-    test.conversation.getTurnState.mockResolvedValue(state({
-      pendingAiControlRevision: 2,
-      controlRevision: 3,
-      controlMode: "AI",
-    }));
+    test.conversation.getTurnState.mockResolvedValue(
+      state({
+        pendingAiControlRevision: 2,
+        controlRevision: 3,
+        controlMode: "AI",
+      }),
+    );
     test.conversation.claimTurn.mockResolvedValue(false);
 
-    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+    await test.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
 
     expect(test.conversation.claimTurn).toHaveBeenCalledWith(
       "conversation-1",
@@ -133,17 +140,24 @@ export function registerClaimAndStateCases(context: ConversationTurnFacadeContex
     test.conversation.claimTurn.mockResolvedValue(false);
     test.conversation.getTurnState
       .mockResolvedValueOnce(state())
-      .mockResolvedValueOnce(state({
-        inboundVersion: 4,
-        lastInboundAt: new Date(state().lastInboundAt.getTime() + 1_000),
-      }));
+      .mockResolvedValueOnce(
+        state({
+          inboundVersion: 4,
+          lastInboundAt: new Date(state().lastInboundAt.getTime() + 1_000),
+        }),
+      );
 
-    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+    await test.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
 
     expect(test.queue.add).toHaveBeenCalledWith(
       "process-conversation-turn",
       { conversationId: "conversation-1", observedVersion: 4 },
-      expect.objectContaining({ jobId: "conversation-turn__conversation-1__4" }),
+      expect.objectContaining({
+        jobId: "conversation-turn__conversation-1__4",
+      }),
     );
     expect(test.runAgent).not.toHaveBeenCalled();
   });

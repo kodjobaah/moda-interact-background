@@ -16,8 +16,10 @@ export function canApplyProviderStatus(
   currentStatus: MessageStatus,
   eventStatus: NormalizedWhatsAppStatus["status"],
 ): boolean {
-  return currentStatus === eventStatus ||
-    ALLOWED_TRANSITIONS[currentStatus].includes(eventStatus);
+  return (
+    currentStatus === eventStatus ||
+    ALLOWED_TRANSITIONS[currentStatus].includes(eventStatus)
+  );
 }
 
 export function statusForProviderEvent(
@@ -25,6 +27,6 @@ export function statusForProviderEvent(
   eventStatus: NormalizedWhatsAppStatus["status"],
 ): MessageStatus {
   return canApplyProviderStatus(currentStatus, eventStatus)
-    ? eventStatus as MessageStatus
+    ? (eventStatus as MessageStatus)
     : currentStatus;
 }

@@ -7,17 +7,26 @@ import { connectionRedis } from "../lib/redis.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import {
-  InvalidWooOrderCaptureJob, parseWooOrderCaptureJob,
-  WOO_ORDER_CAPTURE_JOB, WOO_ORDER_CAPTURE_QUEUE,
+  InvalidWooOrderCaptureJob,
+  parseWooOrderCaptureJob,
+  WOO_ORDER_CAPTURE_JOB,
+  WOO_ORDER_CAPTURE_QUEUE,
 } from "../events/woo-order-capture.js";
 import type { WooRecoveryOrchestratorService } from "../services/woocommerce-recovery/woo-recovery-orchestrator.service.js";
 
 const logger = createLogger({
-  serviceName: "moda-shopify-event-worker", environment: resolveDeploymentEnvironmentName(),
+  serviceName: "moda-shopify-event-worker",
+  environment: resolveDeploymentEnvironmentName(),
 });
-const telemetry = createBullMQTelemetry({ serviceName: "moda-shopify-event-worker", enableMetrics: false });
-const metric = { workerName: "woo-order-capture", queueName: WOO_ORDER_CAPTURE_QUEUE,
-  jobNames: [WOO_ORDER_CAPTURE_JOB] } as const;
+const telemetry = createBullMQTelemetry({
+  serviceName: "moda-shopify-event-worker",
+  enableMetrics: false,
+});
+const metric = {
+  workerName: "woo-order-capture",
+  queueName: WOO_ORDER_CAPTURE_QUEUE,
+  jobNames: [WOO_ORDER_CAPTURE_JOB],
+} as const;
 
 export function createWooOrderCaptureWorker(
   orchestrator: Pick<WooRecoveryOrchestratorService, "onOrder">,
@@ -26,53 +35,88 @@ export function createWooOrderCaptureWorker(
   // without the BG001/BG002 orchestrator that owns its durable business effect.
   if (!orchestrator || typeof orchestrator.onOrder !== "function") {
     logger.error("woocommerce.recovery.worker.configuration_failed", {
-      queue: WOO_ORDER_CAPTURE_QUEUE, stage: "bootstrap", reason: "orchestrator-unavailable",
+      queue: WOO_ORDER_CAPTURE_QUEUE,
+      stage: "bootstrap",
+      reason: "orchestrator-unavailable",
     });
     throw new Error("WOO_RECOVERY_ORCHESTRATOR_UNAVAILABLE");
   }
-  const worker = new Worker<unknown>(WOO_ORDER_CAPTURE_QUEUE,
-    async (job) => observeWorkerJob(metric, job, async () => {
-      const fields = {
-        jobId: typeof job.id === "string" && /^woo-order-[0-9a-f]{64}$/.test(job.id) ? job.id : null,
-        attempt: job.attemptsMade + 1, queue: WOO_ORDER_CAPTURE_QUEUE,
-        source: "woocommerce", stage: "order-capture",
-      };
-      let stage = "validate";
-      let shopId: string | undefined;
-      let eventId: string | undefined;
-      try {
-        const accepted = parseWooOrderCaptureJob(job);
-        shopId = accepted.shopId;
-        eventId = createHash("sha256").update(accepted.eventId).digest("hex");
-        logger.info("woocommerce.recovery.job.started", { ...fields, shopId, eventId });
-        stage = "orchestrate";
-        const outcome = await orchestrator.onOrder(accepted);
-        const context = { ...fields, shopId, eventId, outcome: outcome.kind,
-          ...( "reason" in outcome ? { reason: outcome.reason.slice(0, 64) } : {}),
+  const worker = new Worker<unknown>(
+    WOO_ORDER_CAPTURE_QUEUE,
+    async (job) =>
+      observeWorkerJob(metric, job, async () => {
+        const fields = {
+          jobId:
+            typeof job.id === "string" &&
+            /^woo-order-[0-9a-f]{64}$/.test(job.id)
+              ? job.id
+              : null,
+          attempt: job.attemptsMade + 1,
+          queue: WOO_ORDER_CAPTURE_QUEUE,
+          source: "woocommerce",
+          stage: "order-capture",
         };
-        if (outcome.kind === "deferred-conflict") {
-          logger.warn("woocommerce.recovery.job.deferred", context);
-        } else {
-          logger.info("woocommerce.recovery.job.completed", context);
+        let stage = "validate";
+        let shopId: string | undefined;
+        let eventId: string | undefined;
+        try {
+          const accepted = parseWooOrderCaptureJob(job);
+          shopId = accepted.shopId;
+          eventId = createHash("sha256").update(accepted.eventId).digest("hex");
+          logger.info("woocommerce.recovery.job.started", {
+            ...fields,
+            shopId,
+            eventId,
+          });
+          stage = "orchestrate";
+          const outcome = await orchestrator.onOrder(accepted);
+          const context = {
+            ...fields,
+            shopId,
+            eventId,
+            outcome: outcome.kind,
+            ...("reason" in outcome
+              ? { reason: outcome.reason.slice(0, 64) }
+              : {}),
+          };
+          if (outcome.kind === "deferred-conflict") {
+            logger.warn("woocommerce.recovery.job.deferred", context);
+          } else {
+            logger.info("woocommerce.recovery.job.completed", context);
+          }
+        } catch (error) {
+          logger.error("woocommerce.recovery.job.failed", {
+            ...fields,
+            ...(shopId ? { shopId } : {}),
+            ...(eventId ? { eventId } : {}),
+            stage,
+            reason:
+              error instanceof InvalidWooOrderCaptureJob
+                ? error.reason
+                : "processing_failure",
+            errorName:
+              error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+            error: error,
+          });
+          throw error;
         }
-      } catch (error) {
-        logger.error("woocommerce.recovery.job.failed", {
-          ...fields, ...(shopId ? { shopId } : {}), ...(eventId ? { eventId } : {}), stage,
-          reason: error instanceof InvalidWooOrderCaptureJob ? error.reason : "processing_failure",
-          errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
-          errorMessage: error instanceof Error ? error.message : String(error),
-          error: error,
-        });
-        throw error;
-      }
-    }), { connection: connectionRedis, telemetry, concurrency: 4 });
-  worker.on("ready", () => logger.info("woocommerce.order_capture.worker_ready", {
-    queueName: WOO_ORDER_CAPTURE_QUEUE,
-  }));
-  worker.on("error", (error) => logger.error("woocommerce.order_capture.worker_error", {
-    queueName: WOO_ORDER_CAPTURE_QUEUE, errorName: error.name.slice(0, 64),
-    errorMessage: error instanceof Error ? error.message : String(error),
-    error: error,
-}));
+      }),
+    { connection: connectionRedis, telemetry, concurrency: 4 },
+  );
+  worker.on("ready", () =>
+    logger.info("woocommerce.order_capture.worker_ready", {
+      queueName: WOO_ORDER_CAPTURE_QUEUE,
+    }),
+  );
+  worker.on("error", (error) =>
+    logger.error("woocommerce.order_capture.worker_error", {
+      queueName: WOO_ORDER_CAPTURE_QUEUE,
+      errorName: error.name.slice(0, 64),
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error: error,
+    }),
+  );
   return worker;
 }

@@ -76,9 +76,15 @@ export function classifyMerchantKnowledgeProcessingError(
           error.retryable,
         );
       case "UNSUPPORTED_MEDIA_TYPE":
-        return new MerchantKnowledgeProcessingError("UNSUPPORTED_MEDIA_TYPE", false);
+        return new MerchantKnowledgeProcessingError(
+          "UNSUPPORTED_MEDIA_TYPE",
+          false,
+        );
       case "HTTP_STATUS_PERMANENT":
-        return new MerchantKnowledgeProcessingError("HTTP_STATUS_PERMANENT", false);
+        return new MerchantKnowledgeProcessingError(
+          "HTTP_STATUS_PERMANENT",
+          false,
+        );
       case "INVALID_URL":
       case "DENIED_DESTINATION":
       case "TOO_MANY_REDIRECTS":
@@ -98,9 +104,15 @@ export function classifyMerchantKnowledgeProcessingError(
       case "INVALID_R2_BODY":
         return new MerchantKnowledgeProcessingError("R2_TEMPORARY", true);
       case "ASSET_INTEGRITY_MISMATCH":
-        return new MerchantKnowledgeProcessingError("UPLOAD_HASH_MISMATCH", false);
+        return new MerchantKnowledgeProcessingError(
+          "UPLOAD_HASH_MISMATCH",
+          false,
+        );
       case "UNSAFE_XLSX":
-        return new MerchantKnowledgeProcessingError("XLSX_ACTIVE_CONTENT", false);
+        return new MerchantKnowledgeProcessingError(
+          "XLSX_ACTIVE_CONTENT",
+          false,
+        );
       case "INVALID_FILENAME":
       case "INVALID_UTF8":
       case "INVALID_CSV":
@@ -110,7 +122,10 @@ export function classifyMerchantKnowledgeProcessingError(
       case "INVALID_ASSET_METADATA":
       case "UPLOAD_TOO_LARGE":
       case "ASSET_EXTRACTION_FAILED":
-        return new MerchantKnowledgeProcessingError("UPLOAD_FORMAT_INVALID", false);
+        return new MerchantKnowledgeProcessingError(
+          "UPLOAD_FORMAT_INVALID",
+          false,
+        );
     }
   }
 

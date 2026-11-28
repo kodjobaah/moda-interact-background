@@ -3,15 +3,23 @@ import type { CommerceModelInvoker } from "@modainteract/moda-interact-shared/co
 import { runCommerceAgent } from "../../../src/agents/commerce.agent.js";
 import type { RecoveryAgentContext } from "../../../src/agents/types.js";
 
-const host = vi.hoisted(() => vi.fn(async () => ({
-  replyText: "Hello",
-  detectedLanguageTag: null,
-  detectedLanguageConfidence: null,
-})));
+const host = vi.hoisted(() =>
+  vi.fn(async () => ({
+    replyText: "Hello",
+    detectedLanguageTag: null,
+    detectedLanguageConfidence: null,
+  })),
+);
 const productionResolution = vi.hoisted(() => ({
-  readKeyring: vi.fn(() => { throw new Error("keyring should not be read"); }),
-  resolveCredential: vi.fn(() => { throw new Error("credential should not be read"); }),
-  createModel: vi.fn(() => { throw new Error("production model should not be resolved"); }),
+  readKeyring: vi.fn(() => {
+    throw new Error("keyring should not be read");
+  }),
+  resolveCredential: vi.fn(() => {
+    throw new Error("credential should not be read");
+  }),
+  createModel: vi.fn(() => {
+    throw new Error("production model should not be resolved");
+  }),
 }));
 
 vi.mock("../../../src/commerce/host.js", () => ({ executeCommerceHost: host }));
@@ -64,7 +72,10 @@ describe("CommerceAgent model injection", () => {
       replyText: "Hello",
     });
 
-    expect(host).toHaveBeenCalledWith(context, expect.objectContaining({ model }));
+    expect(host).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({ model }),
+    );
     expect(productionResolution.readKeyring).not.toHaveBeenCalled();
     expect(productionResolution.resolveCredential).not.toHaveBeenCalled();
     expect(productionResolution.createModel).not.toHaveBeenCalled();

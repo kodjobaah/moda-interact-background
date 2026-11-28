@@ -31,35 +31,46 @@ void startReadyWorkerProcess({
   serviceName: "moda-merchant-knowledge-worker",
   loadWorkerProcess: async () => {
     const uploadedAssetAcquirer = {
-      async acquire(input: Parameters<MerchantKnowledgeUploadedAssetAcquirerService["acquire"]>[0]) {
+      async acquire(
+        input: Parameters<
+          MerchantKnowledgeUploadedAssetAcquirerService["acquire"]
+        >[0],
+      ) {
         const config = await readR2Configuration();
         return new MerchantKnowledgeUploadedAssetAcquirerService({
-          database: prisma, r2: createMerchantKnowledgeR2Client(config),
-          bucket: config.bucket, maxUploadBytes: config.maxUploadBytes,
+          database: prisma,
+          r2: createMerchantKnowledgeR2Client(config),
+          bucket: config.bucket,
+          maxUploadBytes: config.maxUploadBytes,
           maxXlsxUncompressedBytes: config.maxXlsxUncompressedBytes,
         }).acquire(input);
       },
     };
-    const newProcessingService = async () => new MerchantKnowledgeProcessingService({
-      webPageAcquirer: new MerchantKnowledgeWebPageAcquirer(),
-      uploadedAssetAcquirer,
-      embeddingResolver: createMerchantKnowledgeEmbeddingResolver({
-        db: prisma, environment: resolveCommerceEnvironment(),
-        keyring: await readCommerceCredentialKeyring(),
-      }),
-    });
+    const newProcessingService = async () =>
+      new MerchantKnowledgeProcessingService({
+        webPageAcquirer: new MerchantKnowledgeWebPageAcquirer(),
+        uploadedAssetAcquirer,
+        embeddingResolver: createMerchantKnowledgeEmbeddingResolver({
+          db: prisma,
+          environment: resolveCommerceEnvironment(),
+          keyring: await readCommerceCredentialKeyring(),
+        }),
+      });
     // Cleanup config is obtained per scheduler tick, never from worker startup.
     const cleanup = async () => {
       const config = await readR2Configuration();
       return new MerchantKnowledgeUploadCleanupService({
-        database: prisma, r2: createMerchantKnowledgeR2Client(config), bucket: config.bucket,
+        database: prisma,
+        r2: createMerchantKnowledgeR2Client(config),
+        bucket: config.bucket,
       }).cleanupOnce();
     };
 
     await backgroundRuntimeConfigService.start();
     const worker = createMerchantKnowledgeWorker({
       processJob: async (job) => (await newProcessingService()).processJob(job),
-      markTerminalFailure: async (input) => (await newProcessingService()).markTerminalFailure(input),
+      markTerminalFailure: async (input) =>
+        (await newProcessingService()).markTerminalFailure(input),
     });
     const stopPendingReconciliation = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -72,10 +83,11 @@ void startReadyWorkerProcess({
           pageSize: 100,
         });
       },
-      onError: (error) => logger.error("merchant_knowledge.pending_reconciliation.failed", {
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error,
-      }),
+      onError: (error) =>
+        logger.error("merchant_knowledge.pending_reconciliation.failed", {
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
+        }),
     });
     const stopEntitlementReconciliation = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -88,10 +100,11 @@ void startReadyWorkerProcess({
           shopPageSize: 100,
         });
       },
-      onError: (error) => logger.error("merchant_knowledge.entitlement_reconciliation.failed", {
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error,
-      }),
+      onError: (error) =>
+        logger.error("merchant_knowledge.entitlement_reconciliation.failed", {
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
+        }),
     });
     const stopUploadCleanup = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -102,10 +115,11 @@ void startReadyWorkerProcess({
       run: async () => {
         await cleanup();
       },
-      onError: (error) => logger.error("merchant_knowledge.upload_cleanup.failed", {
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error,
-      }),
+      onError: (error) =>
+        logger.error("merchant_knowledge.upload_cleanup.failed", {
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
+        }),
     });
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,

@@ -7,9 +7,22 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { runWithPostgresStartupRetry } from "./integration-startup-retry.mjs";
 import { localPrismaCliPath } from "./integration-prisma-path.mjs";
 
-const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const prismaSchemaPath = path.join(repositoryRoot, "database", "prisma", "schema.prisma");
-const vitestBinary = path.join(repositoryRoot, "node_modules", "vitest", "vitest.mjs");
+const repositoryRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
+const prismaSchemaPath = path.join(
+  repositoryRoot,
+  "database",
+  "prisma",
+  "schema.prisma",
+);
+const vitestBinary = path.join(
+  repositoryRoot,
+  "node_modules",
+  "vitest",
+  "vitest.mjs",
+);
 const defaultTests = [
   "tests/integration/background-runtime-lease-cadence.concurrency.integration.test.ts",
   "tests/integration/translation-batch-assembly.concurrency.integration.test.ts",
@@ -21,23 +34,19 @@ const selectedTests = process.argv.slice(2);
 
 function runVitest(environment, tests) {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [vitestBinary, "run", ...tests],
-      {
-        cwd: repositoryRoot,
-        // The database and Redis are disposable; policy selection must be equally
-        // deterministic. Never inherit a developer/deployment environment into
-        // these integration tests (TEST is the fixture policy namespace).
-        env: {
-          ...process.env,
-          ...environment,
-          DEPLOYMENT_ENVIRONMENT_NAME: "test",
-          MODA_DISPOSABLE_INTEGRATION: "1",
-        },
-        stdio: "inherit",
+    const child = spawn(process.execPath, [vitestBinary, "run", ...tests], {
+      cwd: repositoryRoot,
+      // The database and Redis are disposable; policy selection must be equally
+      // deterministic. Never inherit a developer/deployment environment into
+      // these integration tests (TEST is the fixture policy namespace).
+      env: {
+        ...process.env,
+        ...environment,
+        DEPLOYMENT_ENVIRONMENT_NAME: "test",
+        MODA_DISPOSABLE_INTEGRATION: "1",
       },
-    );
+      stdio: "inherit",
+    });
 
     const forwardSignal = (signal) => {
       if (!child.killed) child.kill(signal);
@@ -77,16 +86,19 @@ try {
 }
 
 const result = await runWithPostgresStartupRetry(
-  () => withDisposableIntegrationInfrastructure(
-    {
-      prismaSchemaPath,
-      cwd: repositoryRoot,
-      postgres: { image: "pgvector/pgvector:pg17" },
-    },
-    async ({ environment }) => runVitest(
-      environment, selectedTests.length > 0 ? selectedTests : defaultTests,
+  () =>
+    withDisposableIntegrationInfrastructure(
+      {
+        prismaSchemaPath,
+        cwd: repositoryRoot,
+        postgres: { image: "pgvector/pgvector:pg17" },
+      },
+      async ({ environment }) =>
+        runVitest(
+          environment,
+          selectedTests.length > 0 ? selectedTests : defaultTests,
+        ),
     ),
-  ),
   integrationLogger,
 );
 

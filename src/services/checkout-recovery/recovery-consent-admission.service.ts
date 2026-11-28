@@ -12,7 +12,8 @@ import type {
 } from "./recovery-consent-merchant-notice.contracts.js";
 import { recoveryConsentMerchantNoticeService } from "./recovery-consent-merchant-notice.service.js";
 
-export const SHOPIFY_RECOVERY_CONSENT_RETRY_REQUIRED = "SHOPIFY_RECOVERY_CONSENT_RETRY_REQUIRED";
+export const SHOPIFY_RECOVERY_CONSENT_RETRY_REQUIRED =
+  "SHOPIFY_RECOVERY_CONSENT_RETRY_REQUIRED";
 
 type ShopifyNoticeContext = {
   shopId: string;
@@ -38,13 +39,17 @@ export interface RecoveryConsentAdmissionPort {
 /** Shopify decides eligibility. Shared notifier only reports an already-denied admission. */
 export class RecoveryConsentAdmissionService implements RecoveryConsentAdmissionPort {
   constructor(
-    private readonly consent: Pick<ShopifyWhatsAppConsentServicePort, "evaluateRecipient" | "evaluateStoredRecipient"> =
-      new ShopifyWhatsAppConsentService(),
+    private readonly consent: Pick<
+      ShopifyWhatsAppConsentServicePort,
+      "evaluateRecipient" | "evaluateStoredRecipient"
+    > = new ShopifyWhatsAppConsentService(),
     private readonly notices: RecoveryConsentMerchantNotifier = recoveryConsentMerchantNoticeService,
   ) {}
 
   async evaluateFirst(input: FirstInput): Promise<boolean> {
-    const recipient = input.recipient ? canonicalWhatsAppSender(input.recipient) : null;
+    const recipient = input.recipient
+      ? canonicalWhatsAppSender(input.recipient)
+      : null;
     if (!input.customerId || !recipient) {
       await this.notice(input, "RECIPIENT_UNVERIFIED", "CREATE_FIRST_RECOVERY");
       return false;
@@ -58,14 +63,17 @@ export class RecoveryConsentAdmissionService implements RecoveryConsentAdmission
   }
 
   async evaluateReentry(input: ReentryInput): Promise<boolean> {
-    const recipient = input.recipient ? canonicalWhatsAppSender(input.recipient) : null;
+    const recipient = input.recipient
+      ? canonicalWhatsAppSender(input.recipient)
+      : null;
     if (!input.customerId || !recipient) {
       await this.notice(input, "RECIPIENT_UNVERIFIED", "SEND_INITIAL_RECOVERY");
       return false;
     }
     const outcome = await this.consent.evaluateStoredRecipient({
       // Recovery stores Meta international digits; Shopify consent expects E.164.
-      shopId: input.shopId, customerId: input.customerId,
+      shopId: input.shopId,
+      customerId: input.customerId,
       recipient: `+${recipient}`,
     });
     return this.decide(input, outcome, "SEND_INITIAL_RECOVERY");
@@ -81,16 +89,21 @@ export class RecoveryConsentAdmissionService implements RecoveryConsentAdmission
     blockedOperation: RecoveryConsentBlockedOperation,
   ): Promise<boolean> {
     if (outcome.status === "ALLOWED") return true;
-    if (outcome.status === "NOT_AUTHORISED" && outcome.reason === "LOCAL_NO_CONTACT") {
+    if (
+      outcome.status === "NOT_AUTHORISED" &&
+      outcome.reason === "LOCAL_NO_CONTACT"
+    ) {
       // STOP already has an independent merchant notice. Never reclassify it.
       return false;
     }
     let reason: RecoveryConsentNoticeReason;
     if (outcome.status === "UNAVAILABLE") reason = "VERIFICATION_UNAVAILABLE";
     else if (outcome.status === "AMBIGUOUS") reason = "RECIPIENT_AMBIGUOUS";
-    else if (outcome.status === "NOT_AUTHORISED" &&
-        (outcome.reason === "NATIVE_CONSENT_NOT_GRANTED" ||
-          outcome.reason === "CONSENT_NOT_GRANTED_OR_EVIDENCED")) {
+    else if (
+      outcome.status === "NOT_AUTHORISED" &&
+      (outcome.reason === "NATIVE_CONSENT_NOT_GRANTED" ||
+        outcome.reason === "CONSENT_NOT_GRANTED_OR_EVIDENCED")
+    ) {
       reason = "NO_VERIFIED_OPT_IN";
     } else reason = "RECIPIENT_UNVERIFIED";
     await this.notice(input, reason, blockedOperation);
@@ -107,11 +120,15 @@ export class RecoveryConsentAdmissionService implements RecoveryConsentAdmission
     blockedOperation: RecoveryConsentBlockedOperation,
   ): Promise<void> {
     await this.notices.notify({
-      shopId: input.shopId, checkoutToken: input.checkoutToken, platform: "SHOPIFY",
-      reason, blockedOperation,
+      shopId: input.shopId,
+      checkoutToken: input.checkoutToken,
+      platform: "SHOPIFY",
+      reason,
+      blockedOperation,
       ...(input.noticeContext ? { context: input.noticeContext } : {}),
     });
   }
 }
 
-export const recoveryConsentAdmissionService = new RecoveryConsentAdmissionService();
+export const recoveryConsentAdmissionService =
+  new RecoveryConsentAdmissionService();
