@@ -1,4 +1,7 @@
-import type { CommerceConversationProductContext, CommerceFinalResponse } from "@modainteract/moda-interact-shared/commerce";
+import type {
+  CommerceConversationProductContext,
+  CommerceFinalResponse,
+} from "@modainteract/moda-interact-shared/commerce";
 import type {
   CheckoutRecoveryStatus,
   ConversationType,

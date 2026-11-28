@@ -26,7 +26,6 @@ import { observeConversationTurn } from "@modainteract/moda-interact-shared/obse
 import { runCommerceAgent } from "../../../src/agents/commerce.agent.js";
 import type { RecoveryAgentContext } from "../../../src/agents/types.js";
 
-
 const hostOperation = vi.hoisted(() => vi.fn());
 vi.mock("../../../src/commerce/host.js", () => ({
   executeCommerceHost: async () => observeCommerceTool(hostOperation),
@@ -98,13 +97,15 @@ async function runObservedTurn() {
   try {
     return await otelContext.with(
       trace.setSpan(otelContext.active(), workerSpan),
-      () => observeConversationTurn(
-        "whatsapp",
-        () => runCommerceAgent(agentContext, {
-          model: { invoke: vi.fn() } satisfies CommerceModelInvoker,
-        }),
-        turnObservation,
-      ),
+      () =>
+        observeConversationTurn(
+          "whatsapp",
+          () =>
+            runCommerceAgent(agentContext, {
+              model: { invoke: vi.fn() } satisfies CommerceModelInvoker,
+            }),
+          turnObservation,
+        ),
     );
   } finally {
     workerSpan.end();
@@ -127,7 +128,11 @@ function serializeTelemetry(
 
 describe.sequential("CommerceAgent GenAI observability", () => {
   it("nests one successful turn, agent and tool under the active Worker span", async () => {
-    hostOperation.mockResolvedValue({replyText:"No matching products found.",detectedLanguageTag:null,detectedLanguageConfidence:null});
+    hostOperation.mockResolvedValue({
+      replyText: "No matching products found.",
+      detectedLanguageTag: null,
+      detectedLanguageConfidence: null,
+    });
 
     await expect(runObservedTurn()).resolves.toEqual({
       replyText: "No matching products found.",
@@ -136,10 +141,18 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     });
 
     const spans = exporter.getFinishedSpans();
-    const worker = spans.find((span) => span.name === "process whatsapp-events");
-    const turn = spans.find((span) => span.name === "conversation.turn whatsapp");
-    const agent = spans.find((span) => span.name === "invoke_agent commerce-agent");
-    const tool = spans.find((span) => span.name === "execute_tool commerce-mcp");
+    const worker = spans.find(
+      (span) => span.name === "process whatsapp-events",
+    );
+    const turn = spans.find(
+      (span) => span.name === "conversation.turn whatsapp",
+    );
+    const agent = spans.find(
+      (span) => span.name === "invoke_agent commerce-agent",
+    );
+    const tool = spans.find(
+      (span) => span.name === "execute_tool commerce-mcp",
+    );
 
     expect(worker).toBeDefined();
     expect(turn?.parentSpanContext?.spanId).toBe(worker?.spanContext().spanId);
@@ -190,20 +203,28 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     );
 
     expect(observed).toHaveLength(3);
-    expect(observed.every((span) => span.status.code === SpanStatusCode.ERROR)).toBe(true);
     expect(
-      observed.map((span) =>
-        span.events.find((event) => event.name === "exception")
-          ?.attributes?.["exception.message"],
+      observed.every((span) => span.status.code === SpanStatusCode.ERROR),
+    ).toBe(true);
+    expect(
+      observed.map(
+        (span) =>
+          span.events.find((event) => event.name === "exception")?.attributes?.[
+            "exception.message"
+          ],
       ),
-    ).toEqual(expect.arrayContaining([
-      "Inbound conversation turn failed",
-      "Commerce agent invocation failed",
-      "Commerce MCP tool failed",
-    ]));
+    ).toEqual(
+      expect.arrayContaining([
+        "Inbound conversation turn failed",
+        "Commerce agent invocation failed",
+        "Commerce MCP tool failed",
+      ]),
+    );
 
     const telemetry = serializeTelemetry(observed);
-    expect(telemetry).not.toMatch(/bearer-secret|private customer message|Shopify response contained/i);
+    expect(telemetry).not.toMatch(
+      /bearer-secret|private customer message|Shopify response contained/i,
+    );
   });
 
   it("activates shared metrics and configures safe exception mapping at every boundary", () => {
@@ -219,7 +240,9 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     for (const source of sources) {
       expect(source).not.toContain("recordMetrics: false");
       expect(source).toContain("mapException:");
-      expect(source).not.toMatch(/createHistogram|createCounter|getMeter|moda\.agent\..*duration/);
+      expect(source).not.toMatch(
+        /createHistogram|createCounter|getMeter|moda\.agent\..*duration/,
+      );
     }
   });
 });

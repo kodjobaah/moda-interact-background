@@ -5,12 +5,15 @@ const lifecycle = vi.hoisted(() => ({
   close: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock("../../../../src/services/recovery-conversation/human-command-dispatcher.service.js", () => ({
-  HumanCommandDispatcherService: class {
-    start = lifecycle.start;
-    close = lifecycle.close;
-  },
-}));
+vi.mock(
+  "../../../../src/services/recovery-conversation/human-command-dispatcher.service.js",
+  () => ({
+    HumanCommandDispatcherService: class {
+      start = lifecycle.start;
+      close = lifecycle.close;
+    },
+  }),
+);
 
 import { startHumanCommandDispatcher } from "../../../../src/services/recovery-conversation/start-human-command-dispatcher.js";
 

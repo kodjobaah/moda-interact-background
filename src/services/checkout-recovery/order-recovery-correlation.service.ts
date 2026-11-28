@@ -14,7 +14,10 @@ export interface RecoveryOrderCompletionInput {
 
 type PendingRecoveryCandidatePort = Pick<
   typeof pendingRecoveryCandidateService,
-  "resolveCandidate" | "withCheckoutLock" | "cancelCandidate" | "markOrderProcessed"
+  | "resolveCandidate"
+  | "withCheckoutLock"
+  | "cancelCandidate"
+  | "markOrderProcessed"
 >;
 
 export class OrderRecoveryCorrelationService {
@@ -42,11 +45,12 @@ export class OrderRecoveryCorrelationService {
 
     let checkoutTokenForScope = event.checkoutToken;
     if (!checkoutTokenForScope) {
-      const cartOnly = await this.pendingRecoveryCandidateService.resolveCandidate({
-        shopId: shop.id,
-        checkoutToken: null,
-        cartToken: event.cartToken,
-      });
+      const cartOnly =
+        await this.pendingRecoveryCandidateService.resolveCandidate({
+          shopId: shop.id,
+          checkoutToken: null,
+          cartToken: event.cartToken,
+        });
 
       if (!cartOnly) {
         return { kind: "discarded", reason: "no-checkout-token" } as const;
@@ -59,11 +63,12 @@ export class OrderRecoveryCorrelationService {
       shop.id,
       checkoutTokenForScope,
       async () => {
-        const matched = await this.pendingRecoveryCandidateService.resolveCandidate({
-          shopId: shop.id,
-          checkoutToken: checkoutTokenForScope,
-          cartToken: event.cartToken,
-        });
+        const matched =
+          await this.pendingRecoveryCandidateService.resolveCandidate({
+            shopId: shop.id,
+            checkoutToken: checkoutTokenForScope,
+            cartToken: event.cartToken,
+          });
 
         if (matched) {
           await this.pendingRecoveryCandidateService.cancelCandidate(matched);

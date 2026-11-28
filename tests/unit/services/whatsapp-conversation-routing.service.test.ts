@@ -143,7 +143,6 @@ describe("WhatsAppConversationRoutingService", () => {
     ).resolves.toEqual({ kind: "guidance", reason: "CONTEXT_REQUIRED" });
   });
 
-
   it("uses recovery scope only for continuing recovery conversations", async () => {
     db.conversationMessage.findUnique.mockResolvedValue({
       direction: "INBOUND",

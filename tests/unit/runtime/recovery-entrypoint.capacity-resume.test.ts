@@ -15,9 +15,13 @@ describe("recovery entrypoint capacity-resume wiring", () => {
     expect(source).toContain("startDynamicLeasedScheduler");
     expect(source).toContain('leaseName: "RECOVERY_CAPACITY_REPAIR"');
     expect(source).toContain("recoveryRepairIntervalSeconds * 1000");
-    expect(source).toContain("recoveryCapacityResumeService.repair(runtimeConfig)");
+    expect(source).toContain(
+      "recoveryCapacityResumeService.repair(runtimeConfig)",
+    );
     expect(source).not.toContain("setInterval");
-    expect(source).not.toContain("void recoveryCapacityResumeService.repair();");
+    expect(source).not.toContain(
+      "void recoveryCapacityResumeService.repair();",
+    );
   });
 
   it("starts all recovery workers and observes all queues", () => {
@@ -41,8 +45,6 @@ describe("recovery entrypoint capacity-resume wiring", () => {
 
   it("stops the repair scheduler and closes the resume queue on shutdown", () => {
     expect(source).toContain("stopRepairScheduler");
-    expect(source).toContain(
-      "() => recoveryCapacityResumeService.close()",
-    );
+    expect(source).toContain("() => recoveryCapacityResumeService.close()");
   });
 });

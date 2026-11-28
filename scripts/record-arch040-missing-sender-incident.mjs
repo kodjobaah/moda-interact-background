@@ -15,22 +15,37 @@ const get = (flag) => {
 };
 const commandId = get("--command-id");
 const deployment = get("--environment");
-if (!commandId || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(commandId) ||
-    !["local", "development", "test"].includes(deployment) ||
-    process.env.DEPLOYMENT_ENVIRONMENT_NAME !== deployment ||
-    !process.argv.includes("--confirm-from-worker-logs")) {
-  throw new Error("Usage: DEPLOYMENT_ENVIRONMENT_NAME=test node scripts/record-arch040-missing-sender-incident.mjs --environment test --command-id <id> --confirm-from-worker-logs");
+if (
+  !commandId ||
+  !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(commandId) ||
+  !["local", "development", "test"].includes(deployment) ||
+  process.env.DEPLOYMENT_ENVIRONMENT_NAME !== deployment ||
+  !process.argv.includes("--confirm-from-worker-logs")
+) {
+  throw new Error(
+    "Usage: DEPLOYMENT_ENVIRONMENT_NAME=test node scripts/record-arch040-missing-sender-incident.mjs --environment test --command-id <id> --confirm-from-worker-logs",
+  );
 }
 const db = new PrismaClient();
 try {
-  const result = await db.$queryRawUnsafe(`
+  const result = await db.$queryRawUnsafe(
+    `
     SELECT "id", "shopId", "state"::text AS "state", "failureCode",
       "providerDispatchAdmittedAt", "outboundMessageId"
-    FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1`, commandId);
+    FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1`,
+    commandId,
+  );
   const row = result[0];
-  if (!row || row.state !== "UNKNOWN" || row.failureCode !== "provider_unknown" ||
-      !row.providerDispatchAdmittedAt || !row.outboundMessageId) {
-    throw new Error("Command is not the expected previously admitted UNKNOWN HUMAN send; no incident recorded");
+  if (
+    !row ||
+    row.state !== "UNKNOWN" ||
+    row.failureCode !== "provider_unknown" ||
+    !row.providerDispatchAdmittedAt ||
+    !row.outboundMessageId
+  ) {
+    throw new Error(
+      "Command is not the expected previously admitted UNKNOWN HUMAN send; no incident recorded",
+    );
   }
   // Reconstruction, not a claim to have retained the original exception object.
   // The exact static adapter error and key are established by the approved worker log.
@@ -40,14 +55,22 @@ try {
     error: new PlatformConfigurationFailure("MISSING", "messaging.sender"),
     outcome: "unknown",
   });
-  const recorded = await db.$queryRawUnsafe(`
+  const recorded = await db.$queryRawUnsafe(
+    `
     SELECT i."incidentKey", e."id" AS "eventId"
     FROM support."OperationalIncidentEvent" e
     JOIN support."OperationalIncident" i ON i."id"=e."incidentId"
     WHERE e."eventType"='OCCURRED' AND e."correlationId"=$1
-      AND i."category"='WHATSAPP_HUMAN_SEND'`, commandId);
-  if (recorded.length !== 1) throw new Error("Incident persistence not confirmed; inspect server incident-report failure log");
-  console.log(`Recorded operational incident for existing UNKNOWN command ${row.id}; incidentKey=${recorded[0].incidentKey}`);
+      AND i."category"='WHATSAPP_HUMAN_SEND'`,
+    commandId,
+  );
+  if (recorded.length !== 1)
+    throw new Error(
+      "Incident persistence not confirmed; inspect server incident-report failure log",
+    );
+  console.log(
+    `Recorded operational incident for existing UNKNOWN command ${row.id}; incidentKey=${recorded[0].incidentKey}`,
+  );
 } finally {
   await db.$disconnect();
 }

@@ -34,7 +34,9 @@ export type ShopExecutionDecision =
 export class ShopExecutionEligibilityService {
   constructor(private readonly client: ShopExecutionClient = prisma) {}
 
-  async resolveShopByDomain(domain: string): Promise<ShopExecutionRecord | null> {
+  async resolveShopByDomain(
+    domain: string,
+  ): Promise<ShopExecutionRecord | null> {
     const shop = this.client.shop;
     if (!shop) return null;
     return shop.findUnique({
@@ -57,7 +59,10 @@ export class ShopExecutionEligibilityService {
 
   async resolveShopById(
     shopId: string,
-  ): Promise<Pick<ShopExecutionRecord, "id" | "status" | "platform" | "onboardingCompleted" | "subscription"> | null> {
+  ): Promise<Pick<
+    ShopExecutionRecord,
+    "id" | "status" | "platform" | "onboardingCompleted" | "subscription"
+  > | null> {
     if (!this.client.shop) return null;
     return this.client.shop.findUnique({
       where: { id: shopId },

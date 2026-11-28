@@ -14,7 +14,14 @@ const prismaMock = vi.hoisted(() => ({
   $transaction: vi.fn(),
 }));
 
-vi.mock("../../../src/services/recovery-sender-pool/sender-pool.service.js", () => ({ recoverySenderPoolService: { releaseTerminalAssignments: vi.fn(async () => 0) } }));
+vi.mock(
+  "../../../src/services/recovery-sender-pool/sender-pool.service.js",
+  () => ({
+    recoverySenderPoolService: {
+      releaseTerminalAssignments: vi.fn(async () => 0),
+    },
+  }),
+);
 
 vi.mock("../../../src/lib/db.js", () => ({ default: prismaMock }));
 
@@ -30,11 +37,15 @@ describe("CheckoutRecoveryExpiryService", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    prismaMock.$transaction.mockImplementation(async (callback) => callback(prismaMock));
+    prismaMock.$transaction.mockImplementation(async (callback) =>
+      callback(prismaMock),
+    );
     prismaMock.checkoutRecovery.findMany.mockResolvedValue([]);
     prismaMock.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.checkoutRecoveryStatusHistory.create.mockResolvedValue({});
-    prismaMock.recoveryOutreachAttempt.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.recoveryOutreachAttempt.updateMany.mockResolvedValue({
+      count: 1,
+    });
   });
 
   it("uses the 21-day default cutoff and scans only active recoveries in bounded pages", async () => {
@@ -68,17 +79,28 @@ describe("CheckoutRecoveryExpiryService", () => {
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
 
-  it.each([0, 21, 180, 365])("uses the exact inclusive cutoff for %i days", async (lifetimeDays) => {
-    await expect(service.expireInactive(runtime(lifetimeDays), now)).resolves.toBe(0);
+  it.each([0, 21, 180, 365])(
+    "uses the exact inclusive cutoff for %i days",
+    async (lifetimeDays) => {
+      await expect(
+        service.expireInactive(runtime(lifetimeDays), now),
+      ).resolves.toBe(0);
 
-    const expectedCutoff = new Date(now.getTime() - lifetimeDays * 86_400_000);
-    expect(prismaMock.checkoutRecovery.findMany).toHaveBeenCalledOnce();
-    expect(prismaMock.checkoutRecovery.findMany.mock.calls[0][0].where.lastExternalActivityAt).toEqual({
-      lte: expectedCutoff,
-    });
-    expect(prismaMock.checkoutRecovery.findMany.mock.calls[0][0].where.lastExternalActivityAt.lte.getTime())
-      .toBe(expectedCutoff.getTime());
-  });
+      const expectedCutoff = new Date(
+        now.getTime() - lifetimeDays * 86_400_000,
+      );
+      expect(prismaMock.checkoutRecovery.findMany).toHaveBeenCalledOnce();
+      expect(
+        prismaMock.checkoutRecovery.findMany.mock.calls[0][0].where
+          .lastExternalActivityAt,
+      ).toEqual({
+        lte: expectedCutoff,
+      });
+      expect(
+        prismaMock.checkoutRecovery.findMany.mock.calls[0][0].where.lastExternalActivityAt.lte.getTime(),
+      ).toBe(expectedCutoff.getTime());
+    },
+  );
 
   it("expires activity exactly at the zero-day cutoff and keeps the conditional boundary inclusive", async () => {
     prismaMock.checkoutRecovery.findMany.mockResolvedValueOnce([
@@ -87,18 +109,30 @@ describe("CheckoutRecoveryExpiryService", () => {
 
     await expect(service.expireInactive(runtime(0), now)).resolves.toBe(1);
 
-    expect(prismaMock.checkoutRecovery.findMany.mock.calls[0][0].where.lastExternalActivityAt).toEqual({
+    expect(
+      prismaMock.checkoutRecovery.findMany.mock.calls[0][0].where
+        .lastExternalActivityAt,
+    ).toEqual({
       lte: now,
     });
-    expect(prismaMock.checkoutRecovery.updateMany.mock.calls[0][0].where.lastExternalActivityAt).toEqual({
+    expect(
+      prismaMock.checkoutRecovery.updateMany.mock.calls[0][0].where
+        .lastExternalActivityAt,
+    ).toEqual({
       lte: now,
     });
-    expect(prismaMock.checkoutRecoveryStatusHistory.create).toHaveBeenCalledOnce();
-    expect(prismaMock.recoveryOutreachAttempt.updateMany).toHaveBeenCalledOnce();
+    expect(
+      prismaMock.checkoutRecoveryStatusHistory.create,
+    ).toHaveBeenCalledOnce();
+    expect(
+      prismaMock.recoveryOutreachAttempt.updateMany,
+    ).toHaveBeenCalledOnce();
   });
 
   it("skips the Prisma scan when the maximum persisted lifetime is unrepresentable", async () => {
-    await expect(service.expireInactive(runtime(2_147_483_647), now)).resolves.toBe(0);
+    await expect(
+      service.expireInactive(runtime(2_147_483_647), now),
+    ).resolves.toBe(0);
 
     expect(prismaMock.checkoutRecovery.findMany).not.toHaveBeenCalled();
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
@@ -109,7 +143,9 @@ describe("CheckoutRecoveryExpiryService", () => {
     const cutoffMs = now.getTime() - lifetimeDays * 86_400_000;
     expect(Number.isFinite(new Date(cutoffMs).getTime())).toBe(true);
 
-    await expect(service.expireInactive(runtime(lifetimeDays), now)).resolves.toBe(0);
+    await expect(
+      service.expireInactive(runtime(lifetimeDays), now),
+    ).resolves.toBe(0);
 
     expect(prismaMock.checkoutRecovery.findMany).not.toHaveBeenCalled();
   });
@@ -118,10 +154,15 @@ describe("CheckoutRecoveryExpiryService", () => {
     const postgresMinimumMs = -210_866_803_200_000;
     const nowAtMinimumCutoff = new Date(postgresMinimumMs + 86_400_000);
 
-    await expect(service.expireInactive(runtime(1), nowAtMinimumCutoff)).resolves.toBe(0);
+    await expect(
+      service.expireInactive(runtime(1), nowAtMinimumCutoff),
+    ).resolves.toBe(0);
 
     expect(prismaMock.checkoutRecovery.findMany).toHaveBeenCalledOnce();
-    expect(prismaMock.checkoutRecovery.findMany.mock.calls[0][0].where.lastExternalActivityAt).toEqual({
+    expect(
+      prismaMock.checkoutRecovery.findMany.mock.calls[0][0].where
+        .lastExternalActivityAt,
+    ).toEqual({
       lte: new Date(postgresMinimumMs),
     });
   });
@@ -130,7 +171,9 @@ describe("CheckoutRecoveryExpiryService", () => {
     const postgresMinimumMs = -210_866_803_200_000;
     const nowBelowMinimumCutoff = new Date(postgresMinimumMs + 86_400_000 - 1);
 
-    await expect(service.expireInactive(runtime(1), nowBelowMinimumCutoff)).resolves.toBe(0);
+    await expect(
+      service.expireInactive(runtime(1), nowBelowMinimumCutoff),
+    ).resolves.toBe(0);
 
     expect(prismaMock.checkoutRecovery.findMany).not.toHaveBeenCalled();
   });
@@ -152,7 +195,9 @@ describe("CheckoutRecoveryExpiryService", () => {
       },
       data: { status: "EXPIRED", expiredAt: now },
     });
-    expect(prismaMock.checkoutRecoveryStatusHistory.create).toHaveBeenCalledWith({
+    expect(
+      prismaMock.checkoutRecoveryStatusHistory.create,
+    ).toHaveBeenCalledWith({
       data: {
         checkoutRecoveryId: "recovery-1",
         fromStatus: "MESSAGE_SENT",
@@ -181,7 +226,11 @@ describe("CheckoutRecoveryExpiryService", () => {
     prismaMock.checkoutRecovery.updateMany.mockResolvedValueOnce({ count: 0 });
 
     await expect(service.expireInactive(runtime(21), now)).resolves.toBe(0);
-    expect(prismaMock.checkoutRecoveryStatusHistory.create).not.toHaveBeenCalled();
-    expect(prismaMock.recoveryOutreachAttempt.updateMany).not.toHaveBeenCalled();
+    expect(
+      prismaMock.checkoutRecoveryStatusHistory.create,
+    ).not.toHaveBeenCalled();
+    expect(
+      prismaMock.recoveryOutreachAttempt.updateMany,
+    ).not.toHaveBeenCalled();
   });
 });

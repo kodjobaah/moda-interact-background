@@ -14,22 +14,23 @@ Not exhaustively audited: every Commerce host/tool grant; every wrapper stored f
 
 ## Findings summary
 
-| ID | Priority | Classification | Finding |
-| --- | --- | --- | --- |
-| MSG-01 | High | Static interleaving defect | Text ingress can increment inboundVersion while leaving pendingTurnStartedAt null. |
-| MSG-02 | High | Static failure-path defect | Automated outbound converts moderation retry and some DB/configuration errors into terminal suppression. |
-| MSG-03 | High | Static crash-recovery gap | Pending outbound reservation is treated as completed duplicate on turn replay. |
-| MSG-04 | High | Static event-order gap | Early provider status is acknowledged when providerMessageId is not yet stored. |
-| MSG-05 | Medium | Optimisation candidate | No-context routing applies regex to Customer.phone rather than indexed canonical-phone lookup. |
-| MSG-06 | Medium | Optimisation candidate | Outbound admission materialises full automated-message ID history inside SERIALIZABLE transaction. |
-| MSG-07 | Medium | Bounded-work concern | Pending moderation/history fetches are unbounded before in-memory budgets. |
-| MSG-08 | Medium | Optimisation candidate | Standalone STOP reads all active null-canonical-phone candidates twice. |
-| MSG-09 | Low/medium | Direct redundancy | Some IDs can be returned by existing writes or carried within one operation. |
-| MSG-10 | Measurement | Intentional locking/polling cost | Final Shop locks and recurring human-command scans require measured contention/capacity evidence. |
+| ID     | Priority    | Classification                   | Finding                                                                                                  |
+| ------ | ----------- | -------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| MSG-01 | High        | Static interleaving defect       | Text ingress can increment inboundVersion while leaving pendingTurnStartedAt null.                       |
+| MSG-02 | High        | Static failure-path defect       | Automated outbound converts moderation retry and some DB/configuration errors into terminal suppression. |
+| MSG-03 | High        | Static crash-recovery gap        | Pending outbound reservation is treated as completed duplicate on turn replay.                           |
+| MSG-04 | High        | Static event-order gap           | Early provider status is acknowledged when providerMessageId is not yet stored.                          |
+| MSG-05 | Medium      | Optimisation candidate           | No-context routing applies regex to Customer.phone rather than indexed canonical-phone lookup.           |
+| MSG-06 | Medium      | Optimisation candidate           | Outbound admission materialises full automated-message ID history inside SERIALIZABLE transaction.       |
+| MSG-07 | Medium      | Bounded-work concern             | Pending moderation/history fetches are unbounded before in-memory budgets.                               |
+| MSG-08 | Medium      | Optimisation candidate           | Standalone STOP reads all active null-canonical-phone candidates twice.                                  |
+| MSG-09 | Low/medium  | Direct redundancy                | Some IDs can be returned by existing writes or carried within one operation.                             |
+| MSG-10 | Measurement | Intentional locking/polling cost | Final Shop locks and recurring human-command scans require measured contention/capacity evidence.        |
 
 ## MSG-01 — Pending-turn initialization uses a stale snapshot
 
 Evidence:
+
 - src/services/conversation.service.ts:109-119 reads current conversation state before transaction.
 - :138-195 creates message, conditionally initializes pendingTurnStartedAt, increments version and advances clocks.
 - :158-172 decides whether initialization is needed from the pre-transaction snapshot.
@@ -37,6 +38,7 @@ Evidence:
 - src/services/conversation-turn-processor.service.ts:164-176 enqueue skips conversations without pending timestamp.
 
 Valid interleaving:
+
 1. Version 1 has active pending turn.
 2. New text reads version 1 with non-null pending timestamp.
 3. Prior turn completes and clears the timestamp.
@@ -54,6 +56,7 @@ Validation: deterministic integration barriers between initial read and transact
 ## MSG-02 — Automated moderation retry becomes terminal suppression
 
 Evidence:
+
 - src/services/conversation-moderation/moderation-assessment.service.ts:171-188 returns retry for checking lease/backoff.
 - :196-246 persists provider retry and returns retry.
 - src/services/outbound-whatsapp-admission/outbound-message-delivery.service.ts:349-355 converts result to boolean.
@@ -70,6 +73,7 @@ Validation: timeout; checking lease; backoff; recheck DB failure; later success 
 ## MSG-03 — Existing reservation suppresses unfinished work
 
 Evidence:
+
 - src/services/outbound-whatsapp-admission/outbound-admission-reservation.service.ts:82-86 treats any existing usage-event idempotency key as duplicate.
 - :145-166 transactionally creates PENDING message and UsageEvent.
 - src/services/conversation-turn-processor.service.ts:402-420 reserves before agent call.
@@ -87,6 +91,7 @@ Validation: process loss after reservation, during model work, and between clean
 ## MSG-04 — Early provider statuses can be lost
 
 Evidence:
+
 - src/services/outbound-whatsapp-admission/outbound-message-delivery.service.ts:114-122 provider responds before markSent.
 - :472-495 persists providerMessageId.
 - src/services/whatsapp-provider-status.service.ts:80-106 finds only by persisted provider ID and returns unknown-message on miss.
@@ -104,6 +109,7 @@ Validation: pause after provider response before markSent; consume status; then 
 ## MSG-05 — Regex phone lookup misses canonical index
 
 Evidence:
+
 - src/services/recovery-routing.service.ts:126-153 no-context query joins Recovery/Conversation/Customer/Shop, comparing nested regexp_replace(Customer.phone).
 - LIMIT 2 bounds returned candidates, not scan cost.
 - database/prisma/schema.prisma:221-244 Customer has no phone index.
@@ -117,6 +123,7 @@ Measure known/unknown sender, many-shop sender, large recovery history. No plan 
 ## MSG-06 — Outbound admission scales with stored message history
 
 Evidence:
+
 - outbound-admission-reservation.service.ts:114-131 fetches all automated outbound message IDs then UsageEvent.groupBy with expanding sourceId IN list.
 - :71-74 serializable transaction.
 - schema.prisma:1590-1637 indexes UsageEvent by shop/metric/time etc.; no sourceId-leading index found in inspected schema/migrations.
@@ -130,6 +137,7 @@ Measure transaction duration, returned IDs, SQL statements, serialization confli
 ## MSG-07 — Pending moderation/history not bounded at database boundary
 
 Evidence:
+
 - moderation-turn-gate.ts:20-45 fetches all candidates then sequentially assesses.
 - src/commerce/history.ts:69-86 current query has no take.
 - :26-48 checks 32k character budget after retrieval and filtering.
@@ -139,10 +147,11 @@ Evidence:
 Recommendation: bounded retrieval/progression and existence query for reply-context. Never truncate pending content silently and mark all versions processed.
 
 Moderation direct call budget for N eligible messages:
+
 - setup: 2 (Conversation, candidates).
 - cached terminal assessment: 3 per item (canonical source, create-or-reuse SQL function, assessment read).
 - fresh assessment: 5 per item (above + claim + complete SQL function).
-Excludes readModerationOperation and function-internal SQL. Reuse path still invokes create-or-reuse; optimise only preserving canonical content/model/version identity.
+  Excludes readModerationOperation and function-internal SQL. Reuse path still invokes create-or-reuse; optimise only preserving canonical content/model/version identity.
 
 ## MSG-08 — Null canonical STOP fallback
 
@@ -159,15 +168,15 @@ Recommendation: measure unresolved-phone population; normalise in owning path an
 
 ## Exact local branch budgets
 
-| Named branch | Explicit ORM/raw invocations |
-| --- | ---: |
-| receiveMessage, fresh quiescent text and matching outreach attempt | 9 |
-| receiveMessage, fresh text with pending turn and matching attempt | 8 |
-| receiveMessage, duplicate and matching attempt | 4 |
-| Initial-outreach finalizer with notice disabled | 5 |
-| Initial-outreach finalizer with notice created | 9 |
-| Initial-outreach finalizer replay | 3 |
-| Human command claim batch | 1 + N |
+| Named branch                                                       | Explicit ORM/raw invocations |
+| ------------------------------------------------------------------ | ---------------------------: |
+| receiveMessage, fresh quiescent text and matching outreach attempt |                            9 |
+| receiveMessage, fresh text with pending turn and matching attempt  |                            8 |
+| receiveMessage, duplicate and matching attempt                     |                            4 |
+| Initial-outreach finalizer with notice disabled                    |                            5 |
+| Initial-outreach finalizer with notice created                     |                            9 |
+| Initial-outreach finalizer replay                                  |                            3 |
+| Human command claim batch                                          |                        1 + N |
 
 Fresh text includes markEngagedForConversation but not upstream routing, activity, reachability or scheduling. Quiescent fresh calls: duplicate read, conversation read, message create, pending-state update, version update, clock raw update, recovery-ID read, attempt read, attempt update. Pending path omits pending-state update. Duplicate path: duplicate read, recovery-ID read, attempt read, attempt update. Conditional no-attempt/no-update outcomes reduce count.
 
@@ -193,6 +202,7 @@ human-command-dispatcher.service.ts:122-129 runs expired-permit, confirmed-follo
 ## Test evidence and gaps
 
 Tests read, not run:
+
 - tests/integration/conversation-turn-scheduling.integration.test.ts:252-299 repairs missing enqueue when original inbound is delivered again. Does not cover MSG-01 null timestamp or MSG-03 reservation crash.
 - tests/unit/services/whatsapp-provider-status.service.test.ts covers status duplicates/compensation replay and expects unknown-message; early-status repair not established.
 - Existing moderation and final-fence tests exist; coverage of automated typed retry preservation not established.
@@ -204,12 +214,12 @@ No latency, SQL counts, sustainable throughput, pool pressure, lock wait, or fai
 
 Billing reviewer identified possible compensation ambiguity between historical RELEASED and later COMMITTED reservation rows after billing-period rollover. Status handler invokes compensation outside transaction on FAILED replay and propagates error; this does not resolve that ambiguity. No countervailing lineage handling found in messaging path; root should validate billing agent evidence.
 
-
 ## TEMPLATE-01 — Assembly uses 5 + 2N raw calls inside one run transaction
 
 Evidence: src/services/template-translation/repository.ts:73-121, loadRunForTransaction :124 onward.
 
 For nonempty successful assembly:
+
 1. Lock run.
 2. Load run/snapshot.
 3. Update run.
@@ -224,6 +234,7 @@ Candidate improvement: bulk insert/assignment under same run lock, preserve dete
 ## TEMPLATE-02 — Meta poller is bounded, but replica CAS does not prevent duplicate GETs
 
 Evidence:
+
 - meta-template-management/due-poller.ts:38 processes25; :51 schedules60s after completion; :18-20 promises at most1 cycle perprocess.
 - repository.ts:23-40 listDue clamps result to1..50, production25.
 - service.ts:221-246 loops per due item, collects errors and continues.

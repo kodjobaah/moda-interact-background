@@ -1,4 +1,7 @@
-import { RecoveryCreditPurchaseStatus, RecoveryCreditRefundStatus } from "@prisma/client";
+import {
+  RecoveryCreditPurchaseStatus,
+  RecoveryCreditRefundStatus,
+} from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
 import type { RefundRow } from "./refund-correction.types.js";
@@ -13,10 +16,10 @@ export class RefundCompletionService {
   async complete(refund: RefundRow, currency: string): Promise<boolean> {
     const finalCreditQuantity = refund.finalCreditQuantity;
     if (
-      finalCreditQuantity === null
-      || finalCreditQuantity <= 0
-      || refund.expectedProviderAmount === null
-      || refund.automaticCorrectionUsageEventId === null
+      finalCreditQuantity === null ||
+      finalCreditQuantity <= 0 ||
+      refund.expectedProviderAmount === null ||
+      refund.automaticCorrectionUsageEventId === null
     ) {
       return false;
     }
@@ -46,49 +49,52 @@ export class RefundCompletionService {
         },
       });
       if (
-        !purchase
-        || !counter
-        || purchase.status !== RecoveryCreditPurchaseStatus.WITHDRAWN
-        || purchase.reservedAmount !== 0
-        || purchase.currentAmount !== finalCreditQuantity
-        || counter.refundingQuantity < finalCreditQuantity
+        !purchase ||
+        !counter ||
+        purchase.status !== RecoveryCreditPurchaseStatus.WITHDRAWN ||
+        purchase.reservedAmount !== 0 ||
+        purchase.currentAmount !== finalCreditQuantity ||
+        counter.refundingQuantity < finalCreditQuantity
       ) {
         return false;
       }
 
-      const updatedPurchase = await transaction.recoveryCreditPurchase.updateMany({
-        where: {
-          id: refund.purchaseId,
-          status: RecoveryCreditPurchaseStatus.WITHDRAWN,
-          version: purchase.version,
-          reservedAmount: 0,
-          currentAmount: finalCreditQuantity,
-        },
-        data: {
-          currentAmount: 0,
-          status: RecoveryCreditPurchaseStatus.REFUNDED,
-          version: { increment: 1 },
-        },
-      });
-      const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
-        where: {
-          id: counter.id,
-          version: counter.version,
-          refundingQuantity: { gte: finalCreditQuantity },
-          grantedQuantity: { gte: finalCreditQuantity },
-        },
-        data: {
-          refundingQuantity: { decrement: finalCreditQuantity },
-          grantedQuantity: { decrement: finalCreditQuantity },
-          version: { increment: 1 },
-        },
-      });
+      const updatedPurchase =
+        await transaction.recoveryCreditPurchase.updateMany({
+          where: {
+            id: refund.purchaseId,
+            status: RecoveryCreditPurchaseStatus.WITHDRAWN,
+            version: purchase.version,
+            reservedAmount: 0,
+            currentAmount: finalCreditQuantity,
+          },
+          data: {
+            currentAmount: 0,
+            status: RecoveryCreditPurchaseStatus.REFUNDED,
+            version: { increment: 1 },
+          },
+        });
+      const updatedCounter =
+        await transaction.shopEntitlementCounter.updateMany({
+          where: {
+            id: counter.id,
+            version: counter.version,
+            refundingQuantity: { gte: finalCreditQuantity },
+            grantedQuantity: { gte: finalCreditQuantity },
+          },
+          data: {
+            refundingQuantity: { decrement: finalCreditQuantity },
+            grantedQuantity: { decrement: finalCreditQuantity },
+            version: { increment: 1 },
+          },
+        });
       const updatedRefund = await transaction.recoveryCreditRefund.updateMany({
         where: {
           id: refund.id,
           status: RecoveryCreditRefundStatus.REQUESTED,
           version: refund.version,
-          automaticCorrectionUsageEventId: refund.automaticCorrectionUsageEventId,
+          automaticCorrectionUsageEventId:
+            refund.automaticCorrectionUsageEventId,
         },
         data: {
           providerAmount: refund.expectedProviderAmount,
@@ -102,9 +108,9 @@ export class RefundCompletionService {
         },
       });
       if (
-        updatedPurchase.count !== 1
-        || updatedCounter.count !== 1
-        || updatedRefund.count !== 1
+        updatedPurchase.count !== 1 ||
+        updatedCounter.count !== 1 ||
+        updatedRefund.count !== 1
       ) {
         throw new Error("automatic refund completion CAS failed");
       }

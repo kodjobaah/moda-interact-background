@@ -12,20 +12,34 @@ function storedRecipient(recipient: string | undefined): string | null {
 export class RecoveryRecipientResolverService {
   async resolve(event: RecoveryCheckoutSeed): Promise<string | null> {
     const shop = await prisma.shop.findUnique({
-      where: { domain: event.shop }, select: { id: true },
+      where: { domain: event.shop },
+      select: { id: true },
     });
     if (!shop) return null;
-    const customer = await recoveryShopifyCustomerService.resolve(event, shop.id);
+    const customer = await recoveryShopifyCustomerService.resolve(
+      event,
+      shop.id,
+    );
     if (!customer) return null;
 
-    const selected = await selectStoredShopifyCustomerPhone({ customerId: customer.id, shopId: shop.id });
+    const selected = await selectStoredShopifyCustomerPhone({
+      customerId: customer.id,
+      shopId: shop.id,
+    });
     return storedRecipient(selected?.recipient);
   }
 
-  async resolveForCustomerInShop(customerId: string, shopId: string): Promise<string | null> {
-    const selected = await selectStoredShopifyCustomerPhone({ customerId, shopId });
+  async resolveForCustomerInShop(
+    customerId: string,
+    shopId: string,
+  ): Promise<string | null> {
+    const selected = await selectStoredShopifyCustomerPhone({
+      customerId,
+      shopId,
+    });
     return storedRecipient(selected?.recipient);
   }
 }
 
-export const recoveryRecipientResolverService = new RecoveryRecipientResolverService();
+export const recoveryRecipientResolverService =
+  new RecoveryRecipientResolverService();

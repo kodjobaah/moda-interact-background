@@ -39,14 +39,32 @@ const progressLogger = createLogger({
 });
 
 export type InitialOutreachProgress =
-  | { kind: "needs-preparation"; recoveryId: string; outreachAttemptId: string | null; outboundMessageId: string | null }
-  | { kind: "reconciled"; recoveryId: string; outreachAttemptId: string; outboundMessageId: string }
-  | { kind: "blocked"; recoveryId: string; reason: "pre-permit-refused" | "provider-rejected" | "recipient-unreachable" }
+  | {
+      kind: "needs-preparation";
+      recoveryId: string;
+      outreachAttemptId: string | null;
+      outboundMessageId: string | null;
+    }
+  | {
+      kind: "reconciled";
+      recoveryId: string;
+      outreachAttemptId: string;
+      outboundMessageId: string;
+    }
+  | {
+      kind: "blocked";
+      recoveryId: string;
+      reason:
+        "pre-permit-refused" | "provider-rejected" | "recipient-unreachable";
+    }
   | {
       kind: "held";
       recoveryId: string;
       reason: "provider-outcome-unknown" | "lineage-conflict" | "credit-held";
-      creditReason?: Extract<ConfirmedInitialOutreachSettlement | ExistingInitialOutreachCredit, { kind: "held" }> ["reason"];
+      creditReason?: Extract<
+        ConfirmedInitialOutreachSettlement | ExistingInitialOutreachCredit,
+        { kind: "held" }
+      >["reason"];
     };
 
 type InitialOutreachCreditHoldReason = NonNullable<
@@ -56,18 +74,29 @@ type InitialOutreachCreditHoldReason = NonNullable<
 export class InitialOutreachHeldError extends Error {
   constructor(
     readonly recoveryId: string,
-    readonly reason: Extract<InitialOutreachProgress, { kind: "held" }> ["reason"],
-    readonly creditReason?: Extract<InitialOutreachProgress, { kind: "held" }> ["creditReason"],
+    readonly reason: Extract<
+      InitialOutreachProgress,
+      { kind: "held" }
+    >["reason"],
+    readonly creditReason?: Extract<
+      InitialOutreachProgress,
+      { kind: "held" }
+    >["creditReason"],
   ) {
     super(`Initial outreach is held for recovery ${recoveryId}: ${reason}`);
     this.name = "InitialOutreachHeldError";
   }
 }
 
-type Recovery = NonNullable<Awaited<ReturnType<typeof prisma.checkoutRecovery.findFirst>>>;
+type Recovery = NonNullable<
+  Awaited<ReturnType<typeof prisma.checkoutRecovery.findFirst>>
+>;
 
 interface RecoveryInitiationPorts {
-  upsertRecovery: (event: RecoveryCheckoutSeed, generation: number) => Promise<Recovery | null>;
+  upsertRecovery: (
+    event: RecoveryCheckoutSeed,
+    generation: number,
+  ) => Promise<Recovery | null>;
   resolveRecipient: (event: RecoveryCheckoutSeed) => string;
   markRecoveryCapacityBlocked: (recoveryId: string) => Promise<unknown>;
 }
@@ -75,7 +104,9 @@ interface RecoveryInitiationPorts {
 export type RecoveryAdmissionGate = () => Promise<boolean>;
 
 /** Only the already accepted checkout seed is eligible for merchant notice context. */
-export function noticeContextFromCheckout(event: RecoveryCheckoutSeed): RecoveryConsentCheckoutContext {
+export function noticeContextFromCheckout(
+  event: RecoveryCheckoutSeed,
+): RecoveryConsentCheckoutContext {
   const context: {
     customerName?: string;
     customerEmail?: string;
@@ -83,11 +114,19 @@ export function noticeContextFromCheckout(event: RecoveryCheckoutSeed): Recovery
     lastActivityAt?: string;
   } = {};
   const name = [event.customer?.firstName, event.customer?.lastName]
-    .filter((part): part is string => typeof part === "string" && !!part.trim()).join(" ");
+    .filter((part): part is string => typeof part === "string" && !!part.trim())
+    .join(" ");
   if (name) context.customerName = name;
-  if (typeof event.customer?.email === "string") context.customerEmail = event.customer.email;
-  if (typeof event.totalPrice === "string" && typeof event.currency === "string") {
-    context.checkoutTotal = { amountDecimal: event.totalPrice, currency: event.currency };
+  if (typeof event.customer?.email === "string")
+    context.customerEmail = event.customer.email;
+  if (
+    typeof event.totalPrice === "string" &&
+    typeof event.currency === "string"
+  ) {
+    context.checkoutTotal = {
+      amountDecimal: event.totalPrice,
+      currency: event.currency,
+    };
   }
   // The current bounded Shopify GraphQL projection carries lineItems.nodes but
   // no pageInfo or completeness marker. A nonempty list can still be truncated,
@@ -102,13 +141,18 @@ export function noticeContextFromCheckout(event: RecoveryCheckoutSeed): Recovery
 export class RecoveryInitiationService {
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
-    private readonly finalizationService: RecoveryOutreachFinalizationService = new RecoveryOutreachFinalizationService(billingService),
+    private readonly finalizationService: RecoveryOutreachFinalizationService = new RecoveryOutreachFinalizationService(
+      billingService,
+    ),
     private readonly ports?: RecoveryInitiationPorts,
     private readonly suppressionAdmission: RecoveryRecipientSuppressionAdmissionService = recoveryRecipientSuppressionAdmissionService,
     private readonly consentAdmission: RecoveryConsentAdmissionPort = recoveryConsentAdmissionService,
   ) {}
 
-  async continueInitialOutreach(input: { shopId: string; recoveryId: string }): Promise<InitialOutreachProgress> {
+  async continueInitialOutreach(input: {
+    shopId: string;
+    recoveryId: string;
+  }): Promise<InitialOutreachProgress> {
     let stage = "classification";
     let attemptId: string | undefined;
     let messageId: string | undefined;
@@ -121,8 +165,12 @@ export class RecoveryInitiationService {
         where: { id: input.shopId },
         select: { id: true, platform: true },
       });
-      if (!recovery || recovery.shopId !== input.shopId || shop?.id !== input.shopId ||
-          !["SHOPIFY", "WOOCOMMERCE"].includes(shop.platform)) {
+      if (
+        !recovery ||
+        recovery.shopId !== input.shopId ||
+        shop?.id !== input.shopId ||
+        !["SHOPIFY", "WOOCOMMERCE"].includes(shop.platform)
+      ) {
         return this.logProgressHold({
           recoveryId: input.recoveryId,
           shopId: input.shopId,
@@ -133,46 +181,92 @@ export class RecoveryInitiationService {
       const attempt = await prisma.recoveryOutreachAttempt.findFirst({
         where: { checkoutRecoveryId: recovery.id, sequence: 1 },
         select: {
-          id: true, checkoutRecoveryId: true, sequence: true, trigger: true,
-          status: true, sentAt: true, outboundMessageId: true, followUpDueAt: true,
+          id: true,
+          checkoutRecoveryId: true,
+          sequence: true,
+          trigger: true,
+          status: true,
+          sentAt: true,
+          outboundMessageId: true,
+          followUpDueAt: true,
         },
       });
       if (!attempt) {
-        return { kind: "needs-preparation", recoveryId: recovery.id,
-          outreachAttemptId: null, outboundMessageId: null };
+        return {
+          kind: "needs-preparation",
+          recoveryId: recovery.id,
+          outreachAttemptId: null,
+          outboundMessageId: null,
+        };
       }
       attemptId = attempt.id;
-      if (attempt.checkoutRecoveryId !== recovery.id || attempt.sequence !== 1 || attempt.trigger !== "INITIAL") {
-        return this.logProgressHold({ recoveryId: recovery.id, shopId: input.shopId,
-          outreachAttemptId: attempt.id, reason: "lineage-conflict" });
+      if (
+        attempt.checkoutRecoveryId !== recovery.id ||
+        attempt.sequence !== 1 ||
+        attempt.trigger !== "INITIAL"
+      ) {
+        return this.logProgressHold({
+          recoveryId: recovery.id,
+          shopId: input.shopId,
+          outreachAttemptId: attempt.id,
+          reason: "lineage-conflict",
+        });
       }
 
-      const identity = { shopId: input.shopId, recoveryId: recovery.id, outreachAttemptId: attempt.id };
-      const progress = await outboundWhatsAppAdmissionService.inspectInitialOutreachAdmission(identity);
+      const identity = {
+        shopId: input.shopId,
+        recoveryId: recovery.id,
+        outreachAttemptId: attempt.id,
+      };
+      const progress =
+        await outboundWhatsAppAdmissionService.inspectInitialOutreachAdmission(
+          identity,
+        );
       if (progress.kind === "held") {
-        return this.logProgressHold({ recoveryId: recovery.id, shopId: input.shopId,
-          outreachAttemptId: attempt.id, reason: progress.reason });
+        return this.logProgressHold({
+          recoveryId: recovery.id,
+          shopId: input.shopId,
+          outreachAttemptId: attempt.id,
+          reason: progress.reason,
+        });
       }
       if (progress.kind === "failed") {
-        return this.logProgressBlocked({ recoveryId: recovery.id, shopId: input.shopId,
-          outreachAttemptId: attempt.id, reason: progress.disposition });
+        return this.logProgressBlocked({
+          recoveryId: recovery.id,
+          shopId: input.shopId,
+          outreachAttemptId: attempt.id,
+          reason: progress.disposition,
+        });
       }
       if (progress.kind === "absent" || progress.kind === "prepared") {
-        messageId = progress.kind === "prepared" ? progress.message.id : undefined;
+        messageId =
+          progress.kind === "prepared" ? progress.message.id : undefined;
         stage = "credit_revalidation";
-        const credit = await this.billingService.revalidateExistingInitialOutreach({
-          ...identity,
-          outboundMessageId: progress.kind === "prepared" ? progress.message.id : null,
-        });
+        const credit =
+          await this.billingService.revalidateExistingInitialOutreach({
+            ...identity,
+            outboundMessageId:
+              progress.kind === "prepared" ? progress.message.id : null,
+          });
         if (credit.kind === "held") {
-          return this.logProgressHold({ recoveryId: recovery.id, shopId: input.shopId,
-            outreachAttemptId: attempt.id, ...(messageId ? { outboundMessageId: messageId } : {}),
-            reason: "credit-held", creditReason: credit.reason });
+          return this.logProgressHold({
+            recoveryId: recovery.id,
+            shopId: input.shopId,
+            outreachAttemptId: attempt.id,
+            ...(messageId ? { outboundMessageId: messageId } : {}),
+            reason: "credit-held",
+            creditReason: credit.reason,
+          });
         }
         if (progress.kind === "prepared" && credit.kind === "absent") {
-          return this.logProgressHold({ recoveryId: recovery.id, shopId: input.shopId,
-            outreachAttemptId: attempt.id, outboundMessageId: progress.message.id,
-            reason: "credit-held", creditReason: "lineage-conflict" });
+          return this.logProgressHold({
+            recoveryId: recovery.id,
+            shopId: input.shopId,
+            outreachAttemptId: attempt.id,
+            outboundMessageId: progress.message.id,
+            reason: "credit-held",
+            creditReason: "lineage-conflict",
+          });
         }
         return {
           kind: "needs-preparation",
@@ -184,23 +278,38 @@ export class RecoveryInitiationService {
 
       messageId = progress.message.id;
       stage = "finalization";
-      const alreadyFinalized = attempt.outboundMessageId === progress.message.id &&
+      const alreadyFinalized =
+        attempt.outboundMessageId === progress.message.id &&
         attempt.sentAt?.getTime() === progress.message.sentAt.getTime();
-      const policy = alreadyFinalized ? undefined : await recoveryPolicyService.resolve(recovery.shopId);
-      const finalized = await this.finalizationService.finalizeConfirmedInitialOutreach({
-        recovery,
-        attempt,
-        message: progress.message,
-        ...(policy ? { policy } : {}),
-      });
+      const policy = alreadyFinalized
+        ? undefined
+        : await recoveryPolicyService.resolve(recovery.shopId);
+      const finalized =
+        await this.finalizationService.finalizeConfirmedInitialOutreach({
+          recovery,
+          attempt,
+          message: progress.message,
+          ...(policy ? { policy } : {}),
+        });
       if (finalized.kind === "held") {
-        return this.logProgressHold({ recoveryId: recovery.id, shopId: input.shopId,
-          outreachAttemptId: attempt.id, outboundMessageId: progress.message.id,
-          reason: finalized.reason === "lineage-conflict" ? "lineage-conflict" : "credit-held",
-          creditReason: finalized.reason });
+        return this.logProgressHold({
+          recoveryId: recovery.id,
+          shopId: input.shopId,
+          outreachAttemptId: attempt.id,
+          outboundMessageId: progress.message.id,
+          reason:
+            finalized.reason === "lineage-conflict"
+              ? "lineage-conflict"
+              : "credit-held",
+          creditReason: finalized.reason,
+        });
       }
-      return { kind: "reconciled", recoveryId: recovery.id,
-        outreachAttemptId: attempt.id, outboundMessageId: progress.message.id };
+      return {
+        kind: "reconciled",
+        recoveryId: recovery.id,
+        outreachAttemptId: attempt.id,
+        outboundMessageId: progress.message.id,
+      };
     } catch (error) {
       this.logProgressFailure({
         shopId: input.shopId,
@@ -235,13 +344,24 @@ export class RecoveryInitiationService {
     shopId: string;
     recoveryId: string;
     outreachAttemptId: string;
-    reason: "pre-permit-refused" | "provider-rejected" | "recipient-unreachable";
+    reason:
+      "pre-permit-refused" | "provider-rejected" | "recipient-unreachable";
   }): InitialOutreachProgress {
-    this.logProgressOutcome("recovery.initial_outreach.progress.blocked", input);
-    return { kind: "blocked", recoveryId: input.recoveryId, reason: input.reason };
+    this.logProgressOutcome(
+      "recovery.initial_outreach.progress.blocked",
+      input,
+    );
+    return {
+      kind: "blocked",
+      recoveryId: input.recoveryId,
+      reason: input.reason,
+    };
   }
 
-  private logProgressOutcome(event: string, input: Record<string, unknown>): void {
+  private logProgressOutcome(
+    event: string,
+    input: Record<string, unknown>,
+  ): void {
     try {
       progressLogger.warn(event, input);
     } catch {
@@ -286,8 +406,11 @@ export class RecoveryInitiationService {
           checkoutUrl: event.checkoutUrl,
           lineItems: event.lineItems,
           detectedAt: new Date(event.detectedAt),
-          lastExternalActivityAt: new Date(event.lastExternalActivityAt ?? event.detectedAt),
-          completedAt: event.completedAt !== null ? new Date(event.completedAt) : null,
+          lastExternalActivityAt: new Date(
+            event.lastExternalActivityAt ?? event.detectedAt,
+          ),
+          completedAt:
+            event.completedAt !== null ? new Date(event.completedAt) : null,
         },
       });
     } catch (error) {
@@ -305,12 +428,19 @@ export class RecoveryInitiationService {
 
   resolveRecipient(event: RecoveryCheckoutSeed): string {
     if (event.customer.phone) return event.customer.phone;
-    if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
-      throw new Error("TEST_WHATSAPP_RECIPIENT is only available in development or test");
+    if (
+      process.env.NODE_ENV !== "development" &&
+      process.env.NODE_ENV !== "test"
+    ) {
+      throw new Error(
+        "TEST_WHATSAPP_RECIPIENT is only available in development or test",
+      );
     }
     const testRecipient = process.env.TEST_WHATSAPP_RECIPIENT;
     if (!testRecipient) {
-      throw new Error("No customer phone and TEST_WHATSAPP_RECIPIENT is not configured");
+      throw new Error(
+        "No customer phone and TEST_WHATSAPP_RECIPIENT is not configured",
+      );
     }
     return testRecipient;
   }
@@ -327,7 +457,10 @@ export class RecoveryInitiationService {
     });
   }
 
-  async markRecoveryCapacityBlocked(recoveryId: string, blockedAt = new Date()) {
+  async markRecoveryCapacityBlocked(
+    recoveryId: string,
+    blockedAt = new Date(),
+  ) {
     return prisma.checkoutRecovery.updateMany({
       where: {
         id: recoveryId,
@@ -354,23 +487,39 @@ export class RecoveryInitiationService {
     // its checkout lock. Direct initiation must also reject completed checkouts.
     if (event.completedAt) return null;
     const shop = await prisma.shop.findUniqueOrThrow({
-      where: { domain: event.shop }, select: { id: true },
+      where: { domain: event.shop },
+      select: { id: true },
     });
     const previous = await findLatestRecovery(shop.id, event.checkoutToken);
     if (previous) {
-      const progress = await this.continueInitialOutreach({ shopId: shop.id, recoveryId: previous.id });
+      const progress = await this.continueInitialOutreach({
+        shopId: shop.id,
+        recoveryId: previous.id,
+      });
       if (progress.kind === "held") {
-        throw new InitialOutreachHeldError(progress.recoveryId, progress.reason, progress.creditReason);
+        throw new InitialOutreachHeldError(
+          progress.recoveryId,
+          progress.reason,
+          progress.creditReason,
+        );
       }
-      if (progress.kind === "reconciled" || progress.kind === "blocked") return previous;
+      if (progress.kind === "reconciled" || progress.kind === "blocked")
+        return previous;
     }
     const noticeContext = noticeContextFromCheckout(event);
-    const requiresAdmission = !previous || previous.status === "DETECTED" || previous.status === "EXPIRED";
-    let customer: Awaited<ReturnType<typeof recoveryShopifyCustomerService.resolve>> | undefined;
+    const requiresAdmission =
+      !previous ||
+      previous.status === "DETECTED" ||
+      previous.status === "EXPIRED";
+    let customer:
+      | Awaited<ReturnType<typeof recoveryShopifyCustomerService.resolve>>
+      | undefined;
     let recipient: string | null = null;
     if (requiresAdmission) {
       customer = resolvedCustomerId
-        ? await prisma.customer.findFirst({ where: { id: resolvedCustomerId, shopId: shop.id } })
+        ? await prisma.customer.findFirst({
+            where: { id: resolvedCustomerId, shopId: shop.id },
+          })
         : await recoveryShopifyCustomerService.resolve(event, shop.id);
       let sourceRecipient = resolvedRecipient ?? event.customer?.phone;
       if (!sourceRecipient) {
@@ -381,11 +530,16 @@ export class RecoveryInitiationService {
       const identity = customer?.id ?? previous?.customerId ?? null;
       const permitted = previous
         ? await this.consentAdmission.evaluateReentry({
-            shopId: shop.id, checkoutToken: event.checkoutToken, noticeContext,
-            customerId: identity, recipient,
+            shopId: shop.id,
+            checkoutToken: event.checkoutToken,
+            noticeContext,
+            customerId: identity,
+            recipient,
           })
         : await this.consentAdmission.evaluateFirst({
-            shopId: shop.id, checkoutToken: event.checkoutToken, noticeContext,
+            shopId: shop.id,
+            checkoutToken: event.checkoutToken,
+            noticeContext,
             customerId: identity,
             shopifyCustomerId: event.customer?.shopifyCustomerId ?? null,
             recipient,
@@ -395,19 +549,27 @@ export class RecoveryInitiationService {
       if (!previous && recipient) {
         // Temporary provider reachability is distinct from consent. Do not leave
         // a DETECTED row waiting for reachability on first admission.
-        const initialSuppression = await this.suppressionAdmission.evaluate(shop.id, recipient);
+        const initialSuppression = await this.suppressionAdmission.evaluate(
+          shop.id,
+          recipient,
+        );
         if (initialSuppression.kind === "suppressed") return null;
       }
     }
 
     let recovery = await this.ports!.upsertRecovery(event, generation);
     if (!recovery) {
-      throw new Error(`Recovery generation was not materialized for ${event.checkoutToken}`);
+      throw new Error(
+        `Recovery generation was not materialized for ${event.checkoutToken}`,
+      );
     }
 
-    if (customer === undefined) customer = resolvedCustomerId
-      ? await prisma.customer.findFirst({ where: { id: resolvedCustomerId, shopId: shop.id } })
-      : await recoveryShopifyCustomerService.resolve(event, shop.id);
+    if (customer === undefined)
+      customer = resolvedCustomerId
+        ? await prisma.customer.findFirst({
+            where: { id: resolvedCustomerId, shopId: shop.id },
+          })
+        : await recoveryShopifyCustomerService.resolve(event, shop.id);
     if (customer && recovery.customerId !== customer.id) {
       recovery = await prisma.checkoutRecovery.update({
         where: { id: recovery.id },
@@ -417,15 +579,23 @@ export class RecoveryInitiationService {
 
     if (recovery.status !== "DETECTED") {
       if (recovery.status === "MESSAGE_SENT" || recovery.status === "ENGAGED") {
-        await this.finalizationService.ensureScheduledInitialFollowUp(recovery.id);
+        await this.finalizationService.ensureScheduledInitialFollowUp(
+          recovery.id,
+        );
       }
       return recovery;
     }
 
     const policy = await recoveryPolicyService.resolve(recovery.shopId);
-    recipient ??= canonicalizeRecoveryRecipient(resolvedRecipient ?? this.ports!.resolveRecipient(event));
+    recipient ??= canonicalizeRecoveryRecipient(
+      resolvedRecipient ?? this.ports!.resolveRecipient(event),
+    );
     if (!recipient) {
-      await this.consentAdmission.notifyMissingRecipient({ shopId: recovery.shopId, checkoutToken: event.checkoutToken, noticeContext });
+      await this.consentAdmission.notifyMissingRecipient({
+        shopId: recovery.shopId,
+        checkoutToken: event.checkoutToken,
+        noticeContext,
+      });
       return recovery;
     }
     // First-send re-entries (including legacy DETECTED and capacity/suppression
@@ -439,7 +609,10 @@ export class RecoveryInitiationService {
       recipient,
     });
     if (!currentlyAllowed) return recovery;
-    const suppression = await this.suppressionAdmission.evaluate(recovery.shopId, recipient);
+    const suppression = await this.suppressionAdmission.evaluate(
+      recovery.shopId,
+      recipient,
+    );
     if (suppression.kind === "suppressed") {
       await this.suppressionAdmission.deferDetectedRecovery(
         recovery.id,
@@ -463,27 +636,37 @@ export class RecoveryInitiationService {
       policy,
       recipient,
     });
-    const conversation = await conversationService.getOrCreateRecoveryConversation(
-      recovery.id,
-      event.internationalContext,
-    );
+    const conversation =
+      await conversationService.getOrCreateRecoveryConversation(
+        recovery.id,
+        event.internationalContext,
+      );
 
     const initialScope = {
       shopId: recovery.shopId,
       recoveryId: recovery.id,
       outreachAttemptId: attempt.id,
     };
-    const admissionProgress = await outboundWhatsAppAdmissionService.inspectInitialOutreachAdmission(initialScope);
+    const admissionProgress =
+      await outboundWhatsAppAdmissionService.inspectInitialOutreachAdmission(
+        initialScope,
+      );
     if (admissionProgress.kind === "confirmed") {
-      const finalized = await this.finalizationService.finalizeConfirmedInitialOutreach({
-        recovery,
-        attempt,
-        message: admissionProgress.message,
-        policy,
-      });
+      const finalized =
+        await this.finalizationService.finalizeConfirmedInitialOutreach({
+          recovery,
+          attempt,
+          message: admissionProgress.message,
+          policy,
+        });
       if (finalized.kind === "held") {
-        throw new InitialOutreachHeldError(recovery.id,
-          finalized.reason === "lineage-conflict" ? "lineage-conflict" : "credit-held", finalized.reason);
+        throw new InitialOutreachHeldError(
+          recovery.id,
+          finalized.reason === "lineage-conflict"
+            ? "lineage-conflict"
+            : "credit-held",
+          finalized.reason,
+        );
       }
       return recovery;
     }
@@ -495,38 +678,66 @@ export class RecoveryInitiationService {
     }
 
     const sender = await recoverySenderPoolService.allocate({
-      conversationId: conversation.id, canonicalRecipient: attempt.recipient, initialAttemptId: attempt.id,
+      conversationId: conversation.id,
+      canonicalRecipient: attempt.recipient,
+      initialAttemptId: attempt.id,
     });
     if (sender.kind !== "assigned") {
       progressLogger.info("whatsapp.sender_pool.allocation_outcome", {
-        shopId: recovery.shopId, recoveryId: recovery.id, conversationId: conversation.id,
-        outreachAttemptId: attempt.id, kind: sender.kind, reason: sender.reason,
+        shopId: recovery.shopId,
+        recoveryId: recovery.id,
+        conversationId: conversation.id,
+        outreachAttemptId: attempt.id,
+        kind: sender.kind,
+        reason: sender.reason,
       });
       return recovery;
     }
     progressLogger.info("whatsapp.sender_pool.allocation_outcome", {
-      shopId: recovery.shopId, recoveryId: recovery.id, conversationId: conversation.id,
-      outreachAttemptId: attempt.id, kind: sender.kind,
-      routeId: sender.sender.routeId, threadId: sender.sender.threadId,
+      shopId: recovery.shopId,
+      recoveryId: recovery.id,
+      conversationId: conversation.id,
+      outreachAttemptId: attempt.id,
+      kind: sender.kind,
+      routeId: sender.sender.routeId,
+      threadId: sender.sender.threadId,
       providerPhoneNumberId: sender.sender.providerPhoneNumberId,
       providerAccountId: sender.sender.providerAccountId,
     });
 
-    const retainedCredit = await this.billingService.revalidateExistingInitialOutreach({
-      ...initialScope,
-      outboundMessageId: admissionProgress.kind === "prepared" ? admissionProgress.message.id : null,
-    });
-    if (retainedCredit.kind === "held" ||
-        (admissionProgress.kind === "prepared" && retainedCredit.kind === "absent")) {
-      const creditReason = retainedCredit.kind === "held" ? retainedCredit.reason : "lineage-conflict";
-      throw new InitialOutreachHeldError(recovery.id, "credit-held", creditReason);
+    const retainedCredit =
+      await this.billingService.revalidateExistingInitialOutreach({
+        ...initialScope,
+        outboundMessageId:
+          admissionProgress.kind === "prepared"
+            ? admissionProgress.message.id
+            : null,
+      });
+    if (
+      retainedCredit.kind === "held" ||
+      (admissionProgress.kind === "prepared" &&
+        retainedCredit.kind === "absent")
+    ) {
+      const creditReason =
+        retainedCredit.kind === "held"
+          ? retainedCredit.reason
+          : "lineage-conflict";
+      throw new InitialOutreachHeldError(
+        recovery.id,
+        "credit-held",
+        creditReason,
+      );
     }
 
     // Classify durable outbound progress before optional offer/template work.
     // New billing admission still waits until approved content is prepared.
     const selected = await automatedRecoveryTemplateService.prepare({
-      shopId: recovery.shopId, recoveryId: recovery.id, stage: "INITIAL",
-      policy, conversationLanguageTag: null, outreachAttemptId: attempt.id,
+      shopId: recovery.shopId,
+      recoveryId: recovery.id,
+      stage: "INITIAL",
+      policy,
+      conversationLanguageTag: null,
+      outreachAttemptId: attempt.id,
       customerFirstName: event.customer.firstName,
     });
     if (selected.kind !== "prepared") return recovery;
@@ -539,7 +750,10 @@ export class RecoveryInitiationService {
       if (billing.kind === "blocked") {
         if (billing.reason === "capacity-exhausted") {
           await this.ports!.markRecoveryCapacityBlocked(recovery.id);
-          await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED");
+          await recoveryOutreachAttemptService.markStatus(
+            attempt.id,
+            "CAPACITY_BLOCKED",
+          );
         }
         return recovery;
       }
@@ -578,16 +792,22 @@ export class RecoveryInitiationService {
         outreachAttemptId: attempt.id,
       });
       if (revalidated.kind === "blocked") {
-        await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED", {
-          failureCode: revalidated.reason,
-        });
+        await recoveryOutreachAttemptService.markStatus(
+          attempt.id,
+          "CAPACITY_BLOCKED",
+          {
+            failureCode: revalidated.reason,
+          },
+        );
         return recovery;
       }
       billingAdmission = revalidated.admission;
       if (selected.admissionToken) {
-        const offerAdmissionValid = await automatedRecoveryTemplateService.validateAdmission(
-          selected.admissionToken, AbortSignal.timeout(15_000),
-        );
+        const offerAdmissionValid =
+          await automatedRecoveryTemplateService.validateAdmission(
+            selected.admissionToken,
+            AbortSignal.timeout(15_000),
+          );
         if (!offerAdmissionValid) {
           await this.billingService.releaseBeforeProvider(billingAdmission);
           return recovery;
@@ -604,10 +824,10 @@ export class RecoveryInitiationService {
       };
       if (admissionProgress.kind === "prepared") {
         result = await outboundWhatsAppAdmissionService.resumeInitialTemplate({
-            ...initialScope,
-            messageId: admissionProgress.message.id,
-            recoveryCreditSourceKey: billingAdmission.sourceKey,
-            template: { ...selected.send, to: attempt.recipient },
+          ...initialScope,
+          messageId: admissionProgress.message.id,
+          recoveryCreditSourceKey: billingAdmission.sourceKey,
+          template: { ...selected.send, to: attempt.recipient },
         });
       } else {
         const admission = await outboundWhatsAppAdmissionService.reserve({
@@ -615,24 +835,32 @@ export class RecoveryInitiationService {
           shopId: recovery.shopId,
           initialOutreach: initialScope,
         });
-        result = admission.kind === "admitted"
-          ? await outboundWhatsAppAdmissionService.resumeInitialTemplate({
-              ...initialScope,
-              messageId: admission.messageId,
-              recoveryCreditSourceKey: billingAdmission.sourceKey,
-              template: { ...selected.send, to: attempt.recipient },
-            })
-          : admission;
+        result =
+          admission.kind === "admitted"
+            ? await outboundWhatsAppAdmissionService.resumeInitialTemplate({
+                ...initialScope,
+                messageId: admission.messageId,
+                recoveryCreditSourceKey: billingAdmission.sourceKey,
+                template: { ...selected.send, to: attempt.recipient },
+              })
+            : admission;
       }
     } catch (error) {
       if (isSynchronousRecipientFailure(error)) {
         throw error;
       }
       try {
-        const afterError = await outboundWhatsAppAdmissionService.inspectInitialOutreachAdmission(initialScope);
+        const afterError =
+          await outboundWhatsAppAdmissionService.inspectInitialOutreachAdmission(
+            initialScope,
+          );
         if (afterError.kind === "held") {
-          this.logProgressHold({ recoveryId: recovery.id, shopId: recovery.shopId,
-            outreachAttemptId: attempt.id, reason: afterError.reason });
+          this.logProgressHold({
+            recoveryId: recovery.id,
+            shopId: recovery.shopId,
+            outreachAttemptId: attempt.id,
+            reason: afterError.reason,
+          });
         }
       } catch {
         // Retain the original sender exception; a later explicit retry reclassifies durable state.
@@ -642,18 +870,41 @@ export class RecoveryInitiationService {
 
     if (result.kind === "suppressed") {
       if (result.reason === "duplicate") {
-        const existing = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
-        if (existing?.status === "SENT" || existing?.status === "DELIVERED" || existing?.status === "READ") {
-          this.finalizationService.requireConfirmedMessage(existing, conversation.id, attempt.id);
-          const finalized = await this.finalizationService.finalizeConfirmedInitialOutreach({
-            recovery, attempt, message: existing, policy,
-          });
-          if (finalized.kind === "held") throw new InitialOutreachHeldError(recovery.id,
-            finalized.reason === "lineage-conflict" ? "lineage-conflict" : "credit-held", finalized.reason);
+        const existing =
+          await outboundWhatsAppAdmissionService.findExistingAdmission(
+            `recovery-outreach:${attempt.id}`,
+          );
+        if (
+          existing?.status === "SENT" ||
+          existing?.status === "DELIVERED" ||
+          existing?.status === "READ"
+        ) {
+          this.finalizationService.requireConfirmedMessage(
+            existing,
+            conversation.id,
+            attempt.id,
+          );
+          const finalized =
+            await this.finalizationService.finalizeConfirmedInitialOutreach({
+              recovery,
+              attempt,
+              message: existing,
+              policy,
+            });
+          if (finalized.kind === "held")
+            throw new InitialOutreachHeldError(
+              recovery.id,
+              finalized.reason === "lineage-conflict"
+                ? "lineage-conflict"
+                : "credit-held",
+              finalized.reason,
+            );
           return recovery;
         }
         if (existing?.status === "PENDING") {
-          throw new Error(`Recovery outreach send is still pending for attempt ${attempt.id}`);
+          throw new Error(
+            `Recovery outreach send is still pending for attempt ${attempt.id}`,
+          );
         }
         if (existing?.status === "FAILED") {
           // Synchronous 131026 remains a consumed attempt after the hard-limit
@@ -662,7 +913,9 @@ export class RecoveryInitiationService {
           return recovery;
         }
         if (!existing) {
-          throw new Error(`Recovery outreach admission has no durable message for attempt ${attempt.id}`);
+          throw new Error(
+            `Recovery outreach admission has no durable message for attempt ${attempt.id}`,
+          );
         }
       }
       await this.billingService.releaseBeforeProvider(billingAdmission);
@@ -672,17 +925,37 @@ export class RecoveryInitiationService {
       return recovery;
     }
 
-    const persistedMessage = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
-    this.finalizationService.requireConfirmedMessage(persistedMessage, conversation.id, attempt.id);
-    const finalized = await this.finalizationService.finalizeConfirmedInitialOutreach({
-      recovery, attempt, message: persistedMessage, policy,
-    });
-    if (finalized.kind === "held") throw new InitialOutreachHeldError(recovery.id,
-      finalized.reason === "lineage-conflict" ? "lineage-conflict" : "credit-held", finalized.reason);
+    const persistedMessage =
+      await outboundWhatsAppAdmissionService.findExistingAdmission(
+        `recovery-outreach:${attempt.id}`,
+      );
+    this.finalizationService.requireConfirmedMessage(
+      persistedMessage,
+      conversation.id,
+      attempt.id,
+    );
+    const finalized =
+      await this.finalizationService.finalizeConfirmedInitialOutreach({
+        recovery,
+        attempt,
+        message: persistedMessage,
+        policy,
+      });
+    if (finalized.kind === "held")
+      throw new InitialOutreachHeldError(
+        recovery.id,
+        finalized.reason === "lineage-conflict"
+          ? "lineage-conflict"
+          : "credit-held",
+        finalized.reason,
+      );
     return recovery;
   }
 }
 
 function isUniqueConflict(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2002"
+  );
 }

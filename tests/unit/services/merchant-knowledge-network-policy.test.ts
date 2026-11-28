@@ -52,12 +52,9 @@ describe("Merchant Knowledge network policy", () => {
     "2606:4700:4700::1111",
     "2001:4860:4860::8888",
     "::ffff:8.8.8.8",
-  ])(
-    "accepts global unicast address %s",
-    (address) => {
-      expect(isPublicIpAddress(address)).toBe(true);
-    },
-  );
+  ])("accepts global unicast address %s", (address) => {
+    expect(isPublicIpAddress(address)).toBe(true);
+  });
 
   it("rejects a hostname when any DNS answer is denied", async () => {
     await expect(
@@ -94,7 +91,10 @@ describe("Merchant Knowledge network policy", () => {
       { address: "8.8.4.4", family: 4 as const },
       { address: "1.1.1.1", family: 4 as const },
     ]);
-    const selected = await resolveAndValidateDestination("example.com", resolver);
+    const selected = await resolveAndValidateDestination(
+      "example.com",
+      resolver,
+    );
     expect(selected).toEqual({ address: "1.1.1.1", family: 4 });
     expect(resolver).toHaveBeenCalledWith("example.com");
 

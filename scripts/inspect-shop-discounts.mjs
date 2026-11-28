@@ -117,10 +117,7 @@ async function resolveShop(value) {
 
   const shop = await prisma.shop.findFirst({
     where: {
-      OR: [
-        { id: String(value).trim() },
-        { domain: normalized },
-      ],
+      OR: [{ id: String(value).trim() }, { domain: normalized }],
     },
     select: {
       id: true,
@@ -152,7 +149,9 @@ async function getShopifyAccessToken(shopDomain) {
   }
 
   if (!session.accessToken) {
-    throw new Error(`Offline Shopify session has no access token for ${shopDomain}`);
+    throw new Error(
+      `Offline Shopify session has no access token for ${shopDomain}`,
+    );
   }
 
   const scopes = new Set(
@@ -188,18 +187,21 @@ async function getShopifyAccessToken(shopDomain) {
     );
   }
 
-  const response = await fetch(`https://${shopDomain}/admin/oauth/access_token`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
+  const response = await fetch(
+    `https://${shopDomain}/admin/oauth/access_token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "refresh_token",
+        refresh_token: session.refreshToken,
+      }),
     },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: "refresh_token",
-      refresh_token: session.refreshToken,
-    }),
-  });
+  );
 
   const bodyText = await response.text();
 
@@ -222,7 +224,9 @@ async function getShopifyAccessToken(shopDomain) {
     typeof refreshed.refresh_token !== "string" ||
     typeof refreshed.refresh_token_expires_in !== "number"
   ) {
-    throw new Error("Shopify token refresh response is missing required token fields.");
+    throw new Error(
+      "Shopify token refresh response is missing required token fields.",
+    );
   }
 
   await prisma.session.update({
@@ -371,7 +375,9 @@ async function listDiscounts(shopDomain, accessToken) {
 
     const connection = body.data?.discountNodes;
     if (!connection) {
-      throw new Error("Shopify discount GraphQL returned no discountNodes connection.");
+      throw new Error(
+        "Shopify discount GraphQL returned no discountNodes connection.",
+      );
     }
 
     for (const node of connection.nodes ?? []) {
@@ -438,7 +444,9 @@ async function main() {
   filtered.sort((left, right) => {
     const title = left.title.localeCompare(right.title);
     if (title !== 0) return title;
-    return left.shopifyDiscountNodeId.localeCompare(right.shopifyDiscountNodeId);
+    return left.shopifyDiscountNodeId.localeCompare(
+      right.shopifyDiscountNodeId,
+    );
   });
 
   if (flag("json")) {
@@ -495,10 +503,18 @@ async function main() {
 
   console.log("");
   console.log("Notes:");
-  console.log("- summary is Shopify's human-readable summary where that discount type exposes one; app-owned discounts return a blank summary.");
-  console.log("- fixedSelectable=YES means the current Moda provider logic can use it as a fixed recovery offer.");
-  console.log("- app-owned automatic/code discounts are deliberately not fixed-selectable.");
-  console.log("- for a code discount, Moda only exposes the literal code when Shopify reports exactly one code.");
+  console.log(
+    "- summary is Shopify's human-readable summary where that discount type exposes one; app-owned discounts return a blank summary.",
+  );
+  console.log(
+    "- fixedSelectable=YES means the current Moda provider logic can use it as a fixed recovery offer.",
+  );
+  console.log(
+    "- app-owned automatic/code discounts are deliberately not fixed-selectable.",
+  );
+  console.log(
+    "- for a code discount, Moda only exposes the literal code when Shopify reports exactly one code.",
+  );
 }
 
 main()

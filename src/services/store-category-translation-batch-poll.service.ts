@@ -1,6 +1,9 @@
 import { Queue } from "bullmq";
 import { Prisma } from "@prisma/client";
-import { CommerceEnvironmentSchema, type CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
+import {
+  CommerceEnvironmentSchema,
+  type CommerceEnvironment,
+} from "@modainteract/moda-interact-shared/commerce/model";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import {
@@ -57,11 +60,17 @@ type PollTransaction = {
 };
 
 type PollDatabase = {
-  $transaction<T>(callback: (transaction: PollTransaction) => Promise<T>): Promise<T>;
+  $transaction<T>(
+    callback: (transaction: PollTransaction) => Promise<T>,
+  ): Promise<T>;
 };
 
 type PollQueue = Pick<Queue, "add">;
-type ProviderFactory = (options: { provider: string; model: string; apiKey: string }) => TranslationProvider;
+type ProviderFactory = (options: {
+  provider: string;
+  model: string;
+  apiKey: string;
+}) => TranslationProvider;
 
 const logger = createLogger({
   serviceName: "moda-merchant-communications-worker",
@@ -106,26 +115,39 @@ export class StoreCategoryTranslationBatchPollService {
   private readonly providerFactory: ProviderFactory;
   private readonly queue: PollQueue;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
-  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
+  private readonly credentialResolverFactory: () =>
+    | TranslationProviderCredentialResolver
+    | Promise<TranslationProviderCredentialResolver>;
 
-  constructor(options: {
-    database?: PollDatabase;
-    providerFactory?: ProviderFactory;
-    queue?: PollQueue;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-    credentialResolverFactory?: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
-  } = {}) {
+  constructor(
+    options: {
+      database?: PollDatabase;
+      providerFactory?: ProviderFactory;
+      queue?: PollQueue;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+      credentialResolverFactory?: () =>
+        | TranslationProviderCredentialResolver
+        | Promise<TranslationProviderCredentialResolver>;
+    } = {},
+  ) {
     this.database = options.database ?? prisma;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) =>
-      createOpenAITranslationProvider(providerOptions));
-    this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
-      connection: connectionRedis,
-    });
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
-    this.credentialResolverFactory = options.credentialResolverFactory ?? defaultCredentialResolver;
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.queue =
+      options.queue ??
+      new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
+        connection: connectionRedis,
+      });
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.credentialResolverFactory =
+      options.credentialResolverFactory ?? defaultCredentialResolver;
   }
 
-  async poll(input: StoreCategoryTranslationBatchPollJob): Promise<StoreCategoryTranslationBatchPollResult> {
+  async poll(
+    input: StoreCategoryTranslationBatchPollJob,
+  ): Promise<StoreCategoryTranslationBatchPollResult> {
     const batch = await this.loadBatch(input.translationBatchId);
     if (
       !batch ||
@@ -140,8 +162,12 @@ export class StoreCategoryTranslationBatchPollService {
 
     return pollTranslationProviderBatch({
       retrieve: async () => {
-        const environment = CommerceEnvironmentSchema.parse(batch.environment) as CommerceEnvironment;
-        const apiKey = await (await this.credentialResolverFactory()).resolve({
+        const environment = CommerceEnvironmentSchema.parse(
+          batch.environment,
+        ) as CommerceEnvironment;
+        const apiKey = await (
+          await this.credentialResolverFactory()
+        ).resolve({
           environment,
           provider: batch.provider,
         });
@@ -153,7 +179,10 @@ export class StoreCategoryTranslationBatchPollService {
         return provider.retrieveBatch(providerBatchId);
       },
       onReadFailure: async (error) => {
-        const schedule = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
+        const schedule = await this.rescheduleAfterReadFailure(
+          batch,
+          runtimeConfig,
+        );
         await this.enqueuePoll(
           batch.id,
           schedule.pollSequence,
@@ -164,10 +193,15 @@ export class StoreCategoryTranslationBatchPollService {
           batchId: batch.id,
           pollSequence: schedule.pollSequence,
           nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
-          errorMessage: error instanceof Error ? error.message : "unknown failure",
+          errorMessage:
+            error instanceof Error ? error.message : "unknown failure",
           error: error,
         });
-        return { status: "rescheduled", batchId: batch.id, pollSequence: schedule.pollSequence };
+        return {
+          status: "rescheduled",
+          batchId: batch.id,
+          pollSequence: schedule.pollSequence,
+        };
       },
       onNonterminal: async (providerBatch) => {
         const schedule = await this.advanceNonterminal(batch, runtimeConfig);
@@ -212,8 +246,10 @@ export class StoreCategoryTranslationBatchPollService {
             WHERE "id" = ${batch.id}
               AND "status" = 'SUBMITTED'
               AND "pollSequence" = ${batch.pollSequence}
-          `));
-        if (updated !== 1) return { status: "stale", batchId: batch.id } as const;
+          `),
+        );
+        if (updated !== 1)
+          return { status: "stale", batchId: batch.id } as const;
         logger.info("background.store_category_translation.batch_polled", {
           runId: batch.runId,
           categoryId: batch.categoryId,
@@ -238,7 +274,8 @@ export class StoreCategoryTranslationBatchPollService {
           providerBatch.failureCode,
           runtimeConfig,
         );
-        if (!terminalApplied) return { status: "stale", batchId: batch.id } as const;
+        if (!terminalApplied)
+          return { status: "stale", batchId: batch.id } as const;
         logger.warn("background.store_category_translation.batch_polled", {
           runId: batch.runId,
           categoryId: batch.categoryId,
@@ -278,7 +315,9 @@ export class StoreCategoryTranslationBatchPollService {
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<{ pollSequence: number; nextPollAt: Date | null }> {
     return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<Array<{ pollSequence: number; nextPollAt: Date | null }>>(Prisma.sql`
+      const rows = await transaction.$queryRaw<
+        Array<{ pollSequence: number; nextPollAt: Date | null }>
+      >(Prisma.sql`
         UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
@@ -300,7 +339,9 @@ export class StoreCategoryTranslationBatchPollService {
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<{ pollSequence: number; nextPollAt: Date | null }> {
     return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<Array<{ pollSequence: number; nextPollAt: Date | null }>>(Prisma.sql`
+      const rows = await transaction.$queryRaw<
+        Array<{ pollSequence: number; nextPollAt: Date | null }>
+      >(Prisma.sql`
         UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
@@ -339,7 +380,9 @@ export class StoreCategoryTranslationBatchPollService {
       `);
       if (claimed !== 1) return false;
 
-      const items = await transaction.$queryRaw<Array<{ translationItemId: string; retryCount: number }>>(Prisma.sql`
+      const items = await transaction.$queryRaw<
+        Array<{ translationItemId: string; retryCount: number }>
+      >(Prisma.sql`
         SELECT i."translationItemId", t."retryCount"
         FROM "commerce"."CommerceStoreCategoryTranslationBatchItem" i
         INNER JOIN "commerce"."CommerceStoreCategoryTranslationItem" t ON t."id" = i."translationItemId"
@@ -370,22 +413,34 @@ export class StoreCategoryTranslationBatchPollService {
     });
   }
 
-  private async enqueuePoll(batchId: string, pollSequence: number, delaySeconds: number): Promise<void> {
+  private async enqueuePoll(
+    batchId: string,
+    pollSequence: number,
+    delaySeconds: number,
+  ): Promise<void> {
     const job: StoreCategoryTranslationBatchPollJob = {
       schemaVersion: STORE_CATEGORY_TRANSLATION_SCHEMA_VERSION,
       translationBatchId: batchId,
       pollSequence,
     };
     try {
-      await this.queue.add(STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_POLL, job, {
-        jobId: createStoreCategoryTranslationBatchPollJobId(batchId, pollSequence),
-        delay: delaySeconds * 1000,
-      });
+      await this.queue.add(
+        STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_POLL,
+        job,
+        {
+          jobId: createStoreCategoryTranslationBatchPollJobId(
+            batchId,
+            pollSequence,
+          ),
+          delay: delaySeconds * 1000,
+        },
+      );
     } catch (error) {
       logger.warn("background.store_category_translation.poll_enqueue_failed", {
         batchId,
         pollSequence,
-        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        errorMessage:
+          error instanceof Error ? error.message : "unknown failure",
         error: error,
       });
     }
@@ -397,15 +452,23 @@ export class StoreCategoryTranslationBatchPollService {
       translationBatchId: batchId,
     };
     try {
-      await this.queue.add(STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_RESULTS, job, {
-        jobId: createStoreCategoryTranslationBatchResultsJobId(batchId),
-      });
+      await this.queue.add(
+        STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_RESULTS,
+        job,
+        {
+          jobId: createStoreCategoryTranslationBatchResultsJobId(batchId),
+        },
+      );
     } catch (error) {
-      logger.warn("background.store_category_translation.results_enqueue_failed", {
-        batchId,
-        errorMessage: error instanceof Error ? error.message : "unknown failure",
-        error: error,
-      });
+      logger.warn(
+        "background.store_category_translation.results_enqueue_failed",
+        {
+          batchId,
+          errorMessage:
+            error instanceof Error ? error.message : "unknown failure",
+          error: error,
+        },
+      );
     }
   }
 }

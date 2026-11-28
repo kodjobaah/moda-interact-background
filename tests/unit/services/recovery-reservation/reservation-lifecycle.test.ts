@@ -41,10 +41,20 @@ describe("recovery reservation lifecycle primitives", () => {
   });
 
   it("enforces reservation shop ownership using the caller error type", () => {
-    expect(() => assertRecoveryReservationShop({ shopId: "shop-1" }, "shop-1", createError)).not.toThrow();
-    expect(() => assertRecoveryReservationShop({ shopId: "shop-2" }, "shop-1", createError)).toThrow(
-      "Reservation belongs to another shop",
-    );
+    expect(() =>
+      assertRecoveryReservationShop(
+        { shopId: "shop-1" },
+        "shop-1",
+        createError,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertRecoveryReservationShop(
+        { shopId: "shop-2" },
+        "shop-1",
+        createError,
+      ),
+    ).toThrow("Reservation belongs to another shop");
   });
 
   it.each([
@@ -57,79 +67,98 @@ describe("recovery reservation lifecycle primitives", () => {
   });
 
   it("reactivates only RELEASED reservations and preserves replay status otherwise", () => {
-    expect(recoveryReservationTransitionDecision({
-      reservation: { status: UsageReservationStatus.RELEASED, quantity: 2 },
-      transition: "reactivate",
-      requestedQuantity: 2,
-      createError,
-    })).toEqual({ kind: "apply" });
+    expect(
+      recoveryReservationTransitionDecision({
+        reservation: { status: UsageReservationStatus.RELEASED, quantity: 2 },
+        transition: "reactivate",
+        requestedQuantity: 2,
+        createError,
+      }),
+    ).toEqual({ kind: "apply" });
 
-    expect(recoveryReservationTransitionDecision({
-      reservation: { status: UsageReservationStatus.COMMITTED, quantity: 2 },
-      transition: "reactivate",
-      requestedQuantity: 2,
-      createError,
-    })).toEqual({ kind: "replay", replayKind: "already-committed" });
+    expect(
+      recoveryReservationTransitionDecision({
+        reservation: { status: UsageReservationStatus.COMMITTED, quantity: 2 },
+        transition: "reactivate",
+        requestedQuantity: 2,
+        createError,
+      }),
+    ).toEqual({ kind: "replay", replayKind: "already-committed" });
   });
 
   it("requires matching quantity for reactivation, commit and release", () => {
     for (const transition of ["reactivate", "commit", "release"] as const) {
-      const status = transition === "reactivate"
-        ? UsageReservationStatus.RELEASED
-        : UsageReservationStatus.RESERVED;
-      expect(() => recoveryReservationTransitionDecision({
-        reservation: { status, quantity: 1 },
-        transition,
-        requestedQuantity: 2,
-        createError,
-      })).toThrow("Reservation quantity does not match the requested transition");
+      const status =
+        transition === "reactivate"
+          ? UsageReservationStatus.RELEASED
+          : UsageReservationStatus.RESERVED;
+      expect(() =>
+        recoveryReservationTransitionDecision({
+          reservation: { status, quantity: 1 },
+          transition,
+          requestedQuantity: 2,
+          createError,
+        }),
+      ).toThrow("Reservation quantity does not match the requested transition");
     }
   });
 
   it("commits only RESERVED reservations and replays terminal states", () => {
-    expect(recoveryReservationTransitionDecision({
-      reservation: { status: UsageReservationStatus.RESERVED, quantity: 1 },
-      transition: "commit",
-      requestedQuantity: 1,
-      createError,
-    })).toEqual({ kind: "apply" });
+    expect(
+      recoveryReservationTransitionDecision({
+        reservation: { status: UsageReservationStatus.RESERVED, quantity: 1 },
+        transition: "commit",
+        requestedQuantity: 1,
+        createError,
+      }),
+    ).toEqual({ kind: "apply" });
 
-    expect(recoveryReservationTransitionDecision({
-      reservation: { status: UsageReservationStatus.AMBIGUOUS, quantity: 1 },
-      transition: "commit",
-      requestedQuantity: 1,
-      createError,
-    })).toEqual({ kind: "replay", replayKind: "already-ambiguous" });
+    expect(
+      recoveryReservationTransitionDecision({
+        reservation: { status: UsageReservationStatus.AMBIGUOUS, quantity: 1 },
+        transition: "commit",
+        requestedQuantity: 1,
+        createError,
+      }),
+    ).toEqual({ kind: "replay", replayKind: "already-ambiguous" });
   });
 
   it("rejects release of COMMITTED reservations and replays other non-reserved states", () => {
-    expect(() => recoveryReservationTransitionDecision({
-      reservation: { status: UsageReservationStatus.COMMITTED, quantity: 1 },
-      transition: "release",
-      requestedQuantity: 1,
-      createError,
-    })).toThrow("Committed reservations cannot be released");
+    expect(() =>
+      recoveryReservationTransitionDecision({
+        reservation: { status: UsageReservationStatus.COMMITTED, quantity: 1 },
+        transition: "release",
+        requestedQuantity: 1,
+        createError,
+      }),
+    ).toThrow("Committed reservations cannot be released");
 
-    expect(recoveryReservationTransitionDecision({
-      reservation: { status: UsageReservationStatus.RELEASED, quantity: 1 },
-      transition: "release",
-      requestedQuantity: 1,
-      createError,
-    })).toEqual({ kind: "replay", replayKind: "already-released" });
+    expect(
+      recoveryReservationTransitionDecision({
+        reservation: { status: UsageReservationStatus.RELEASED, quantity: 1 },
+        transition: "release",
+        requestedQuantity: 1,
+        createError,
+      }),
+    ).toEqual({ kind: "replay", replayKind: "already-released" });
   });
 
   it("marks only RESERVED reservations ambiguous without rechecking requested quantity", () => {
-    expect(recoveryReservationTransitionDecision({
-      reservation: { status: UsageReservationStatus.RESERVED, quantity: 7 },
-      transition: "ambiguous",
-      createError,
-    })).toEqual({ kind: "apply" });
+    expect(
+      recoveryReservationTransitionDecision({
+        reservation: { status: UsageReservationStatus.RESERVED, quantity: 7 },
+        transition: "ambiguous",
+        createError,
+      }),
+    ).toEqual({ kind: "apply" });
 
-    expect(recoveryReservationTransitionDecision({
-      reservation: { status: UsageReservationStatus.RELEASED, quantity: 7 },
-      transition: "ambiguous",
-      createError,
-    })).toEqual({ kind: "replay", replayKind: "already-released" });
+    expect(
+      recoveryReservationTransitionDecision({
+        reservation: { status: UsageReservationStatus.RELEASED, quantity: 7 },
+        transition: "ambiguous",
+        createError,
+      }),
+    ).toEqual({ kind: "replay", replayKind: "already-released" });
   });
 
   it("classifies unique and retryable Prisma conflicts consistently", () => {
@@ -140,20 +169,27 @@ describe("recovery reservation lifecycle primitives", () => {
     expect(isRecoveryReservationUniqueConflict(serialization)).toBe(false);
     expect(isRecoveryReservationRetryableConflict(unique)).toBe(true);
     expect(isRecoveryReservationRetryableConflict(serialization)).toBe(true);
-    expect(isRecoveryReservationRetryableConflict(new RecoveryReservationConcurrencyConflict())).toBe(true);
+    expect(
+      isRecoveryReservationRetryableConflict(
+        new RecoveryReservationConcurrencyConflict(),
+      ),
+    ).toBe(true);
     expect(isRecoveryReservationRetryableConflict(new Error("no"))).toBe(false);
   });
 
   it("retries shared reservation concurrency conflicts and returns the winning result", async () => {
-    const operation = vi.fn()
+    const operation = vi
+      .fn()
       .mockRejectedValueOnce(new RecoveryReservationConcurrencyConflict())
       .mockResolvedValueOnce("reserved");
 
-    await expect(withRecoveryReservationRetry({
-      operation,
-      maxRetries: 3,
-      createRetryLimitError: createError,
-    })).resolves.toBe("reserved");
+    await expect(
+      withRecoveryReservationRetry({
+        operation,
+        maxRetries: 3,
+        createRetryLimitError: createError,
+      }),
+    ).resolves.toBe("reserved");
     expect(operation).toHaveBeenCalledTimes(2);
   });
 
@@ -161,11 +197,13 @@ describe("recovery reservation lifecycle primitives", () => {
     const conflict = prismaConflict("P2034");
     const operation = vi.fn().mockRejectedValue(conflict);
 
-    await expect(withRecoveryReservationRetry({
-      operation,
-      maxRetries: 2,
-      createRetryLimitError: createError,
-    })).rejects.toBe(conflict);
+    await expect(
+      withRecoveryReservationRetry({
+        operation,
+        maxRetries: 2,
+        createRetryLimitError: createError,
+      }),
+    ).rejects.toBe(conflict);
     expect(operation).toHaveBeenCalledTimes(2);
   });
 
@@ -173,19 +211,23 @@ describe("recovery reservation lifecycle primitives", () => {
     const failure = new Error("provider state invalid");
     const operation = vi.fn().mockRejectedValue(failure);
 
-    await expect(withRecoveryReservationRetry({
-      operation,
-      maxRetries: 3,
-      createRetryLimitError: createError,
-    })).rejects.toBe(failure);
+    await expect(
+      withRecoveryReservationRetry({
+        operation,
+        maxRetries: 3,
+        createRetryLimitError: createError,
+      }),
+    ).rejects.toBe(failure);
     expect(operation).toHaveBeenCalledTimes(1);
   });
 
   it("preserves the caller-specific retry-limit error when retries are disabled", async () => {
-    await expect(withRecoveryReservationRetry({
-      operation: vi.fn(),
-      maxRetries: 0,
-      createRetryLimitError: createError,
-    })).rejects.toThrow("Reservation retry limit exceeded");
+    await expect(
+      withRecoveryReservationRetry({
+        operation: vi.fn(),
+        maxRetries: 0,
+        createRetryLimitError: createError,
+      }),
+    ).rejects.toThrow("Reservation retry limit exceeded");
   });
 });

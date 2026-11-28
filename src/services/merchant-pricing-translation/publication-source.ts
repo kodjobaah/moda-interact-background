@@ -91,7 +91,9 @@ export function canonicalMerchantPricingPublicationSource(
     seen.add(normalizedContentKey);
     highlights.push({ contentKey, title, description });
   }
-  highlights.sort((left, right) => left.contentKey.localeCompare(right.contentKey));
+  highlights.sort((left, right) =>
+    left.contentKey.localeCompare(right.contentKey),
+  );
 
   return {
     schemaVersion: MERCHANT_PRICING_PUBLICATION_SOURCE_SCHEMA_VERSION,
@@ -114,7 +116,8 @@ export function currentMerchantPricingPublicationSource(input: {
 }): MerchantPricingTranslationSourceSnapshot | null {
   if (
     input.translations.length !== 1 ||
-    input.translations[0]?.locale !== MERCHANT_PRICING_PUBLICATION_SOURCE_LANGUAGE_TAG
+    input.translations[0]?.locale !==
+      MERCHANT_PRICING_PUBLICATION_SOURCE_LANGUAGE_TAG
   ) {
     return null;
   }

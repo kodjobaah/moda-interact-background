@@ -37,7 +37,11 @@ const operations: WooRecurringOperation[] = [
   },
 ];
 
-function receipt(topic: WooSubscriptionEvidence["topic"], name = "Growth", price = 1999): WooSubscriptionEvidence {
+function receipt(
+  topic: WooSubscriptionEvidence["topic"],
+  name = "Growth",
+  price = 1999,
+): WooSubscriptionEvidence {
   return {
     topic,
     contractId: "contract-a",
@@ -61,8 +65,18 @@ describe("operationForReceipt", () => {
   });
 
   it("links updated only to its uniquely matching switch and canceled only to cancel", () => {
-    expect(operationForReceipt(receipt("saas_billing_contract.updated", "Scale", 2999), operations)).toBe("switch-a");
-    expect(operationForReceipt(receipt("saas_billing_contract.canceled"), operations)).toBe("cancel-a");
+    expect(
+      operationForReceipt(
+        receipt("saas_billing_contract.updated", "Scale", 2999),
+        operations,
+      ),
+    ).toBe("switch-a");
+    expect(
+      operationForReceipt(
+        receipt("saas_billing_contract.canceled"),
+        operations,
+      ),
+    ).toBe("cancel-a");
   });
 
   it.each([
@@ -74,9 +88,11 @@ describe("operationForReceipt", () => {
   });
 
   it("fails closed when multiple create operations match one activation snapshot", () => {
-    expect(operationForReceipt(receipt("saas_billing_contract.activated"), [
-      ...operations,
-      { ...operations[0]!, id: "create-b" },
-    ])).toBeNull();
+    expect(
+      operationForReceipt(receipt("saas_billing_contract.activated"), [
+        ...operations,
+        { ...operations[0]!, id: "create-b" },
+      ]),
+    ).toBeNull();
   });
 });

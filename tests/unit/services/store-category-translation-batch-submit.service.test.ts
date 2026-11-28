@@ -23,19 +23,24 @@ const request = {
   sourceText: "Shoes",
 };
 
-function createDatabase(options: {
-  claim?: Record<string, unknown>[];
-  requests?: Record<string, unknown>[];
-  executeResults?: number[];
-} = {}) {
+function createDatabase(
+  options: {
+    claim?: Record<string, unknown>[];
+    requests?: Record<string, unknown>[];
+    executeResults?: number[];
+  } = {},
+) {
   const queryResults = [options.claim ?? [], options.requests ?? []];
   const executeResults = [...(options.executeResults ?? [])];
   const queryRaw = vi.fn(async (_query: unknown) => queryResults.shift() ?? []);
   const executeRaw = vi.fn(async (_query: any) => executeResults.shift() ?? 1);
-  const transaction = vi.fn(async (callback: (transaction: unknown) => Promise<unknown>) => callback({
-    $queryRaw: queryRaw,
-    $executeRaw: executeRaw,
-  }));
+  const transaction = vi.fn(
+    async (callback: (transaction: unknown) => Promise<unknown>) =>
+      callback({
+        $queryRaw: queryRaw,
+        $executeRaw: executeRaw,
+      }),
+  );
   return {
     database: { $transaction: transaction },
     queryRaw,
@@ -66,16 +71,21 @@ function createProvider(overrides: Record<string, unknown> = {}) {
 }
 
 function runtimeConfig() {
-  return { current: vi.fn(() => ({
-    translationInitialPollSeconds: 420,
-    translationSubmitRetrySeconds: 660,
-    translationSubmitMaxAttempts: 3,
-  })) } as any;
+  return {
+    current: vi.fn(() => ({
+      translationInitialPollSeconds: 420,
+      translationSubmitRetrySeconds: 660,
+      translationSubmitMaxAttempts: 3,
+    })),
+  } as any;
 }
 
 describe("StoreCategoryTranslationBatchSubmitService", () => {
   it("resolves the environment credential and submits through the shared provider lifecycle", async () => {
-    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    const database = createDatabase({
+      claim: [claimedBatch],
+      requests: [request],
+    });
     const provider = createProvider();
     const providerFactory = vi.fn(() => provider);
     const resolve = vi.fn(async () => "api-key");
@@ -83,18 +93,23 @@ describe("StoreCategoryTranslationBatchSubmitService", () => {
     const service = new StoreCategoryTranslationBatchSubmitService({
       database: database.database,
       providerFactory,
-      credentialResolverFactory: () => ({ resolve } as any),
+      credentialResolverFactory: () => ({ resolve }) as any,
       queue: { add },
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toEqual({
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).resolves.toEqual({
       status: "claimed",
       batchId: "batch-1",
       providerBatchId: "provider-batch-1",
     });
 
-    expect(resolve).toHaveBeenCalledWith({ environment: "TEST", provider: "openai" });
+    expect(resolve).toHaveBeenCalledWith({
+      environment: "TEST",
+      provider: "openai",
+    });
     expect(providerFactory).toHaveBeenCalledWith({
       provider: "openai",
       model: "model-1",
@@ -104,25 +119,36 @@ describe("StoreCategoryTranslationBatchSubmitService", () => {
     expect(provider.createBatch).toHaveBeenCalledWith("batch-1", "file-1");
     expect(add).toHaveBeenCalledWith(
       "store-category-translation-batch-poll",
-      expect.objectContaining({ translationBatchId: "batch-1", pollSequence: 1 }),
+      expect.objectContaining({
+        translationBatchId: "batch-1",
+        pollSequence: 1,
+      }),
       expect.objectContaining({ delay: 420_000 }),
     );
   });
 
   it("returns preparation failures to READY without calling provider create", async () => {
-    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    const database = createDatabase({
+      claim: [claimedBatch],
+      requests: [request],
+    });
     const provider = createProvider({
-      prepareBatchInput: vi.fn(async () => { throw new Error("upload unavailable"); }),
+      prepareBatchInput: vi.fn(async () => {
+        throw new Error("upload unavailable");
+      }),
     });
     const service = new StoreCategoryTranslationBatchSubmitService({
       database: database.database,
       providerFactory: () => provider,
-      credentialResolverFactory: () => ({ resolve: vi.fn(async () => "api-key") } as any),
+      credentialResolverFactory: () =>
+        ({ resolve: vi.fn(async () => "api-key") }) as any,
       queue: { add: vi.fn(async () => undefined) },
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toEqual({
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).resolves.toEqual({
       status: "skipped",
       batchId: "batch-1",
     });
@@ -137,19 +163,26 @@ describe("StoreCategoryTranslationBatchSubmitService", () => {
       requests: [],
     });
     const provider = createProvider({
-      createBatch: vi.fn(async () => { throw new Error("timeout"); }),
+      createBatch: vi.fn(async () => {
+        throw new Error("timeout");
+      }),
     });
     const service = new StoreCategoryTranslationBatchSubmitService({
       database: database.database,
       providerFactory: () => provider,
-      credentialResolverFactory: () => ({ resolve: vi.fn(async () => "api-key") } as any),
+      credentialResolverFactory: () =>
+        ({ resolve: vi.fn(async () => "api-key") }) as any,
       queue: { add: vi.fn(async () => undefined) },
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).rejects.toThrow("timeout");
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).rejects.toThrow("timeout");
     expect(database.executeRaw).toHaveBeenCalledTimes(1);
-    expect(database.executeRaw.mock.calls[0]?.[0].values).toContain("SUBMISSION_UNKNOWN");
+    expect(database.executeRaw.mock.calls[0]?.[0].values).toContain(
+      "SUBMISSION_UNKNOWN",
+    );
   });
 
   it("treats credential resolution failure as a terminal non-created submission", async () => {
@@ -157,14 +190,19 @@ describe("StoreCategoryTranslationBatchSubmitService", () => {
     const service = new StoreCategoryTranslationBatchSubmitService({
       database: database.database,
       providerFactory: vi.fn(),
-      credentialResolverFactory: () => ({
-        resolve: vi.fn(async () => { throw new Error("credential unavailable"); }),
-      } as any),
+      credentialResolverFactory: () =>
+        ({
+          resolve: vi.fn(async () => {
+            throw new Error("credential unavailable");
+          }),
+        }) as any,
       queue: { add: vi.fn(async () => undefined) },
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toEqual({
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).resolves.toEqual({
       status: "skipped",
       batchId: "batch-1",
     });

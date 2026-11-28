@@ -3,7 +3,14 @@ import { describe, expect, it, vi } from "vitest";
 import { TranslationBatchAssemblyService } from "../../../src/services/translation-batch-assembly.service.js";
 
 vi.mock("../../../src/lib/db.js", () => ({
-  default: { commerceTranslationModelConfiguration: { findFirst: vi.fn(async () => ({ provider: "openai", providerModelId: "test-model" })) } },
+  default: {
+    commerceTranslationModelConfiguration: {
+      findFirst: vi.fn(async () => ({
+        provider: "openai",
+        providerModelId: "test-model",
+      })),
+    },
+  },
 }));
 
 function runtimeConfig(translationBatchMaxRequests = 100) {
@@ -65,7 +72,9 @@ describe("TranslationBatchAssemblyService", () => {
     expect(add).toHaveBeenCalledWith(
       "translation-batch-submit",
       expect.objectContaining({ schemaVersion: 1 }),
-      expect.objectContaining({ jobId: expect.stringContaining("translation-batch-submit-") }),
+      expect.objectContaining({
+        jobId: expect.stringContaining("translation-batch-submit-"),
+      }),
     );
   });
 
@@ -105,7 +114,11 @@ describe("TranslationBatchAssemblyService", () => {
         schemaVersion: 1,
         translationId: "translation-1",
       }),
-    ).resolves.toEqual({ batchId: null, translationIds: [], submitJobId: null });
+    ).resolves.toEqual({
+      batchId: null,
+      translationIds: [],
+      submitJobId: null,
+    });
     expect(database.$executeRaw).not.toHaveBeenCalled();
     expect(add).not.toHaveBeenCalled();
   });

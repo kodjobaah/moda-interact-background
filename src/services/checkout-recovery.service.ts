@@ -59,18 +59,23 @@ export class CheckoutRecoveryService {
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
   ) {
-    this.finalizationService = new RecoveryOutreachFinalizationService(this.billingService);
-    this.followUpProcessorService = new RecoveryOutreachFollowUpProcessorService(
+    this.finalizationService = new RecoveryOutreachFinalizationService(
       this.billingService,
-      this.finalizationService,
     );
+    this.followUpProcessorService =
+      new RecoveryOutreachFollowUpProcessorService(
+        this.billingService,
+        this.finalizationService,
+      );
     this.initiationService = new RecoveryInitiationService(
       this.billingService,
       this.finalizationService,
       {
-        upsertRecovery: (event, generation) => this.upsertRecovery(event, generation),
+        upsertRecovery: (event, generation) =>
+          this.upsertRecovery(event, generation),
         resolveRecipient: (event) => this.resolveRecipient(event),
-        markRecoveryCapacityBlocked: (recoveryId) => this.markRecoveryCapacityBlocked(recoveryId),
+        markRecoveryCapacityBlocked: (recoveryId) =>
+          this.markRecoveryCapacityBlocked(recoveryId),
       },
     );
     this.materializationService = new RecoveryMaterializationService({
@@ -82,10 +87,18 @@ export class CheckoutRecoveryService {
       recipientResolver: recoveryRecipientResolverService,
       continueInitialOutreach: (input) => this.continueInitialOutreach(input),
       initiate: (seed, generation, recipient, resolvedCustomerId) =>
-        this.handleCheckoutCreated(seed, generation, recipient, undefined, undefined, resolvedCustomerId),
+        this.handleCheckoutCreated(
+          seed,
+          generation,
+          recipient,
+          undefined,
+          undefined,
+          resolvedCustomerId,
+        ),
       noticeMissingRecipient: (shopId, checkoutToken, seed) =>
         recoveryConsentAdmissionService.notifyMissingRecipient({
-          shopId, checkoutToken,
+          shopId,
+          checkoutToken,
           ...(seed ? { noticeContext: noticeContextFromCheckout(seed) } : {}),
         }),
     });
@@ -101,15 +114,22 @@ export class CheckoutRecoveryService {
       prisma,
       pendingRecoveryCandidateService,
     );
-    this.capacityResumeProcessorService = new RecoveryCapacityResumeProcessorService(
-      prisma,
-      pendingRecoveryCandidateService,
-      shopExecutionEligibilityService,
-      abandonedCheckoutLookupService,
-      this.snapshotBuilderService,
-      (seed, generation, recipient, wakeupTrigger, admissionGate) =>
-        this.handleCheckoutCreated(seed, generation, recipient, wakeupTrigger, admissionGate),
-    );
+    this.capacityResumeProcessorService =
+      new RecoveryCapacityResumeProcessorService(
+        prisma,
+        pendingRecoveryCandidateService,
+        shopExecutionEligibilityService,
+        abandonedCheckoutLookupService,
+        this.snapshotBuilderService,
+        (seed, generation, recipient, wakeupTrigger, admissionGate) =>
+          this.handleCheckoutCreated(
+            seed,
+            generation,
+            recipient,
+            wakeupTrigger,
+            admissionGate,
+          ),
+      );
     this.recoveryAgentContextService = new RecoveryAgentContextService(
       prisma,
       conversationService,
@@ -129,7 +149,10 @@ export class CheckoutRecoveryService {
   }
 
   async recordExternalActivity(recoveryId: string, activityAt: Date) {
-    return this.checkoutEventOrchestrator.recordExternalActivity(recoveryId, activityAt);
+    return this.checkoutEventOrchestrator.recordExternalActivity(
+      recoveryId,
+      activityAt,
+    );
   }
 
   async handleCheckoutUpdatedContract(
@@ -207,10 +230,18 @@ export class CheckoutRecoveryService {
     );
   }
 
-  async continueInitialOutreach(input: { shopId: string; recoveryId: string }): Promise<InitialOutreachProgress> {
-    const progress = await this.initiationService.continueInitialOutreach(input);
+  async continueInitialOutreach(input: {
+    shopId: string;
+    recoveryId: string;
+  }): Promise<InitialOutreachProgress> {
+    const progress =
+      await this.initiationService.continueInitialOutreach(input);
     if (progress.kind === "held") {
-      throw new InitialOutreachHeldError(progress.recoveryId, progress.reason, progress.creditReason);
+      throw new InitialOutreachHeldError(
+        progress.recoveryId,
+        progress.reason,
+        progress.creditReason,
+      );
     }
     return progress;
   }
@@ -219,20 +250,38 @@ export class CheckoutRecoveryService {
     return this.followUpProcessorService.process(recoveryId);
   }
 
-  async markRecoveryCapacityBlocked(recoveryId: string, blockedAt = new Date()) {
-    return this.initiationService.markRecoveryCapacityBlocked(recoveryId, blockedAt);
+  async markRecoveryCapacityBlocked(
+    recoveryId: string,
+    blockedAt = new Date(),
+  ) {
+    return this.initiationService.markRecoveryCapacityBlocked(
+      recoveryId,
+      blockedAt,
+    );
   }
 
-  async resumeCapacityBlockedRecovery(recoveryId: string, wakeupTrigger?: string) {
-    return this.capacityResumeProcessorService.resume(recoveryId, wakeupTrigger);
+  async resumeCapacityBlockedRecovery(
+    recoveryId: string,
+    wakeupTrigger?: string,
+  ) {
+    return this.capacityResumeProcessorService.resume(
+      recoveryId,
+      wakeupTrigger,
+    );
   }
 
-  async getAgentContext(input: RecoveryAgentContextInput): Promise<RecoveryAgentContext> {
+  async getAgentContext(
+    input: RecoveryAgentContextInput,
+  ): Promise<RecoveryAgentContext> {
     return this.recoveryAgentContextService.getAgentContext(input);
   }
 
-  async getAgentContextForStandaloneConversation(input: RecoveryAgentContextInput): Promise<RecoveryAgentContext> {
-    return this.recoveryAgentContextService.getAgentContextForStandaloneConversation(input);
+  async getAgentContextForStandaloneConversation(
+    input: RecoveryAgentContextInput,
+  ): Promise<RecoveryAgentContext> {
+    return this.recoveryAgentContextService.getAgentContextForStandaloneConversation(
+      input,
+    );
   }
 }
 

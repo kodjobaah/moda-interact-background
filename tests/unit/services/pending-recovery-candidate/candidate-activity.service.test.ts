@@ -29,11 +29,13 @@ function createHarness(input?: { state?: string; jobExists?: boolean }) {
   };
   const resolved = { jobId: "job-1", candidate: baseCandidate };
   const resolveCandidate = vi.fn(async () => resolved);
-  const withCheckoutLock = vi.fn(async (_shopId, _checkoutToken, callback) => callback());
+  const withCheckoutLock = vi.fn(async (_shopId, _checkoutToken, callback) =>
+    callback(),
+  );
   const cancelCandidate = vi.fn(async () => ({ removed: true as const }));
   const resolveDelayMinutes = vi.fn(async () => 45);
   const getQueue = vi.fn(() => ({
-    getJob: vi.fn(async () => input?.jobExists === false ? null : job),
+    getJob: vi.fn(async () => (input?.jobExists === false ? null : job)),
   }));
   const candidateIndexStore = {
     upsert: vi.fn(async () => undefined),
@@ -104,20 +106,33 @@ describe("PendingRecoveryCandidateActivityService", () => {
     expect(harness.resolveDelayMinutes).toHaveBeenCalledWith("shop-1");
     expect(harness.job.updateData).toHaveBeenCalledTimes(1);
     expect(harness.job.changeDelay).toHaveBeenCalledWith(45 * 60_000);
-    expect(harness.candidateIndexStore.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      jobId: "job-1",
-      delayMinutes: 45,
-      dueAtMs: Date.parse("2026-08-28T01:45:00.000Z"),
-      shouldIndexShop: true,
-    }));
+    expect(harness.candidateIndexStore.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobId: "job-1",
+        delayMinutes: 45,
+        dueAtMs: Date.parse("2026-08-28T01:45:00.000Z"),
+        shouldIndexShop: true,
+      }),
+    );
   });
 
   it("resets Shopify visibility attempts only when activity advances", async () => {
     const harness = createHarness();
-    const source = { ...baseCandidate, shopifyVerification:{firstAttemptAtMs:100,deferrals:3} };
-    harness.resolveCandidate.mockResolvedValue({jobId:"job-1",candidate:source});
-    await harness.service.refresh({shopId:"shop-1",checkoutToken:"checkout-1",cartToken:"cart-1",
-      activityAt:"2026-08-28T01:00:00.000Z",isEmpty:false});
+    const source = {
+      ...baseCandidate,
+      shopifyVerification: { firstAttemptAtMs: 100, deferrals: 3 },
+    };
+    harness.resolveCandidate.mockResolvedValue({
+      jobId: "job-1",
+      candidate: source,
+    });
+    await harness.service.refresh({
+      shopId: "shop-1",
+      checkoutToken: "checkout-1",
+      cartToken: "cart-1",
+      activityAt: "2026-08-28T01:00:00.000Z",
+      isEmpty: false,
+    });
     const updated = harness.job.updateData.mock.calls[0]?.[0];
     expect(updated?.shopifyVerification).toBeUndefined();
   });
@@ -144,109 +159,139 @@ describe("PendingRecoveryCandidateActivityService", () => {
         lastActivityAt: "2026-08-28T01:00:00.000Z",
       },
     });
-    expect(harness.candidateIndexStore.removeCartAlias).toHaveBeenCalledWith("shop-1", "cart-1");
-    expect(harness.candidateIndexStore.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      candidate: expect.objectContaining({ cartToken: "cart-2" }),
-      jobId: "job-1",
-    }));
+    expect(harness.candidateIndexStore.removeCartAlias).toHaveBeenCalledWith(
+      "shop-1",
+      "cart-1",
+    );
+    expect(harness.candidateIndexStore.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidate: expect.objectContaining({ cartToken: "cart-2" }),
+        jobId: "job-1",
+      }),
+    );
   });
 
   it("returns stale before reading or mutating the queue", async () => {
     const harness = createHarness();
 
-    await expect(harness.service.refresh({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-      cartToken: null,
-      activityAt: "2026-08-27T23:59:00.000Z",
-      isEmpty: true,
-    })).resolves.toMatchObject({ outcome: "stale", jobId: "job-1" });
+    await expect(
+      harness.service.refresh({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+        cartToken: null,
+        activityAt: "2026-08-27T23:59:00.000Z",
+        isEmpty: true,
+      }),
+    ).resolves.toMatchObject({ outcome: "stale", jobId: "job-1" });
 
     expect(harness.getQueue).not.toHaveBeenCalled();
     expect(harness.cancelCandidate).not.toHaveBeenCalled();
     expect(harness.resolveDelayMinutes).not.toHaveBeenCalled();
   });
 
-  it.each([
-    "2026-08-27T23:59:00.000Z",
-    "2026-08-28T00:00:00.000Z",
-  ])("enriches missing lookup hints for stale/equal activity without rescheduling", async (activityAt) => {
-    const harness = createHarness();
-    const tokenOnlyCandidate = {
-      ...baseCandidate,
-      cartToken: null,
-      checkoutCreatedAt: null,
-      abandonedCheckoutUrl: null,
-    };
-    harness.resolveCandidate.mockResolvedValue({ jobId: "job-1", candidate: tokenOnlyCandidate });
+  it.each(["2026-08-27T23:59:00.000Z", "2026-08-28T00:00:00.000Z"])(
+    "enriches missing lookup hints for stale/equal activity without rescheduling",
+    async (activityAt) => {
+      const harness = createHarness();
+      const tokenOnlyCandidate = {
+        ...baseCandidate,
+        cartToken: null,
+        checkoutCreatedAt: null,
+        abandonedCheckoutUrl: null,
+      };
+      harness.resolveCandidate.mockResolvedValue({
+        jobId: "job-1",
+        candidate: tokenOnlyCandidate,
+      });
 
-    const result = await harness.service.refresh({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-      cartToken: null,
-      checkoutCartToken: "cart-2",
-      checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
-      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
-      activityAt,
-      isEmpty: false,
-    });
-
-    expect(result).toMatchObject({
-      outcome: "stale",
-      jobId: "job-1",
-      candidate: {
-        cartToken: "cart-2",
+      const result = await harness.service.refresh({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+        cartToken: null,
+        checkoutCartToken: "cart-2",
         checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
         abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
-        lastActivityAt: baseCandidate.lastActivityAt,
-      },
-    });
-    expect(harness.job.updateData).toHaveBeenCalledWith(expect.objectContaining({
-      checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
-      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
-    }));
-    expect(harness.job.changeDelay).not.toHaveBeenCalled();
-    expect(harness.resolveDelayMinutes).toHaveBeenCalledOnce();
-    expect(harness.candidateIndexStore.addCartAlias).toHaveBeenCalledWith(
-      "shop-1", "cart-2", "job-1", 45,
-    );
-    expect(harness.candidateIndexStore.upsert).not.toHaveBeenCalled();
-  });
+        activityAt,
+        isEmpty: false,
+      });
 
-  it.each([
-    "2026-08-27T23:59:00.000Z",
-    "2026-08-28T00:00:00.000Z",
-  ])("preserves populated lookup hints for stale/equal conflicting activity (%s)", async (activityAt) => {
-    const harness = createHarness();
-    const populatedCandidate = {
-      ...baseCandidate,
-      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=current",
-    };
-    harness.resolveCandidate.mockResolvedValue({ jobId: "job-1", candidate: populatedCandidate });
+      expect(result).toMatchObject({
+        outcome: "stale",
+        jobId: "job-1",
+        candidate: {
+          cartToken: "cart-2",
+          checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
+          abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+          lastActivityAt: baseCandidate.lastActivityAt,
+        },
+      });
+      expect(harness.job.updateData).toHaveBeenCalledWith(
+        expect.objectContaining({
+          checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
+          abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+        }),
+      );
+      expect(harness.job.changeDelay).not.toHaveBeenCalled();
+      expect(harness.resolveDelayMinutes).toHaveBeenCalledOnce();
+      expect(harness.candidateIndexStore.addCartAlias).toHaveBeenCalledWith(
+        "shop-1",
+        "cart-2",
+        "job-1",
+        45,
+      );
+      expect(harness.candidateIndexStore.upsert).not.toHaveBeenCalled();
+    },
+  );
 
-    const result = await harness.service.refresh({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-      cartToken: null,
-      checkoutCartToken: "cart-conflicting",
-      checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
-      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=older",
-      activityAt,
-      isEmpty: false,
-    });
+  it.each(["2026-08-27T23:59:00.000Z", "2026-08-28T00:00:00.000Z"])(
+    "preserves populated lookup hints for stale/equal conflicting activity (%s)",
+    async (activityAt) => {
+      const harness = createHarness();
+      const populatedCandidate = {
+        ...baseCandidate,
+        abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=current",
+      };
+      harness.resolveCandidate.mockResolvedValue({
+        jobId: "job-1",
+        candidate: populatedCandidate,
+      });
 
-    expect(result).toEqual({ outcome: "stale", jobId: "job-1", candidate: populatedCandidate });
-    expect(harness.job.updateData).not.toHaveBeenCalled();
-    expect(harness.job.changeDelay).not.toHaveBeenCalled();
-    expect(harness.candidateIndexStore.addCartAlias).not.toHaveBeenCalled();
-    expect(harness.candidateIndexStore.removeCartAlias).not.toHaveBeenCalled();
-    expect(harness.candidateIndexStore.upsert).not.toHaveBeenCalled();
-  });
+      const result = await harness.service.refresh({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+        cartToken: null,
+        checkoutCartToken: "cart-conflicting",
+        checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
+        abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=older",
+        activityAt,
+        isEmpty: false,
+      });
+
+      expect(result).toEqual({
+        outcome: "stale",
+        jobId: "job-1",
+        candidate: populatedCandidate,
+      });
+      expect(harness.job.updateData).not.toHaveBeenCalled();
+      expect(harness.job.changeDelay).not.toHaveBeenCalled();
+      expect(harness.candidateIndexStore.addCartAlias).not.toHaveBeenCalled();
+      expect(
+        harness.candidateIndexStore.removeCartAlias,
+      ).not.toHaveBeenCalled();
+      expect(harness.candidateIndexStore.upsert).not.toHaveBeenCalled();
+    },
+  );
 
   it("enriches a missing stale hint without replacing other populated hints", async () => {
     const harness = createHarness();
-    const candidateWithMissingUrl = { ...baseCandidate, abandonedCheckoutUrl: null };
-    harness.resolveCandidate.mockResolvedValue({ jobId: "job-1", candidate: candidateWithMissingUrl });
+    const candidateWithMissingUrl = {
+      ...baseCandidate,
+      abandonedCheckoutUrl: null,
+    };
+    harness.resolveCandidate.mockResolvedValue({
+      jobId: "job-1",
+      candidate: candidateWithMissingUrl,
+    });
 
     const result = await harness.service.refresh({
       shopId: "shop-1",
@@ -268,12 +313,14 @@ describe("PendingRecoveryCandidateActivityService", () => {
       },
     });
     expect(harness.job.updateData).toHaveBeenCalledOnce();
-    expect(harness.job.updateData).toHaveBeenCalledWith(expect.objectContaining({
-      cartToken: "cart-1",
-      checkoutCreatedAt: baseCandidate.checkoutCreatedAt,
-      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
-      lastActivityAt: baseCandidate.lastActivityAt,
-    }));
+    expect(harness.job.updateData).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cartToken: "cart-1",
+        checkoutCreatedAt: baseCandidate.checkoutCreatedAt,
+        abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+        lastActivityAt: baseCandidate.lastActivityAt,
+      }),
+    );
     expect(harness.job.changeDelay).not.toHaveBeenCalled();
     expect(harness.candidateIndexStore.addCartAlias).not.toHaveBeenCalled();
     expect(harness.candidateIndexStore.removeCartAlias).not.toHaveBeenCalled();
@@ -285,13 +332,15 @@ describe("PendingRecoveryCandidateActivityService", () => {
     async (state) => {
       const harness = createHarness({ state });
 
-      await expect(harness.service.refresh({
-        shopId: "shop-1",
-        checkoutToken: null,
-        cartToken: "cart-1",
-        activityAt: "2026-08-28T00:01:00.000Z",
-        isEmpty: true,
-      })).resolves.toEqual({ outcome: "cancelled", jobId: "job-1" });
+      await expect(
+        harness.service.refresh({
+          shopId: "shop-1",
+          checkoutToken: null,
+          cartToken: "cart-1",
+          activityAt: "2026-08-28T00:01:00.000Z",
+          isEmpty: true,
+        }),
+      ).resolves.toEqual({ outcome: "cancelled", jobId: "job-1" });
 
       expect(harness.cancelCandidate).toHaveBeenCalledWith({
         jobId: "job-1",
@@ -306,13 +355,15 @@ describe("PendingRecoveryCandidateActivityService", () => {
     async (state) => {
       const harness = createHarness({ state });
 
-      await expect(harness.service.refresh({
-        shopId: "shop-1",
-        checkoutToken: "checkout-1",
-        cartToken: null,
-        activityAt: "2026-08-28T01:00:00.000Z",
-        isEmpty: false,
-      })).resolves.toEqual({
+      await expect(
+        harness.service.refresh({
+          shopId: "shop-1",
+          checkoutToken: "checkout-1",
+          cartToken: null,
+          activityAt: "2026-08-28T01:00:00.000Z",
+          isEmpty: false,
+        }),
+      ).resolves.toEqual({
         outcome: "not-reschedulable",
         state,
         jobId: "job-1",
@@ -329,13 +380,15 @@ describe("PendingRecoveryCandidateActivityService", () => {
       .mockResolvedValueOnce({ jobId: "job-1", candidate: baseCandidate })
       .mockResolvedValueOnce(null);
 
-    await expect(harness.service.refresh({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-      cartToken: null,
-      activityAt: "2026-08-28T01:00:00.000Z",
-      isEmpty: false,
-    })).resolves.toEqual({ outcome: "not-found" });
+    await expect(
+      harness.service.refresh({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+        cartToken: null,
+        activityAt: "2026-08-28T01:00:00.000Z",
+        isEmpty: false,
+      }),
+    ).resolves.toEqual({ outcome: "not-found" });
 
     expect(harness.getQueue).not.toHaveBeenCalled();
   });
@@ -343,13 +396,15 @@ describe("PendingRecoveryCandidateActivityService", () => {
   it("returns not-found when the indexed BullMQ job has disappeared", async () => {
     const harness = createHarness({ jobExists: false });
 
-    await expect(harness.service.refresh({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-      cartToken: null,
-      activityAt: "2026-08-28T01:00:00.000Z",
-      isEmpty: false,
-    })).resolves.toEqual({ outcome: "not-found" });
+    await expect(
+      harness.service.refresh({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+        cartToken: null,
+        activityAt: "2026-08-28T01:00:00.000Z",
+        isEmpty: false,
+      }),
+    ).resolves.toEqual({ outcome: "not-found" });
 
     expect(harness.candidateIndexStore.upsert).not.toHaveBeenCalled();
   });
@@ -357,13 +412,15 @@ describe("PendingRecoveryCandidateActivityService", () => {
   it("rejects a cart alias that no longer matches the resolved candidate", async () => {
     const harness = createHarness();
 
-    await expect(harness.service.refresh({
-      shopId: "shop-1",
-      checkoutToken: null,
-      cartToken: "different-cart",
-      activityAt: "2026-08-28T01:00:00.000Z",
-      isEmpty: false,
-    })).resolves.toEqual({ outcome: "not-found" });
+    await expect(
+      harness.service.refresh({
+        shopId: "shop-1",
+        checkoutToken: null,
+        cartToken: "different-cart",
+        activityAt: "2026-08-28T01:00:00.000Z",
+        isEmpty: false,
+      }),
+    ).resolves.toEqual({ outcome: "not-found" });
 
     expect(harness.getQueue).not.toHaveBeenCalled();
   });

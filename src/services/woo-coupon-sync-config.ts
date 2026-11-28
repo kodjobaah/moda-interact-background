@@ -35,14 +35,21 @@ const variables: Record<keyof WooCouponSyncConfig, string> = {
   maxScanDurationMs: "WOO_COUPON_SYNC_MAX_SCAN_DURATION_MS",
 };
 
-export function loadWooCouponSyncConfig(environment: NodeJS.ProcessEnv): WooCouponSyncConfig {
+export function loadWooCouponSyncConfig(
+  environment: NodeJS.ProcessEnv,
+): WooCouponSyncConfig {
   const values = {} as Record<keyof WooCouponSyncConfig, number>;
-  for (const key of Object.keys(variables) as Array<keyof WooCouponSyncConfig>) {
+  for (const key of Object.keys(variables) as Array<
+    keyof WooCouponSyncConfig
+  >) {
     const [fallback, min, max] = limits[key];
     const raw = environment[variables[key]];
-    const parsed = raw === undefined ? fallback : /^\d+$/.test(raw) ? Number(raw) : NaN;
+    const parsed =
+      raw === undefined ? fallback : /^\d+$/.test(raw) ? Number(raw) : NaN;
     if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
-      throw new RangeError(`${variables[key]} must be a whole number between ${min} and ${max}`);
+      throw new RangeError(
+        `${variables[key]} must be a whole number between ${min} and ${max}`,
+      );
     }
     values[key] = parsed;
   }
@@ -51,5 +58,7 @@ export function loadWooCouponSyncConfig(environment: NodeJS.ProcessEnv): WooCoup
 
 /** Deterministic test-only defaults; deployed operations read woo.couponSync from PostgreSQL. */
 export function defaultWooCouponSyncConfig(): WooCouponSyncConfig {
-  return Object.fromEntries(Object.entries(limits).map(([name, [fallback]]) => [name, fallback])) as unknown as WooCouponSyncConfig;
+  return Object.fromEntries(
+    Object.entries(limits).map(([name, [fallback]]) => [name, fallback]),
+  ) as unknown as WooCouponSyncConfig;
 }

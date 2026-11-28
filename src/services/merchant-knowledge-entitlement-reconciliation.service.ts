@@ -1,4 +1,8 @@
-import { Prisma, SubscriptionProjectionStatus, type PrismaClient } from "@prisma/client";
+import {
+  Prisma,
+  SubscriptionProjectionStatus,
+  type PrismaClient,
+} from "@prisma/client";
 import {
   createLogger,
   type StructuredLogger,
@@ -67,15 +71,26 @@ export class MerchantKnowledgeEntitlementReconciliationService {
     this.now = dependencies.now ?? (() => new Date());
   }
 
-  async reconcileOnce(input?: { shopPageSize?: number }): Promise<MerchantKnowledgeEntitlementReconciliationResult> {
+  async reconcileOnce(input?: {
+    shopPageSize?: number;
+  }): Promise<MerchantKnowledgeEntitlementReconciliationResult> {
     const shopPageSize = input?.shopPageSize ?? DEFAULT_SHOP_PAGE_SIZE;
-    if (!Number.isInteger(shopPageSize) || shopPageSize < 1 || shopPageSize > MAX_SHOP_PAGE_SIZE) {
-      throw new RangeError(`shopPageSize must be an integer from 1 to ${MAX_SHOP_PAGE_SIZE}`);
+    if (
+      !Number.isInteger(shopPageSize) ||
+      shopPageSize < 1 ||
+      shopPageSize > MAX_SHOP_PAGE_SIZE
+    ) {
+      throw new RangeError(
+        `shopPageSize must be an integer from 1 to ${MAX_SHOP_PAGE_SIZE}`,
+      );
     }
 
     const where: Prisma.SubscriptionWhereInput = {
       status: {
-        in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING],
+        in: [
+          SubscriptionProjectionStatus.ACTIVE,
+          SubscriptionProjectionStatus.TRIALING,
+        ],
       },
       plan: {
         is: {
@@ -141,12 +156,20 @@ export class MerchantKnowledgeEntitlementReconciliationService {
         orderBy: [{ position: "asc" }, { id: "asc" }],
         select: { id: true },
       });
-      const eligibilityService = new MerchantKnowledgeEntitlementService(this.database);
+      const eligibilityService = new MerchantKnowledgeEntitlementService(
+        this.database,
+      );
 
       for (const source of sources) {
         result.sourcesScanned += 1;
-        const eligibility = await eligibilityService.resolveSourceEligibility(source.id);
-        if (!eligibility.entitlement || !eligibility.activationModeEligible || !eligibility.merchantEnabled) {
+        const eligibility = await eligibilityService.resolveSourceEligibility(
+          source.id,
+        );
+        if (
+          !eligibility.entitlement ||
+          !eligibility.activationModeEligible ||
+          !eligibility.merchantEnabled
+        ) {
           continue;
         }
         if (!eligibility.globallySupported || !eligibility.sourceTypeAllowed) {
@@ -183,7 +206,9 @@ export class MerchantKnowledgeEntitlementReconciliationService {
     return result;
   }
 
-  private logResult(result: MerchantKnowledgeEntitlementReconciliationResult): void {
+  private logResult(
+    result: MerchantKnowledgeEntitlementReconciliationResult,
+  ): void {
     this.log.info("merchant_knowledge.entitlement_reconciliation.completed", {
       shopsScanned: result.shopsScanned,
       sourcesScanned: result.sourcesScanned,
@@ -194,9 +219,13 @@ export class MerchantKnowledgeEntitlementReconciliationService {
     });
   }
 
-  private async createReplacementIfRequired(sourceId: string): Promise<ReplacementJob | null> {
+  private async createReplacementIfRequired(
+    sourceId: string,
+  ): Promise<ReplacementJob | null> {
     return this.database.$transaction(async (transaction) => {
-      const locked = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      const locked = await transaction.$queryRaw<
+        Array<{ id: string }>
+      >(Prisma.sql`
         SELECT "id"
         FROM "commerce"."MerchantKnowledgeSource"
         WHERE "id" = ${sourceId}
@@ -215,45 +244,53 @@ export class MerchantKnowledgeEntitlementReconciliationService {
       });
       if (!source) return null;
 
-      const eligibility = await new MerchantKnowledgeEntitlementService(transaction)
-        .resolveSourceEligibility(sourceId);
+      const eligibility = await new MerchantKnowledgeEntitlementService(
+        transaction,
+      ).resolveSourceEligibility(sourceId);
       if (!eligibility.eligible || !eligibility.entitlement) return null;
 
-      const activeRevision = await transaction.merchantKnowledgeSourceRevision.findFirst({
-        where: { sourceId, status: "ACTIVE" },
-        orderBy: { generation: "desc" },
-        select: {
-          id: true,
-          generation: true,
-          contentUnits: true,
-          requestedUrl: true,
-          uploadedAssetId: true,
-        },
-      });
+      const activeRevision =
+        await transaction.merchantKnowledgeSourceRevision.findFirst({
+          where: { sourceId, status: "ACTIVE" },
+          orderBy: { generation: "desc" },
+          select: {
+            id: true,
+            generation: true,
+            contentUnits: true,
+            requestedUrl: true,
+            uploadedAssetId: true,
+          },
+        });
       if (
-        !activeRevision
-        || activeRevision.contentUnits === null
-        || activeRevision.contentUnits <= eligibility.entitlement.maxContentUnitsPerSource
+        !activeRevision ||
+        activeRevision.contentUnits === null ||
+        activeRevision.contentUnits <=
+          eligibility.entitlement.maxContentUnitsPerSource
       ) {
         return null;
       }
 
-      const newerWork = await transaction.merchantKnowledgeSourceRevision.findFirst({
-        where: {
-          sourceId,
-          generation: { gt: activeRevision.generation },
-          status: { in: ["PENDING", "PROCESSING"] },
-        },
-        select: { id: true },
-      });
-      if (newerWork || source.currentGeneration !== activeRevision.generation) return null;
+      const newerWork =
+        await transaction.merchantKnowledgeSourceRevision.findFirst({
+          where: {
+            sourceId,
+            generation: { gt: activeRevision.generation },
+            status: { in: ["PENDING", "PROCESSING"] },
+          },
+          select: { id: true },
+        });
+      if (newerWork || source.currentGeneration !== activeRevision.generation)
+        return null;
 
       let requestedUrl: string | null;
       let uploadedAssetId: string | null;
       if (source.dataFormat.key === "WEB_PAGE") {
         requestedUrl = activeRevision.requestedUrl;
         uploadedAssetId = null;
-      } else if (source.dataFormat.key === "CSV" || source.dataFormat.key === "XLSX") {
+      } else if (
+        source.dataFormat.key === "CSV" ||
+        source.dataFormat.key === "XLSX"
+      ) {
         requestedUrl = null;
         uploadedAssetId = activeRevision.uploadedAssetId;
       } else {
@@ -268,18 +305,20 @@ export class MerchantKnowledgeEntitlementReconciliationService {
       if (update.count !== 1) return null;
 
       const requestedAt = this.now();
-      const revision = await transaction.merchantKnowledgeSourceRevision.create({
-        data: {
-          sourceId,
-          generation,
-          reason: "ENTITLEMENT_CHANGE",
-          status: "PENDING",
-          requestedAt,
-          requestedUrl,
-          uploadedAssetId,
+      const revision = await transaction.merchantKnowledgeSourceRevision.create(
+        {
+          data: {
+            sourceId,
+            generation,
+            reason: "ENTITLEMENT_CHANGE",
+            status: "PENDING",
+            requestedAt,
+            requestedUrl,
+            uploadedAssetId,
+          },
+          select: { id: true, generation: true, requestedAt: true },
         },
-        select: { id: true, generation: true, requestedAt: true },
-      });
+      );
       return { ...revision, shopId: source.shopId };
     });
   }

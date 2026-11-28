@@ -24,14 +24,18 @@ export type ShopifyConsentMaterializationResult =
   | { status: "DEFER_IDENTITY_OR_RECIPIENT" }
   | { status: "MATERIALISATION_FAILURE"; reason: string; cause?: unknown };
 
-export type Failure = Extract<ShopifyWhatsAppConsentEligibility, { status: "NOT_AUTHORISED" | "UNAVAILABLE" | "AMBIGUOUS" }>;
+export type Failure = Extract<
+  ShopifyWhatsAppConsentEligibility,
+  { status: "NOT_AUTHORISED" | "UNAVAILABLE" | "AMBIGUOUS" }
+>;
 export type Identity = ReturnType<typeof parseShopifyCustomerIdentity>;
 export type ScopedCustomer = {
   shop: Pick<Shop, "id" | "domain" | "defaultCountryCode">;
   customerId: string;
   identity: Identity;
 };
-export type ScopedResult = { ok: true; value: ScopedCustomer } | { ok: false; failure: Failure };
+export type ScopedResult =
+  { ok: true; value: ScopedCustomer } | { ok: false; failure: Failure };
 export type RecipientResult =
   | { ok: true; phone: CustomerPhone; canonical: string }
   | { ok: false; failure: Failure };
@@ -41,10 +45,16 @@ export type InvalidationResult = {
   hasNewerDisplacedObservation: boolean;
 };
 
-export const notAuthorised = (reason: string): Failure => ({ status: "NOT_AUTHORISED", reason });
+export const notAuthorised = (reason: string): Failure => ({
+  status: "NOT_AUTHORISED",
+  reason,
+});
 export const unavailable = (reason: string, cause?: unknown): Failure => ({
   status: "UNAVAILABLE",
   reason,
   ...(cause !== undefined ? { cause } : {}),
 });
-export const ambiguous = (reason: string): Failure => ({ status: "AMBIGUOUS", reason });
+export const ambiguous = (reason: string): Failure => ({
+  status: "AMBIGUOUS",
+  reason,
+});

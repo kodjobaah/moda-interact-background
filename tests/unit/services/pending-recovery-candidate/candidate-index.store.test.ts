@@ -33,12 +33,10 @@ vi.mock("../../../../src/lib/redis.js", () => ({
   connectionRedis: redisMock,
 }));
 
-const { PendingRecoveryCandidateIndexStore } = await import(
-  "../../../../src/services/pending-recovery-candidate/candidate-index.store.js"
-);
-const domain = await import(
-  "../../../../src/domain/pending-recovery-candidate.js"
-);
+const { PendingRecoveryCandidateIndexStore } =
+  await import("../../../../src/services/pending-recovery-candidate/candidate-index.store.js");
+const domain =
+  await import("../../../../src/domain/pending-recovery-candidate.js");
 
 const candidate = {
   shopId: "shop-1",
@@ -70,17 +68,23 @@ describe("PendingRecoveryCandidateIndexStore", () => {
       shouldIndexShop: true,
     });
 
-    await expect(store.findByCheckout({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-    })).resolves.toBe("job-1");
-    await expect(store.findByCart({
-      shopId: "shop-1",
-      cartToken: "cart-1",
-    })).resolves.toBe("job-1");
+    await expect(
+      store.findByCheckout({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+      }),
+    ).resolves.toBe("job-1");
+    await expect(
+      store.findByCart({
+        shopId: "shop-1",
+        cartToken: "cart-1",
+      }),
+    ).resolves.toBe("job-1");
 
-    const ttlMs = Math.max(domain.pendingCandidateIndexTtlMs(delayMinutes),
-      (delayMinutes + 70) * 60_000);
+    const ttlMs = Math.max(
+      domain.pendingCandidateIndexTtlMs(delayMinutes),
+      (delayMinutes + 70) * 60_000,
+    );
     expect(redisMock.set).toHaveBeenCalledWith(
       domain.pendingCandidateCheckoutIndexKey({
         shopId: "shop-1",
@@ -99,18 +103,30 @@ describe("PendingRecoveryCandidateIndexStore", () => {
       "PX",
       ttlMs,
     );
-    expect(redisZsets.get(domain.pendingCandidateShopIndexKey("shop-1"))).toEqual(
-      new Map([["job-1", dueAtMs]]),
-    );
+    expect(
+      redisZsets.get(domain.pendingCandidateShopIndexKey("shop-1")),
+    ).toEqual(new Map([["job-1", dueAtMs]]));
   });
 
   it("preserves Woo's explicit retention without applying Shopify's verification horizon", async () => {
     const store = new PendingRecoveryCandidateIndexStore();
-    await store.upsert({candidate,jobId:"woo-job",delayMinutes:1,dueAtMs:Date.now()+60_000,
-      shouldIndexShop:true,retentionMs:2 * 60_000});
+    await store.upsert({
+      candidate,
+      jobId: "woo-job",
+      delayMinutes: 1,
+      dueAtMs: Date.now() + 60_000,
+      shouldIndexShop: true,
+      retentionMs: 2 * 60_000,
+    });
     expect(redisMock.set).toHaveBeenCalledWith(
-      domain.pendingCandidateCheckoutIndexKey({shopId:"shop-1",checkoutToken:"checkout-1"}),
-      "woo-job","PX",2 * 60_000);
+      domain.pendingCandidateCheckoutIndexKey({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+      }),
+      "woo-job",
+      "PX",
+      2 * 60_000,
+    );
   });
 
   it("removes the shop member instead of re-indexing non-runnable work", async () => {
@@ -128,7 +144,9 @@ describe("PendingRecoveryCandidateIndexStore", () => {
       shouldIndexShop: false,
     });
 
-    expect(redisZsets.has(domain.pendingCandidateShopIndexKey("shop-1"))).toBe(false);
+    expect(redisZsets.has(domain.pendingCandidateShopIndexKey("shop-1"))).toBe(
+      false,
+    );
   });
 
   it("removes checkout, cart and optional shop aliases idempotently", async () => {
@@ -144,29 +162,40 @@ describe("PendingRecoveryCandidateIndexStore", () => {
     await expect(store.remove(candidate, "job-1")).resolves.toBeUndefined();
     await expect(store.remove(candidate, "job-1")).resolves.toBeUndefined();
 
-    await expect(store.findByCheckout({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-    })).resolves.toBeNull();
-    await expect(store.findByCart({
-      shopId: "shop-1",
-      cartToken: "cart-1",
-    })).resolves.toBeNull();
-    expect(redisZsets.has(domain.pendingCandidateShopIndexKey("shop-1"))).toBe(false);
+    await expect(
+      store.findByCheckout({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      store.findByCart({
+        shopId: "shop-1",
+        cartToken: "cart-1",
+      }),
+    ).resolves.toBeNull();
+    expect(redisZsets.has(domain.pendingCandidateShopIndexKey("shop-1"))).toBe(
+      false,
+    );
   });
 
   it("can remove only a stale cart alias when a checkout changes cart token", async () => {
     const store = new PendingRecoveryCandidateIndexStore();
     redisStore.set(
-      domain.pendingCandidateCartIndexKey({ shopId: "shop-1", cartToken: "old-cart" }),
+      domain.pendingCandidateCartIndexKey({
+        shopId: "shop-1",
+        cartToken: "old-cart",
+      }),
       "job-1",
     );
 
     await store.removeCartAlias("shop-1", "old-cart");
 
-    await expect(store.findByCart({
-      shopId: "shop-1",
-      cartToken: "old-cart",
-    })).resolves.toBeNull();
+    await expect(
+      store.findByCart({
+        shopId: "shop-1",
+        cartToken: "old-cart",
+      }),
+    ).resolves.toBeNull();
   });
 });

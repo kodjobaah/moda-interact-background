@@ -44,42 +44,68 @@ export function anonymousId(value: string): string {
 }
 
 export function validActivity(value: string): Date | null {
-  if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)) {
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)
+  ) {
     return null;
   }
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) && date.toISOString() === value ? date : null;
+  return Number.isFinite(date.getTime()) && date.toISOString() === value
+    ? date
+    : null;
 }
 
 function validMoney(value: unknown): value is string {
   return typeof value === "string" && MONEY.test(value);
 }
 
-export function validBasket(basket: WooBasketEvidence): basket is Extract<WooBasketEvidence, { kind: "nonempty" }> {
+export function validBasket(
+  basket: WooBasketEvidence,
+): basket is Extract<WooBasketEvidence, { kind: "nonempty" }> {
   if (!basket || basket.kind !== "nonempty" || !basket.checkout) return false;
   const { checkout } = basket;
-  return Array.isArray(checkout.items) && checkout.items.length > 0 && checkout.items.length <= 50 &&
-    typeof checkout.currency === "string" && /^[A-Z]{3}$/.test(checkout.currency) &&
+  return (
+    Array.isArray(checkout.items) &&
+    checkout.items.length > 0 &&
+    checkout.items.length <= 50 &&
+    typeof checkout.currency === "string" &&
+    /^[A-Z]{3}$/.test(checkout.currency) &&
     validMoney(checkout.total) &&
-    checkout.items.every((item) =>
-      item && Number.isInteger(item.quantity) && item.quantity >= 1 && item.quantity <= 100_000 &&
-      [item.productId, item.variationId, item.sku, item.title].some(
-        (value) => typeof value === "string" && value.length > 0 && value.length <= 200,
-      ) &&
-      (item.unitPrice === undefined || validMoney(item.unitPrice)) &&
-      (item.total === undefined || validMoney(item.total)),
-    );
+    checkout.items.every(
+      (item) =>
+        item &&
+        Number.isInteger(item.quantity) &&
+        item.quantity >= 1 &&
+        item.quantity <= 100_000 &&
+        [item.productId, item.variationId, item.sku, item.title].some(
+          (value) =>
+            typeof value === "string" &&
+            value.length > 0 &&
+            value.length <= 200,
+        ) &&
+        (item.unitPrice === undefined || validMoney(item.unitPrice)) &&
+        (item.total === undefined || validMoney(item.total)),
+    )
+  );
 }
 
-export function sameAcceptedCandidate(expected: WooPendingCandidate, current: WooPendingCandidate): boolean {
+export function sameAcceptedCandidate(
+  expected: WooPendingCandidate,
+  current: WooPendingCandidate,
+): boolean {
   // Comparing only timestamps is not enough for same-second conflicts.
-  return current.source === "woocommerce" &&
-    current.shopId === expected.shopId && current.checkoutToken === expected.checkoutToken &&
-    Number.isSafeInteger(expected.generation) && expected.generation! > 0 &&
+  return (
+    current.source === "woocommerce" &&
+    current.shopId === expected.shopId &&
+    current.checkoutToken === expected.checkoutToken &&
+    Number.isSafeInteger(expected.generation) &&
+    expected.generation! > 0 &&
     current.generation === expected.generation &&
     current.lastEventId === expected.lastEventId &&
     current.lastActivityAt === expected.lastActivityAt &&
-    isDeepStrictEqual(current.basket, expected.basket);
+    isDeepStrictEqual(current.basket, expected.basket)
+  );
 }
 
 /** The activity watermark is the accepted event fence; the queue/index alone is
@@ -88,19 +114,38 @@ export function matchesAcceptedWatermark(
   candidate: WooPendingCandidate,
   watermark: WooActivityWatermark | null,
 ): boolean {
-  if (!watermark || !Number.isSafeInteger(candidate.generation) || (candidate.generation ?? 0) < 1) return false;
-  const state = candidate.basket.kind === "nonempty" ? "nonempty" : candidate.basket.kind;
-  const digest = candidate.basket.kind === "nonempty"
-    ? createHash("sha256").update(JSON.stringify(candidate.basket.checkout)).digest("hex")
-    : "0".repeat(64);
-  return watermark.generation === candidate.generation &&
+  if (
+    !watermark ||
+    !Number.isSafeInteger(candidate.generation) ||
+    (candidate.generation ?? 0) < 1
+  )
+    return false;
+  const state =
+    candidate.basket.kind === "nonempty" ? "nonempty" : candidate.basket.kind;
+  const digest =
+    candidate.basket.kind === "nonempty"
+      ? createHash("sha256")
+          .update(JSON.stringify(candidate.basket.checkout))
+          .digest("hex")
+      : "0".repeat(64);
+  return (
+    watermark.generation === candidate.generation &&
     watermark.lastEventId === candidate.lastEventId &&
     watermark.lastActivityAt === candidate.lastActivityAt &&
-    watermark.checkoutDigest === digest && watermark.state === state;
+    watermark.checkoutDigest === digest &&
+    watermark.state === state
+  );
 }
 
-export function emailConflicts(observed: string | undefined, stored: string | null): boolean {
-  return !!observed && !!stored && observed.trim().toLowerCase() !== stored.trim().toLowerCase();
+export function emailConflicts(
+  observed: string | undefined,
+  stored: string | null,
+): boolean {
+  return (
+    !!observed &&
+    !!stored &&
+    observed.trim().toLowerCase() !== stored.trim().toLowerCase()
+  );
 }
 
 function currentConsentStillValid(
@@ -109,20 +154,39 @@ function currentConsentStillValid(
   observedEmail: string | undefined,
   expectedSite?: { canonicalSiteUrl: string; shopDomain: string },
 ): boolean {
-  if (!row || row.customerId !== expected.customerId || row.customerPhoneId !== expected.customerPhoneId ||
-    row.customerShopId !== expected.shopId || row.shopStatus !== "ACTIVE" || row.shopPlatform !== "WOOCOMMERCE" ||
-    row.installationId !== expected.installationId || row.installationStatus !== "ACTIVE" || row.revokedAt ||
+  if (
+    !row ||
+    row.customerId !== expected.customerId ||
+    row.customerPhoneId !== expected.customerPhoneId ||
+    row.customerShopId !== expected.shopId ||
+    row.shopStatus !== "ACTIVE" ||
+    row.shopPlatform !== "WOOCOMMERCE" ||
+    row.installationId !== expected.installationId ||
+    row.installationStatus !== "ACTIVE" ||
+    row.revokedAt ||
     row.credentialVersion !== expected.credentialVersion ||
-    (expectedSite && (row.canonicalSiteUrl !== expectedSite.canonicalSiteUrl ||
-      row.shopDomain !== expectedSite.shopDomain)) || row.endedAt ||
-    row.canonicalPhone !== expected.canonicalRecipient || emailConflicts(observedEmail, row.customerEmail) ||
-    row.noContact || row.noContactReason !== null || row.noContactRevision !== expected.noContactRevision ||
-    row.consentRevision !== expected.consentRevision || row.decisionSequence !== expected.consentDecisionSequence ||
-    row.consentRevision <= 0n || row.decisionSequence <= 0n ||
+    (expectedSite &&
+      (row.canonicalSiteUrl !== expectedSite.canonicalSiteUrl ||
+        row.shopDomain !== expectedSite.shopDomain)) ||
+    row.endedAt ||
+    row.canonicalPhone !== expected.canonicalRecipient ||
+    emailConflicts(observedEmail, row.customerEmail) ||
+    row.noContact ||
+    row.noContactReason !== null ||
+    row.noContactRevision !== expected.noContactRevision ||
+    row.consentRevision !== expected.consentRevision ||
+    row.decisionSequence !== expected.consentDecisionSequence ||
+    row.consentRevision <= 0n ||
+    row.decisionSequence <= 0n ||
     row.consentPurpose !== "WHATSAPP_CHECKOUT_RECOVERY" ||
-    row.consentDecision !== "GRANTED" || row.consentSource !== "WOO_MODA_CHECKBOX" ||
-    !row.phoneVerifiedAt || !row.consentVerifiedAt || !row.providerObservedAt ||
-    row.consentVerifiedAt < row.phoneVerifiedAt || row.consentVerifiedAt < row.providerObservedAt) {
+    row.consentDecision !== "GRANTED" ||
+    row.consentSource !== "WOO_MODA_CHECKBOX" ||
+    !row.phoneVerifiedAt ||
+    !row.consentVerifiedAt ||
+    !row.providerObservedAt ||
+    row.consentVerifiedAt < row.phoneVerifiedAt ||
+    row.consentVerifiedAt < row.providerObservedAt
+  ) {
     return false;
   }
   return true;
@@ -131,7 +195,9 @@ function currentConsentStillValid(
 /** Lock the current recipient/consent/installation rows until the INSERT commits.
  * No external reads or queue/Redis traffic occur in this transaction. */
 export async function confirmCurrentWooConsent(
-  tx: Pick<Prisma.TransactionClient, "$queryRaw"> | Pick<Prisma.TransactionClient, "$queryRawUnsafe">,
+  tx:
+    | Pick<Prisma.TransactionClient, "$queryRaw">
+    | Pick<Prisma.TransactionClient, "$queryRawUnsafe">,
   shopId: string,
   snapshot: WooRecoveryConsentSnapshot,
   observedEmail: string | undefined,
@@ -163,23 +229,37 @@ export async function confirmCurrentWooConsent(
             AND s."id" = ${shopId}
           FOR SHARE OF cp, c, s, i
   `;
-  const fences = "$queryRaw" in tx ? await tx.$queryRaw<AdmissionFenceRow[]>(statement)
-    : await tx.$queryRawUnsafe<AdmissionFenceRow[]>(statement.text, ...statement.values);
-  return fences.length === 1 && currentConsentStillValid(fences[0], snapshot, observedEmail, expectedSite);
+  const fences =
+    "$queryRaw" in tx
+      ? await tx.$queryRaw<AdmissionFenceRow[]>(statement)
+      : await tx.$queryRawUnsafe<AdmissionFenceRow[]>(
+          statement.text,
+          ...statement.values,
+        );
+  return (
+    fences.length === 1 &&
+    currentConsentStillValid(fences[0], snapshot, observedEmail, expectedSite)
+  );
 }
 
 /** Same bounded shop-scoped ambiguity fence for initial and proactive sends. */
 export async function confirmUniqueWooRecipient(
   tx: Pick<Prisma.TransactionClient, "$queryRawUnsafe">,
-  shopId: string, snapshot: WooRecoveryConsentSnapshot,
+  shopId: string,
+  snapshot: WooRecoveryConsentSnapshot,
 ): Promise<boolean> {
   // CustomerPhone has no shop+canonical uniqueness constraint. A second
   // matching active registration cannot borrow this recipient's opt-in.
   // Include legacy null-canonical numbers, bounded as in BG001's reader.
-  const candidates = await tx.$queryRawUnsafe<Array<{
-    id: string; phone: string; whatsappCanonicalPhone: string | null;
-    defaultCountryCode: string | null;
-  }>>(`
+  const candidates = await tx.$queryRawUnsafe<
+    Array<{
+      id: string;
+      phone: string;
+      whatsappCanonicalPhone: string | null;
+      defaultCountryCode: string | null;
+    }>
+  >(
+    `
     SELECT cp."id",cp."phone",cp."whatsappCanonicalPhone",s."defaultCountryCode"
     FROM "commerce"."CustomerPhone" cp
     JOIN "commerce"."Customer" c ON c."id"=cp."customerId"
@@ -188,9 +268,17 @@ export async function confirmUniqueWooRecipient(
       AND (cp."whatsappCanonicalPhone"=$2 OR cp."whatsappCanonicalPhone" IS NULL
            OR cp."phone" IN ($3,$2))
     ORDER BY cp."id" LIMIT 251 FOR SHARE OF cp`,
-    shopId, snapshot.canonicalRecipient, `+${snapshot.canonicalRecipient}`);
+    shopId,
+    snapshot.canonicalRecipient,
+    `+${snapshot.canonicalRecipient}`,
+  );
   if (candidates.length > 250) return false;
   const matching = candidates.filter((candidate) =>
-    matchesRegisteredPhone(candidate, snapshot.canonicalRecipient, candidate.defaultCountryCode));
+    matchesRegisteredPhone(
+      candidate,
+      snapshot.canonicalRecipient,
+      candidate.defaultCountryCode,
+    ),
+  );
   return matching.length === 1 && matching[0]?.id === snapshot.customerPhoneId;
 }

@@ -1,4 +1,7 @@
-import { SubscriptionProjectionStatus, type PrismaClient } from "@prisma/client";
+import {
+  SubscriptionProjectionStatus,
+  type PrismaClient,
+} from "@prisma/client";
 import {
   MerchantKnowledgeFeatureConfigurationSchema,
   type MerchantKnowledgeDataFormatKey,
@@ -28,7 +31,10 @@ export interface MerchantKnowledgeSourceEligibility {
   eligible: boolean;
 }
 
-type EntitlementDatabase = Pick<PrismaClient, "subscription" | "merchantKnowledgeSource">;
+type EntitlementDatabase = Pick<
+  PrismaClient,
+  "subscription" | "merchantKnowledgeSource"
+>;
 
 interface CurrentEntitlementResolution {
   entitlement: MerchantKnowledgeEntitlement | null;
@@ -42,7 +48,8 @@ export class MerchantKnowledgeEntitlementService {
   async resolveCurrentEntitlement(
     shopId: string,
   ): Promise<MerchantKnowledgeEntitlement | null> {
-    return (await this.resolveCurrentEntitlementAndActivation(shopId)).entitlement;
+    return (await this.resolveCurrentEntitlementAndActivation(shopId))
+      .entitlement;
   }
 
   private async resolveCurrentEntitlementAndActivation(
@@ -79,11 +86,11 @@ export class MerchantKnowledgeEntitlementService {
     });
 
     if (
-      !subscription
-      || !subscription.planId
-      || !subscription.plan
-      || (subscription.status !== SubscriptionProjectionStatus.ACTIVE
-        && subscription.status !== SubscriptionProjectionStatus.TRIALING)
+      !subscription ||
+      !subscription.planId ||
+      !subscription.plan ||
+      (subscription.status !== SubscriptionProjectionStatus.ACTIVE &&
+        subscription.status !== SubscriptionProjectionStatus.TRIALING)
     ) {
       return {
         entitlement: null,
@@ -113,7 +120,8 @@ export class MerchantKnowledgeEntitlementService {
         maxContentUnitsPerSource: configuration.maxContentUnitsPerSource,
         allowedSourceTypes: configuration.allowedSourceTypes,
       },
-      activationModeEligible: feature.feature.activationMode === "MERCHANT_OPT_IN",
+      activationModeEligible:
+        feature.feature.activationMode === "MERCHANT_OPT_IN",
       merchantEnabled: feature.feature.shopPreferences[0]?.enabled === true,
     };
   }
@@ -144,40 +152,47 @@ export class MerchantKnowledgeEntitlementService {
       };
     }
 
-    const currentEntitlement = await this.resolveCurrentEntitlementAndActivation(source.shopId);
-    const { entitlement, activationModeEligible, merchantEnabled } = currentEntitlement;
+    const currentEntitlement =
+      await this.resolveCurrentEntitlementAndActivation(source.shopId);
+    const { entitlement, activationModeEligible, merchantEnabled } =
+      currentEntitlement;
     const globallySupported = Boolean(
-      source.purpose.active && source.dataFormat.active && source.purposeDataFormat,
+      source.purpose.active &&
+      source.dataFormat.active &&
+      source.purposeDataFormat,
     );
     const sourceTypeAllowed = Boolean(
       entitlement?.allowedSourceTypes.some(
         ({ purposeKey, dataFormatKey }) =>
-          purposeKey === source.purpose.key && dataFormatKey === source.dataFormat.key,
+          purposeKey === source.purpose.key &&
+          dataFormatKey === source.dataFormat.key,
       ),
     );
 
     let withinSourceAllowance = false;
     if (
-      entitlement
-      && activationModeEligible
-      && merchantEnabled
-      && globallySupported
-      && sourceTypeAllowed
+      entitlement &&
+      activationModeEligible &&
+      merchantEnabled &&
+      globallySupported &&
+      sourceTypeAllowed
     ) {
       const candidates = await this.database.merchantKnowledgeSource.findMany({
         where: {
           shopId: source.shopId,
-          OR: entitlement.allowedSourceTypes.map(({ purposeKey, dataFormatKey }) => ({
-            purpose: { is: { key: purposeKey, active: true } },
-            dataFormat: { is: { key: dataFormatKey, active: true } },
-          })),
+          OR: entitlement.allowedSourceTypes.map(
+            ({ purposeKey, dataFormatKey }) => ({
+              purpose: { is: { key: purposeKey, active: true } },
+              dataFormat: { is: { key: dataFormatKey, active: true } },
+            }),
+          ),
         },
         select: { id: true },
         orderBy: [{ position: "asc" }, { id: "asc" }],
       });
       const sourceIndex = candidates.findIndex(({ id }) => id === source.id);
-      withinSourceAllowance = sourceIndex >= 0
-        && sourceIndex < entitlement.maxKnowledgeSources;
+      withinSourceAllowance =
+        sourceIndex >= 0 && sourceIndex < entitlement.maxKnowledgeSources;
     }
 
     return {
@@ -187,12 +202,13 @@ export class MerchantKnowledgeEntitlementService {
       globallySupported,
       sourceTypeAllowed,
       withinSourceAllowance,
-      eligible: entitlement !== null
-        && activationModeEligible
-        && merchantEnabled
-        && globallySupported
-        && sourceTypeAllowed
-        && withinSourceAllowance,
+      eligible:
+        entitlement !== null &&
+        activationModeEligible &&
+        merchantEnabled &&
+        globallySupported &&
+        sourceTypeAllowed &&
+        withinSourceAllowance,
     };
   }
 }

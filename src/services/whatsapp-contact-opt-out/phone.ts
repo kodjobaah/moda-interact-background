@@ -18,15 +18,29 @@ export function matchesRegisteredPhone(
     return stored.whatsappCanonicalPhone === canonical;
   }
   const raw = stored.phone.trim();
-  const asInternational = /^[1-9][0-9]{1,14}$/.test(raw) && raw === canonical
-    ? `+${raw}` : raw;
-  const parsed = normalizeRecipientPhone(asInternational, asInternational.startsWith("+")
-    ? {} : verifiedCountry ? { verifiedCountryCode: verifiedCountry.toUpperCase() } : {});
+  const asInternational =
+    /^[1-9][0-9]{1,14}$/.test(raw) && raw === canonical ? `+${raw}` : raw;
+  const parsed = normalizeRecipientPhone(
+    asInternational,
+    asInternational.startsWith("+")
+      ? {}
+      : verifiedCountry
+        ? { verifiedCountryCode: verifiedCountry.toUpperCase() }
+        : {},
+  );
   return parsed.ok && parsed.e164.slice(1) === canonical;
 }
 
 /** Commands only, not an LLM interpretation or a substring in normal speech. */
-export function isExplicitWhatsAppStop(content: { type: string; text?: string }): boolean {
-  return content.type === "text" && typeof content.text === "string" &&
-    /^(STOP|UNSUBSCRIBE|STOPP|DUR|PARAR|STOPPA)[.!]?$/i.test(content.text.trim());
+export function isExplicitWhatsAppStop(content: {
+  type: string;
+  text?: string;
+}): boolean {
+  return (
+    content.type === "text" &&
+    typeof content.text === "string" &&
+    /^(STOP|UNSUBSCRIBE|STOPP|DUR|PARAR|STOPPA)[.!]?$/i.test(
+      content.text.trim(),
+    )
+  );
 }

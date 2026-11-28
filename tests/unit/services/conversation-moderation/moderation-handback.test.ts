@@ -1,69 +1,337 @@
-vi.mock("../../../../src/services/recovery-sender-pool/routing-projection.js", async importOriginal => ({
-  ...await importOriginal<typeof import("../../../../src/services/recovery-sender-pool/routing-projection.js")>(),
-  readRoutingHistoryProjection: vi.fn(async () => ({ bindings: [], excludedMessageIds: [] })),
+vi.mock(
+  "../../../../src/services/recovery-sender-pool/routing-projection.js",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("../../../../src/services/recovery-sender-pool/routing-projection.js")
+    >()),
+    readRoutingHistoryProjection: vi.fn(async () => ({
+      bindings: [],
+      excludedMessageIds: [],
+    })),
+  }),
+);
+import { beforeEach, describe, it, expect, vi } from "vitest";
+const db = vi.hoisted(() => ({
+  conversation: { findUniqueOrThrow: vi.fn() },
+  conversationMessage: { findMany: vi.fn() },
 }));
-import {beforeEach,describe,it,expect,vi} from 'vitest';
-const db=vi.hoisted(()=>({conversation:{findUniqueOrThrow:vi.fn()},conversationMessage:{findMany:vi.fn()}}));
-vi.mock('../../../../src/lib/db.js',()=>({default:db}));
-import {ModerationTurnGate} from '../../../../src/services/conversation-moderation/moderation-turn-gate.js';
-import {priorCommerceHistorySelection} from '../../../../src/commerce/history-selection.js';
-const boundary=new Date('2026-11-13T00:00:00Z');
-const row=(id:string,extra:Record<string,unknown>={})=>({id,content:id,contentType:'TEXT',transcriptionStatus:'NOT_REQUIRED',direction:'INBOUND',senderType:'CUSTOMER',...extra});
-function setup(current=[row('current')],prior=[row('past')],outcomes:Record<string,string>={}){db.conversationMessage.findMany.mockResolvedValueOnce(current).mockResolvedValueOnce(prior);const assessText=vi.fn(async(input:{subject:{messageId:string}})=>({kind:outcomes[input.subject.messageId]??'allow'}));return {gate:new ModerationTurnGate({assessText} as never),assessText};}
-describe('bounded resumed AI customer history moderation',()=>{
- beforeEach(()=>{vi.resetAllMocks();db.conversation.findUniqueOrThrow.mockResolvedValue({shopId:'shop',checkoutRecovery:{shopId:'shop'}});});
- it('assesses the same mixed prior20 window and deduplicates current identity',async()=>{const f=setup([row('current'),row('current')],[row('past'),row('merchant',{direction:'OUTBOUND',senderType:'HUMAN'}),row('agent',{direction:'OUTBOUND',senderType:'AGENT'}),row('current')]);expect(await f.gate.moderatePending('conversation',boundary)).toBe('allowed');expect(f.assessText.mock.calls.map(([a])=>a.subject.messageId)).toEqual(['current','past']);expect(db.conversationMessage.findMany).toHaveBeenCalledTimes(2);expect(db.conversationMessage.findMany.mock.calls[1]![0]).toMatchObject(priorCommerceHistorySelection('conversation',boundary));expect(db.conversationMessage.findMany.mock.calls[1]![0].where.AND[0].OR).toContainEqual({direction:'OUTBOUND',sentAt:{not:null},status:{in:['SENT','DELIVERED','READ']}});});
- it.each(['block','review_required'])('historical %s cannot suppress allowed current',async kind=>{const f=setup(undefined,undefined,{past:kind});expect(await f.gate.moderatePending('conversation',boundary)).toBe('allowed');});
- it.each(['block','review_required','retry'])('current %s cannot be authorized by old ALLOW',async kind=>{const f=setup(undefined,undefined,{current:kind});expect(await f.gate.moderatePending('conversation',boundary)).toBe(kind==='retry'?'retry':'suppressed');expect(f.assessText).toHaveBeenCalledOnce();expect(db.conversationMessage.findMany).toHaveBeenCalledOnce();});
- it('historical retry uses existing turn retry without admitting missing evidence',async()=>{const f=setup(undefined,undefined,{past:'retry'});expect(await f.gate.moderatePending('conversation',boundary)).toBe('retry');expect(f.assessText).toHaveBeenCalledTimes(2);});
- it('includes only completed audio and TEXT from canonical persisted content',async()=>{const f=setup(undefined,[row('audio',{contentType:'AUDIO',transcriptionStatus:'COMPLETED'}),row('unfinished',{contentType:'AUDIO',transcriptionStatus:'PENDING'}),row('image',{contentType:'UNSUPPORTED'})]);expect(await f.gate.moderatePending('conversation',boundary)).toBe('allowed');expect(f.assessText.mock.calls.map(([a])=>a.subject.messageId)).toEqual(['current','audio']);expect(f.assessText.mock.calls[1]![0]).toMatchObject({shopId:'shop',conversationId:'conversation',effectiveText:'audio',inputKind:'TRANSCRIPT'});});
- it('bounds slow successful work and cached replay progresses without a new cursor',async()=>{
-  let clock=0;const cached=new Set<string>(),calls:string[]=[];const current=[row('current')],prior=[row('one'),row('two'),row('three')];db.conversationMessage.findMany.mockImplementation(async(args)=>args.take===20?prior:current);
-  const assessText=vi.fn(async({subject}:{subject:{messageId:string}})=>{const id=subject.messageId;calls.push(id);if(id!=='current'&&!cached.has(id)){clock+=8000;cached.add(id);}return {kind:'allow'};});const gate=new ModerationTurnGate({assessText} as never,()=>new Date(clock));
-  expect(await gate.moderatePending('conversation',boundary,new Date(120000))).toBe('retry');expect(calls).toEqual(['current','one']);
-  clock=10000;calls.length=0;expect(await gate.moderatePending('conversation',boundary,new Date(130000))).toBe('retry');expect(calls).toEqual(['current','one','two']);
-  clock=20000;calls.length=0;expect(await gate.moderatePending('conversation',boundary,new Date(140000))).toBe('allowed');expect(calls).toEqual(['current','one','two','three']);
- });
- it.each([8999,0,-1,NaN])('starts no historical assessment with insufficient actual lease %s',async remaining=>{const f=setup();const gate=new ModerationTurnGate({assessText:f.assessText} as never,()=>new Date(1000));expect(await gate.moderatePending('conversation',boundary,new Date(1000+remaining))).toBe('retry');expect(f.assessText).toHaveBeenCalledOnce();});
- it('stops on the first historical retry without contacting later candidates',async()=>{const f=setup(undefined,[row('past'),row('later')],{past:'retry'});expect(await f.gate.moderatePending('conversation',boundary)).toBe('retry');expect(f.assessText.mock.calls.map(([a])=>a.subject.messageId)).toEqual(['current','past']);});
+vi.mock("../../../../src/lib/db.js", () => ({ default: db }));
+import { ModerationTurnGate } from "../../../../src/services/conversation-moderation/moderation-turn-gate.js";
+import { priorCommerceHistorySelection } from "../../../../src/commerce/history-selection.js";
+const boundary = new Date("2026-11-13T00:00:00Z");
+const row = (id: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  content: id,
+  contentType: "TEXT",
+  transcriptionStatus: "NOT_REQUIRED",
+  direction: "INBOUND",
+  senderType: "CUSTOMER",
+  ...extra,
+});
+function setup(
+  current = [row("current")],
+  prior = [row("past")],
+  outcomes: Record<string, string> = {},
+) {
+  db.conversationMessage.findMany
+    .mockResolvedValueOnce(current)
+    .mockResolvedValueOnce(prior);
+  const assessText = vi.fn(
+    async (input: { subject: { messageId: string } }) => ({
+      kind: outcomes[input.subject.messageId] ?? "allow",
+    }),
+  );
+  return { gate: new ModerationTurnGate({ assessText } as never), assessText };
+}
+describe("bounded resumed AI customer history moderation", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    db.conversation.findUniqueOrThrow.mockResolvedValue({
+      shopId: "shop",
+      checkoutRecovery: { shopId: "shop" },
+    });
+  });
+  it("assesses the same mixed prior20 window and deduplicates current identity", async () => {
+    const f = setup(
+      [row("current"), row("current")],
+      [
+        row("past"),
+        row("merchant", { direction: "OUTBOUND", senderType: "HUMAN" }),
+        row("agent", { direction: "OUTBOUND", senderType: "AGENT" }),
+        row("current"),
+      ],
+    );
+    expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+      "allowed",
+    );
+    expect(f.assessText.mock.calls.map(([a]) => a.subject.messageId)).toEqual([
+      "current",
+      "past",
+    ]);
+    expect(db.conversationMessage.findMany).toHaveBeenCalledTimes(2);
+    expect(db.conversationMessage.findMany.mock.calls[1]![0]).toMatchObject(
+      priorCommerceHistorySelection("conversation", boundary),
+    );
+    expect(
+      db.conversationMessage.findMany.mock.calls[1]![0].where.AND[0].OR,
+    ).toContainEqual({
+      direction: "OUTBOUND",
+      sentAt: { not: null },
+      status: { in: ["SENT", "DELIVERED", "READ"] },
+    });
+  });
+  it.each(["block", "review_required"])(
+    "historical %s cannot suppress allowed current",
+    async (kind) => {
+      const f = setup(undefined, undefined, { past: kind });
+      expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+        "allowed",
+      );
+    },
+  );
+  it.each(["block", "review_required", "retry"])(
+    "current %s cannot be authorized by old ALLOW",
+    async (kind) => {
+      const f = setup(undefined, undefined, { current: kind });
+      expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+        kind === "retry" ? "retry" : "suppressed",
+      );
+      expect(f.assessText).toHaveBeenCalledOnce();
+      expect(db.conversationMessage.findMany).toHaveBeenCalledOnce();
+    },
+  );
+  it("historical retry uses existing turn retry without admitting missing evidence", async () => {
+    const f = setup(undefined, undefined, { past: "retry" });
+    expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+      "retry",
+    );
+    expect(f.assessText).toHaveBeenCalledTimes(2);
+  });
+  it("includes only completed audio and TEXT from canonical persisted content", async () => {
+    const f = setup(undefined, [
+      row("audio", { contentType: "AUDIO", transcriptionStatus: "COMPLETED" }),
+      row("unfinished", {
+        contentType: "AUDIO",
+        transcriptionStatus: "PENDING",
+      }),
+      row("image", { contentType: "UNSUPPORTED" }),
+    ]);
+    expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+      "allowed",
+    );
+    expect(f.assessText.mock.calls.map(([a]) => a.subject.messageId)).toEqual([
+      "current",
+      "audio",
+    ]);
+    expect(f.assessText.mock.calls[1]![0]).toMatchObject({
+      shopId: "shop",
+      conversationId: "conversation",
+      effectiveText: "audio",
+      inputKind: "TRANSCRIPT",
+    });
+  });
+  it("bounds slow successful work and cached replay progresses without a new cursor", async () => {
+    let clock = 0;
+    const cached = new Set<string>(),
+      calls: string[] = [];
+    const current = [row("current")],
+      prior = [row("one"), row("two"), row("three")];
+    db.conversationMessage.findMany.mockImplementation(async (args) =>
+      args.take === 20 ? prior : current,
+    );
+    const assessText = vi.fn(
+      async ({ subject }: { subject: { messageId: string } }) => {
+        const id = subject.messageId;
+        calls.push(id);
+        if (id !== "current" && !cached.has(id)) {
+          clock += 8000;
+          cached.add(id);
+        }
+        return { kind: "allow" };
+      },
+    );
+    const gate = new ModerationTurnGate(
+      { assessText } as never,
+      () => new Date(clock),
+    );
+    expect(
+      await gate.moderatePending("conversation", boundary, new Date(120000)),
+    ).toBe("retry");
+    expect(calls).toEqual(["current", "one"]);
+    clock = 10000;
+    calls.length = 0;
+    expect(
+      await gate.moderatePending("conversation", boundary, new Date(130000)),
+    ).toBe("retry");
+    expect(calls).toEqual(["current", "one", "two"]);
+    clock = 20000;
+    calls.length = 0;
+    expect(
+      await gate.moderatePending("conversation", boundary, new Date(140000)),
+    ).toBe("allowed");
+    expect(calls).toEqual(["current", "one", "two", "three"]);
+  });
+  it.each([8999, 0, -1, NaN])(
+    "starts no historical assessment with insufficient actual lease %s",
+    async (remaining) => {
+      const f = setup();
+      const gate = new ModerationTurnGate(
+        { assessText: f.assessText } as never,
+        () => new Date(1000),
+      );
+      expect(
+        await gate.moderatePending(
+          "conversation",
+          boundary,
+          new Date(1000 + remaining),
+        ),
+      ).toBe("retry");
+      expect(f.assessText).toHaveBeenCalledOnce();
+    },
+  );
+  it("stops on the first historical retry without contacting later candidates", async () => {
+    const f = setup(undefined, [row("past"), row("later")], { past: "retry" });
+    expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+      "retry",
+    );
+    expect(f.assessText.mock.calls.map(([a]) => a.subject.messageId)).toEqual([
+      "current",
+      "past",
+    ]);
+  });
 
- it('does not start after history lookup consumes the elapsed budget',async()=>{let clock=0;const f=setup();db.conversationMessage.findMany.mockReset().mockImplementation(async args=>{if(args.take===20){clock=16000;return [row('past')];}return [row('current')];});const gate=new ModerationTurnGate({assessText:f.assessText} as never,()=>new Date(clock));expect(await gate.moderatePending('conversation',boundary,new Date(120000))).toBe('retry');expect(f.assessText).toHaveBeenCalledOnce();});
-
+  it("does not start after history lookup consumes the elapsed budget", async () => {
+    let clock = 0;
+    const f = setup();
+    db.conversationMessage.findMany
+      .mockReset()
+      .mockImplementation(async (args) => {
+        if (args.take === 20) {
+          clock = 16000;
+          return [row("past")];
+        }
+        return [row("current")];
+      });
+    const gate = new ModerationTurnGate(
+      { assessText: f.assessText } as never,
+      () => new Date(clock),
+    );
+    expect(
+      await gate.moderatePending("conversation", boundary, new Date(120000)),
+    ).toBe("retry");
+    expect(f.assessText).toHaveBeenCalledOnce();
+  });
 });
 
-describe('latest pending objective moderation',()=>{
- beforeEach(()=>{vi.resetAllMocks();db.conversation.findUniqueOrThrow.mockResolvedValue({shopId:'shop',checkoutRecovery:{shopId:'shop'}});});
-it.each(['block','review_required','retry'])('an older pending allow never authorizes newest %s',async kind=>{
- const f=setup([row('older'),row('latest')],[],{latest:kind});
- expect(await f.gate.moderatePending('conversation',boundary)).toBe(kind==='retry'?'retry':'suppressed');
- expect(f.assessText.mock.calls.map(([a])=>a.subject.messageId)).toEqual(['older','latest']);
-});
-it('does not authorize older pending text when latest input is unsupported',async()=>{
- const f=setup([row('older'),row('latest',{contentType:'UNSUPPORTED'})],[]);
- expect(await f.gate.moderatePending('conversation',boundary)).toBe('suppressed');
+describe("latest pending objective moderation", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    db.conversation.findUniqueOrThrow.mockResolvedValue({
+      shopId: "shop",
+      checkoutRecovery: { shopId: "shop" },
+    });
+  });
+  it.each(["block", "review_required", "retry"])(
+    "an older pending allow never authorizes newest %s",
+    async (kind) => {
+      const f = setup([row("older"), row("latest")], [], { latest: kind });
+      expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+        kind === "retry" ? "retry" : "suppressed",
+      );
+      expect(f.assessText.mock.calls.map(([a]) => a.subject.messageId)).toEqual(
+        ["older", "latest"],
+      );
+    },
+  );
+  it("does not authorize older pending text when latest input is unsupported", async () => {
+    const f = setup(
+      [row("older"), row("latest", { contentType: "UNSUPPORTED" })],
+      [],
+    );
+    expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+      "suppressed",
+    );
+  });
 });
 
+it("moderates original plus the exact new clause after role projection and before newest selection", async () => {
+  db.conversationMessage.findMany.mockReset();
+  db.conversation.findUniqueOrThrow.mockResolvedValue({
+    shopId: "shop",
+    checkoutRecovery: { shopId: "shop" },
+  });
+  const { readRoutingHistoryProjection } =
+    await import("../../../../src/services/recovery-sender-pool/routing-projection.js");
+  const original = row("original", {
+    content: "Can it arrive Friday?",
+    createdAt: new Date(boundary.getTime() - 10000),
+  });
+  const current = row("selection", {
+    content: "2. Can I collect on Saturday?",
+    createdAt: new Date(boundary.getTime() - 1000),
+  });
+  const hash = (await import("node:crypto"))
+    .createHash("sha256")
+    .update(current.content.slice(3))
+    .digest("hex");
+  vi.mocked(readRoutingHistoryProjection).mockResolvedValueOnce({
+    bindings: [
+      {
+        role: "SELECT_AND_QUESTION",
+        original,
+        current,
+        clause: { start: 3, end: current.content.length, sha256: hash },
+        group: "selection",
+        at: boundary,
+      },
+    ],
+    excludedMessageIds: [],
+  } as never);
+  const f = setup([], []);
+  expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+    "allowed",
+  );
+  expect(
+    f.assessText.mock.calls.map(([input]) => (input as any).effectiveText),
+  ).toEqual(["Can it arrive Friday?", "Can I collect on Saturday?"]);
 });
 
-it('moderates original plus the exact new clause after role projection and before newest selection', async () => {
- db.conversationMessage.findMany.mockReset(); db.conversation.findUniqueOrThrow.mockResolvedValue({shopId:'shop',checkoutRecovery:{shopId:'shop'}});
- const { readRoutingHistoryProjection } = await import('../../../../src/services/recovery-sender-pool/routing-projection.js');
- const original = row('original',{content:'Can it arrive Friday?',createdAt:new Date(boundary.getTime()-10000)});
- const current = row('selection',{content:'2. Can I collect on Saturday?',createdAt:new Date(boundary.getTime()-1000)});
- const hash = (await import('node:crypto')).createHash('sha256').update(current.content.slice(3)).digest('hex');
- vi.mocked(readRoutingHistoryProjection).mockResolvedValueOnce({bindings:[{role:'SELECT_AND_QUESTION',original,current,clause:{start:3,end:current.content.length,sha256:hash},group:'selection',at:boundary}],excludedMessageIds:[]} as never);
- const f = setup([],[]);
- expect(await f.gate.moderatePending('conversation',boundary)).toBe('allowed');
- expect(f.assessText.mock.calls.map(([input])=>(input as any).effectiveText)).toEqual(['Can it arrive Friday?','Can I collect on Saturday?']);
-});
-
-it('does not promote an allowed original when its associated newest additional clause is blocked', async () => {
- db.conversationMessage.findMany.mockReset(); db.conversation.findUniqueOrThrow.mockResolvedValue({shopId:'shop',checkoutRecovery:{shopId:'shop'}});
- const { readRoutingHistoryProjection } = await import('../../../../src/services/recovery-sender-pool/routing-projection.js');
- const original = row('original',{content:'Can it arrive Friday?',createdAt:boundary});
- const current = row('selection',{content:'2. Blocked clause',createdAt:boundary});
- vi.mocked(readRoutingHistoryProjection).mockResolvedValueOnce({bindings:[{role:'SELECT_AND_QUESTION',original,current,clause:{start:3,end:current.content.length,sha256:'unused-pure-projection'},group:'selection',at:boundary}],excludedMessageIds:[]} as never);
- const f = setup([],[],{selection:'block'});
- expect(await f.gate.moderatePending('conversation',boundary)).toBe('suppressed');
- expect(f.assessText).toHaveBeenCalledTimes(2);
+it("does not promote an allowed original when its associated newest additional clause is blocked", async () => {
+  db.conversationMessage.findMany.mockReset();
+  db.conversation.findUniqueOrThrow.mockResolvedValue({
+    shopId: "shop",
+    checkoutRecovery: { shopId: "shop" },
+  });
+  const { readRoutingHistoryProjection } =
+    await import("../../../../src/services/recovery-sender-pool/routing-projection.js");
+  const original = row("original", {
+    content: "Can it arrive Friday?",
+    createdAt: boundary,
+  });
+  const current = row("selection", {
+    content: "2. Blocked clause",
+    createdAt: boundary,
+  });
+  vi.mocked(readRoutingHistoryProjection).mockResolvedValueOnce({
+    bindings: [
+      {
+        role: "SELECT_AND_QUESTION",
+        original,
+        current,
+        clause: {
+          start: 3,
+          end: current.content.length,
+          sha256: "unused-pure-projection",
+        },
+        group: "selection",
+        at: boundary,
+      },
+    ],
+    excludedMessageIds: [],
+  } as never);
+  const f = setup([], [], { selection: "block" });
+  expect(await f.gate.moderatePending("conversation", boundary)).toBe(
+    "suppressed",
+  );
+  expect(f.assessText).toHaveBeenCalledTimes(2);
 });

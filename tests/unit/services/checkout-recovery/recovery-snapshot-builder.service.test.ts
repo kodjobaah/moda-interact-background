@@ -98,7 +98,11 @@ describe("RecoverySnapshotBuilderService", () => {
       totalPrice: "999.00",
     });
 
-    const seed = await builder.build(staleCandidate, candidate.shopDomain, checkout);
+    const seed = await builder.build(
+      staleCandidate,
+      candidate.shopDomain,
+      checkout,
+    );
 
     expect(prismaMock.shop.findUnique).toHaveBeenCalledExactlyOnceWith({
       where: { id: candidate.shopId },
@@ -201,7 +205,11 @@ describe("RecoverySnapshotBuilderService", () => {
   it("normalizes invalid merchant defaults to null without throwing", () => {
     const resolved = resolveRecoveryInternationalContext(
       { ...candidate, internationalContext: undefined },
-      { ...checkout, internationalContext: null as unknown as NormalizedAbandonedCheckout["internationalContext"] },
+      {
+        ...checkout,
+        internationalContext:
+          null as unknown as NormalizedAbandonedCheckout["internationalContext"],
+      },
       {
         defaultLanguageTag: "not a language tag",
         defaultCountryCode: "not-a-country",
@@ -227,7 +235,11 @@ describe("RecoverySnapshotBuilderService", () => {
       lastActivityAt: undefined,
     };
 
-    const seed = await builder.build(candidateTimestamp, candidate.shopDomain, noCurrentTimestamp);
+    const seed = await builder.build(
+      candidateTimestamp,
+      candidate.shopDomain,
+      noCurrentTimestamp,
+    );
 
     expect(seed.detectedAt).toBe(candidateTimestamp.checkoutCreatedAt);
     expect(seed).not.toHaveProperty("lastExternalActivityAt");

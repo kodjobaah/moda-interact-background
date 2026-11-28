@@ -2,8 +2,7 @@ import { UsageMetric } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 
 export type LifetimeFreeCounterRepair =
-  | { kind: "present" | "created" }
-  | { kind: "history-conflict" };
+  { kind: "present" | "created" } | { kind: "history-conflict" };
 
 export async function ensureLifetimeFreeCounterForMappedSubscription(
   transaction: Prisma.TransactionClient,
@@ -34,11 +33,13 @@ export async function ensureLifetimeFreeCounterForMappedSubscription(
     select: { lifetimeFreeRecoveryAllowance: true },
   });
   if (
-    !policy
-    || !Number.isSafeInteger(policy.lifetimeFreeRecoveryAllowance)
-    || policy.lifetimeFreeRecoveryAllowance < 0
+    !policy ||
+    !Number.isSafeInteger(policy.lifetimeFreeRecoveryAllowance) ||
+    policy.lifetimeFreeRecoveryAllowance < 0
   ) {
-    throw new Error("PlatformBillingPolicy.default has an invalid lifetime Free recovery allowance");
+    throw new Error(
+      "PlatformBillingPolicy.default has an invalid lifetime Free recovery allowance",
+    );
   }
 
   await transaction.shopEntitlementCounter.upsert({

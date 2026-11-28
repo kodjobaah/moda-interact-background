@@ -14,10 +14,7 @@ describe("worker process lifecycle", () => {
     const resourceClose = vi.fn().mockResolvedValue(undefined);
     const shutdown = startWorkerProcess({
       serviceName: "test-worker",
-      workers: [
-        { close: firstWorkerClose },
-        { close: secondWorkerClose },
-      ],
+      workers: [{ close: firstWorkerClose }, { close: secondWorkerClose }],
       closeResources: [resourceClose],
     });
 

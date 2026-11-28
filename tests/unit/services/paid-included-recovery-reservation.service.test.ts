@@ -66,26 +66,60 @@ function createHarness(
       })),
     },
     billingPeriodEntitlementCounter: {
-      findUnique: vi.fn(async (args: { where: { id?: string; billingPeriodId_counter?: { billingPeriodId: string } } }) => {
-        if (args.where.id) return args.where.id === state.counter.id ? { ...state.counter, billingPeriod: { ...state.period } } : null;
-        return args.where.billingPeriodId_counter?.billingPeriodId === state.period.id
-          ? { ...state.counter }
-          : null;
-      }),
-      updateMany: vi.fn(async (args: { where: { id: string; version: number; reservedQuantity?: { gte: number } }; data: Record<string, any> }) => {
-        if (args.where.id !== state.counter.id || args.where.version !== state.counter.version) return { count: 0 };
-        if (args.where.reservedQuantity && state.counter.reservedQuantity < args.where.reservedQuantity.gte) return { count: 0 };
-        const reserved = args.data.reservedQuantity;
-        const committed = args.data.committedQuantity;
-        if (reserved?.increment) state.counter.reservedQuantity += reserved.increment;
-        if (reserved?.decrement) state.counter.reservedQuantity -= reserved.decrement;
-        if (committed?.increment) state.counter.committedQuantity += committed.increment;
-        state.counter.version += args.data.version.increment;
-        return { count: 1 };
-      }),
+      findUnique: vi.fn(
+        async (args: {
+          where: {
+            id?: string;
+            billingPeriodId_counter?: { billingPeriodId: string };
+          };
+        }) => {
+          if (args.where.id)
+            return args.where.id === state.counter.id
+              ? { ...state.counter, billingPeriod: { ...state.period } }
+              : null;
+          return args.where.billingPeriodId_counter?.billingPeriodId ===
+            state.period.id
+            ? { ...state.counter }
+            : null;
+        },
+      ),
+      updateMany: vi.fn(
+        async (args: {
+          where: {
+            id: string;
+            version: number;
+            reservedQuantity?: { gte: number };
+          };
+          data: Record<string, any>;
+        }) => {
+          if (
+            args.where.id !== state.counter.id ||
+            args.where.version !== state.counter.version
+          )
+            return { count: 0 };
+          if (
+            args.where.reservedQuantity &&
+            state.counter.reservedQuantity < args.where.reservedQuantity.gte
+          )
+            return { count: 0 };
+          const reserved = args.data.reservedQuantity;
+          const committed = args.data.committedQuantity;
+          if (reserved?.increment)
+            state.counter.reservedQuantity += reserved.increment;
+          if (reserved?.decrement)
+            state.counter.reservedQuantity -= reserved.decrement;
+          if (committed?.increment)
+            state.counter.committedQuantity += committed.increment;
+          state.counter.version += args.data.version.increment;
+          return { count: 1 };
+        },
+      ),
     },
     usageReservation: {
-      findUnique: vi.fn(async (args: { where: { sourceKey: string } }) => state.reservations.get(args.where.sourceKey) ?? null),
+      findUnique: vi.fn(
+        async (args: { where: { sourceKey: string } }) =>
+          state.reservations.get(args.where.sourceKey) ?? null,
+      ),
       create: vi.fn(async ({ data }: { data: Record<string, any> }) => {
         const reservation = {
           id: `reservation-${state.nextReservationId++}`,
@@ -96,11 +130,21 @@ function createHarness(
         state.reservations.set(data.sourceKey, reservation);
         return reservation;
       }),
-      update: vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, any> }) => {
-        const reservation = [...state.reservations.values()].find((value) => value.id === where.id)!;
-        Object.assign(reservation, data);
-        return reservation;
-      }),
+      update: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string };
+          data: Record<string, any>;
+        }) => {
+          const reservation = [...state.reservations.values()].find(
+            (value) => value.id === where.id,
+          )!;
+          Object.assign(reservation, data);
+          return reservation;
+        },
+      ),
     },
     usageEvent: {
       create: vi.fn(async ({ data }: { data: Record<string, any> }) => {
@@ -113,7 +157,10 @@ function createHarness(
 
   const database = {
     ...transaction,
-    $transaction: vi.fn(async (callback: (client: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    $transaction: vi.fn(
+      async (callback: (client: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+    ),
   };
   const policy = {
     shopId,
@@ -159,36 +206,60 @@ describe("PaidIncludedRecoveryReservationService", () => {
   it("keeps same-transaction commits direct and preserves the owner's original error", async () => {
     const harness = createHarness();
     const original = new Error("owner transaction failed");
-    const transaction = { usageReservation: { findUnique: vi.fn().mockRejectedValue(original) } };
+    const transaction = {
+      usageReservation: { findUnique: vi.fn().mockRejectedValue(original) },
+    };
 
-    await expect(harness.service.commitInExistingTransaction(transaction as never, {
-      shopId,
-      sourceKey: "paid-included:period-1:existing-transaction",
-    })).rejects.toBe(original);
+    await expect(
+      harness.service.commitInExistingTransaction(transaction as never, {
+        shopId,
+        sourceKey: "paid-included:period-1:existing-transaction",
+      }),
+    ).rejects.toBe(original);
     expect(harness.database.$transaction).not.toHaveBeenCalled();
   });
 
   it("derives the period-scoped source key after current period validation", async () => {
     const harness = createHarness();
-    await expect(reserve(harness)).resolves.toMatchObject({ sourceKey: "paid-included:period-1:recovery-1" });
+    await expect(reserve(harness)).resolves.toMatchObject({
+      sourceKey: "paid-included:period-1:recovery-1",
+    });
   });
 
   it("does not double-increment a duplicate reserve", async () => {
     const harness = createHarness();
     await reserve(harness);
-    await expect(reserve(harness)).resolves.toMatchObject({ kind: "already-reserved" });
+    await expect(reserve(harness)).resolves.toMatchObject({
+      kind: "already-reserved",
+    });
     expect(harness.state.counter.reservedQuantity).toBe(1);
   });
 
   it("uses a different source key when the same recovery enters a different period", async () => {
     const harness = createHarness(2);
     await reserve(harness);
-    await harness.service.release({ shopId, sourceKey: "paid-included:period-1:recovery-1" });
-    harness.state.period = { ...harness.state.period, id: "period-2", periodStart: new Date("2026-10-01T00:00:00.000Z"), periodEnd: new Date("2026-11-01T00:00:00.000Z") };
+    await harness.service.release({
+      shopId,
+      sourceKey: "paid-included:period-1:recovery-1",
+    });
+    harness.state.period = {
+      ...harness.state.period,
+      id: "period-2",
+      periodStart: new Date("2026-10-01T00:00:00.000Z"),
+      periodEnd: new Date("2026-11-01T00:00:00.000Z"),
+    };
     harness.state.subscription.billingPeriodId = "period-2";
-    harness.state.subscription.currentPeriodStart = harness.state.period.periodStart;
-    harness.state.subscription.currentPeriodEnd = harness.state.period.periodEnd;
-    harness.state.counter = { ...harness.state.counter, id: "period-counter-2", billingPeriodId: "period-2", reservedQuantity: 0, version: 2 };
+    harness.state.subscription.currentPeriodStart =
+      harness.state.period.periodStart;
+    harness.state.subscription.currentPeriodEnd =
+      harness.state.period.periodEnd;
+    harness.state.counter = {
+      ...harness.state.counter,
+      id: "period-counter-2",
+      billingPeriodId: "period-2",
+      reservedQuantity: 0,
+      version: 2,
+    };
     harness.policy.billingPeriod = {
       ...harness.policy.billingPeriod,
       id: "period-2",
@@ -200,12 +271,17 @@ describe("PaidIncludedRecoveryReservationService", () => {
         billingPeriodId: "period-2",
       },
     };
-    await expect(reserve(harness)).resolves.toMatchObject({ sourceKey: "paid-included:period-2:recovery-1" });
+    await expect(reserve(harness)).resolves.toMatchObject({
+      sourceKey: "paid-included:period-2:recovery-1",
+    });
   });
 
   it("returns allowance exhausted without creating overage", async () => {
     const harness = createHarness(0);
-    await expect(reserve(harness)).resolves.toMatchObject({ kind: "allowance-exhausted", remaining: 0 });
+    await expect(reserve(harness)).resolves.toMatchObject({
+      kind: "allowance-exhausted",
+      remaining: 0,
+    });
     expect(harness.state.reservations.size).toBe(0);
   });
 
@@ -226,7 +302,9 @@ describe("PaidIncludedRecoveryReservationService", () => {
     await reserve(harness, "recovery-before-upgrade");
     harness.state.counter.currentAllowanceQuantity = 5;
 
-    await expect(reserve(harness, "recovery-after-upgrade")).resolves.toMatchObject({ kind: "reserved" });
+    await expect(
+      reserve(harness, "recovery-after-upgrade"),
+    ).resolves.toMatchObject({ kind: "reserved" });
     expect(harness.state.period.id).toBe("period-1");
     expect(harness.state.counter).toMatchObject({
       grantedQuantity: 10,
@@ -242,35 +320,48 @@ describe("PaidIncludedRecoveryReservationService", () => {
     await reserve(harness);
     harness.state.counter.currentAllowanceQuantity = 0;
 
-    await expect(harness.service.commit({
-      shopId,
-      sourceKey: "paid-included:period-1:recovery-1",
-    })).resolves.toMatchObject({ kind: "committed" });
-    expect(harness.state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
+    await expect(
+      harness.service.commit({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "committed" });
+    expect(harness.state.counter).toMatchObject({
+      committedQuantity: 1,
+      reservedQuantity: 0,
+    });
   });
 
   it("rejects a current allowance above the high-water grant", async () => {
     const harness = createHarness(1, 2);
 
-    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    await expect(reserve(harness)).rejects.toBeInstanceOf(
+      PaidIncludedRecoveryReservationError,
+    );
   });
 
   it("fails closed when the included counter is missing", async () => {
     const harness = createHarness();
     harness.state.counter = null as never;
-    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    await expect(reserve(harness)).rejects.toBeInstanceOf(
+      PaidIncludedRecoveryReservationError,
+    );
   });
 
   it("fails closed for a closed period", async () => {
     const harness = createHarness();
     harness.state.period.status = "CLOSED" as never;
-    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    await expect(reserve(harness)).rejects.toBeInstanceOf(
+      PaidIncludedRecoveryReservationError,
+    );
   });
 
   it("fails closed for an expired open period", async () => {
     const harness = createHarness();
     harness.state.period.periodEnd = new Date("2026-09-10T00:00:00.000Z");
-    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    await expect(reserve(harness)).rejects.toBeInstanceOf(
+      PaidIncludedRecoveryReservationError,
+    );
   });
 
   it("marks an existing paid reservation whose period is no longer current/open with the typed reason", async () => {
@@ -278,25 +369,34 @@ describe("PaidIncludedRecoveryReservationService", () => {
     await reserve(harness);
     harness.state.period.status = "CLOSED" as never;
 
-    const error = await harness.service.commitInExistingTransaction(
-      harness.transaction as never,
-      { shopId, sourceKey: "paid-included:period-1:recovery-1" },
-    ).catch((reason: unknown) => reason);
+    const error = await harness.service
+      .commitInExistingTransaction(harness.transaction as never, {
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      })
+      .catch((reason: unknown) => reason);
 
     expect(error).toBeInstanceOf(PaidIncludedRecoveryReservationError);
     expect(error).toMatchObject({ reason: "PERIOD_NOT_CURRENT_OPEN" });
     expect((error as Error).message).toContain("no longer current and open");
-    expect(harness.state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
+    expect(harness.state.counter).toMatchObject({
+      committedQuantity: 0,
+      reservedQuantity: 1,
+    });
   });
 
   it("rejects direct Woo reservations while FROZEN without changing capacity", async () => {
     const harness = createHarness(1, null, "WOOCOMMERCE");
     harness.policy.subscriptionStatus = "FROZEN";
 
-    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    await expect(reserve(harness)).rejects.toBeInstanceOf(
+      PaidIncludedRecoveryReservationError,
+    );
     expect(harness.state.counter.reservedQuantity).toBe(0);
     expect(harness.state.reservations.size).toBe(0);
-    expect(harness.transaction.billingPeriodEntitlementCounter.updateMany).not.toHaveBeenCalled();
+    expect(
+      harness.transaction.billingPeriodEntitlementCounter.updateMany,
+    ).not.toHaveBeenCalled();
   });
 
   it("rejects direct Woo reservations after provider coverage expires before local period end", async () => {
@@ -304,68 +404,103 @@ describe("PaidIncludedRecoveryReservationService", () => {
     harness.policy.providerCoverageEndAt = new Date("2026-09-14T00:00:00.000Z");
     harness.policy.billingPeriod.phase = "EXPIRED_RECONCILING";
 
-    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
-    expect(harness.state.period.periodEnd.getTime()).toBeGreaterThan(now.getTime());
+    await expect(reserve(harness)).rejects.toBeInstanceOf(
+      PaidIncludedRecoveryReservationError,
+    );
+    expect(harness.state.period.periodEnd.getTime()).toBeGreaterThan(
+      now.getTime(),
+    );
     expect(harness.state.counter.reservedQuantity).toBe(0);
     expect(harness.state.reservations.size).toBe(0);
-    expect(harness.transaction.billingPeriodEntitlementCounter.updateMany).not.toHaveBeenCalled();
+    expect(
+      harness.transaction.billingPeriodEntitlementCounter.updateMany,
+    ).not.toHaveBeenCalled();
   });
 
   it("fails closed for subscription and period boundary mismatch", async () => {
     const harness = createHarness();
-    harness.state.subscription.currentPeriodEnd = new Date("2026-10-02T00:00:00.000Z");
-    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    harness.state.subscription.currentPeriodEnd = new Date(
+      "2026-10-02T00:00:00.000Z",
+    );
+    await expect(reserve(harness)).rejects.toBeInstanceOf(
+      PaidIncludedRecoveryReservationError,
+    );
   });
 
   it("fails closed for shop, subscription, or counter identity mismatch", async () => {
     const harness = createHarness();
     harness.state.period.subscriptionId = "other-subscription";
-    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    await expect(reserve(harness)).rejects.toBeInstanceOf(
+      PaidIncludedRecoveryReservationError,
+    );
 
     const second = createHarness();
     second.state.counter.shopId = "other-shop";
-    await expect(reserve(second)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    await expect(reserve(second)).rejects.toBeInstanceOf(
+      PaidIncludedRecoveryReservationError,
+    );
   });
 
   it("moves a reserved row to committed exactly once", async () => {
     const harness = createHarness();
     await reserve(harness);
     harness.transaction.subscription.findUnique.mockClear();
-    await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).resolves.toMatchObject({ kind: "committed" });
-    await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).resolves.toMatchObject({ kind: "already-committed" });
-    expect(harness.state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
+    await expect(
+      harness.service.commit({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "committed" });
+    await expect(
+      harness.service.commit({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "already-committed" });
+    expect(harness.state.counter).toMatchObject({
+      committedQuantity: 1,
+      reservedQuantity: 0,
+    });
     expect(harness.transaction.subscription.findUnique).toHaveBeenCalledOnce();
   });
 
   it.each([
     ["SHOPIFY", "PENDING", "paid-meter"],
     ["WOOCOMMERCE", "NOT_APPLICABLE", null],
-  ])("writes provider-specific paid UsageEvent evidence for %s", async (provider, reportState, eventHandle) => {
-    const harness = createHarness(1, null, provider);
-    await reserve(harness);
-    await harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" });
-    expect(harness.state.usageEvents).toHaveLength(1);
-    expect(harness.state.usageEvents[0]).toMatchObject({
-      billingPeriodId: "period-1",
-      metric: "RECOVERY_CONVERSATION",
-      provider,
-      shopifyReportState: reportState,
-      shopifyEventHandle: eventHandle,
-      quantity: 1,
-    });
-    if (provider === "WOOCOMMERCE") {
-      expect(harness.state.usageEvents[0].shopifyIdempotencyKey).toBeNull();
-    }
-  });
+  ])(
+    "writes provider-specific paid UsageEvent evidence for %s",
+    async (provider, reportState, eventHandle) => {
+      const harness = createHarness(1, null, provider);
+      await reserve(harness);
+      await harness.service.commit({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      });
+      expect(harness.state.usageEvents).toHaveLength(1);
+      expect(harness.state.usageEvents[0]).toMatchObject({
+        billingPeriodId: "period-1",
+        metric: "RECOVERY_CONVERSATION",
+        provider,
+        shopifyReportState: reportState,
+        shopifyEventHandle: eventHandle,
+        quantity: 1,
+      });
+      if (provider === "WOOCOMMERCE") {
+        expect(harness.state.usageEvents[0].shopifyIdempotencyKey).toBeNull();
+      }
+    },
+  );
 
   it("commits Woo paid included usage without a Shopify usage event handle", async () => {
     const harness = createHarness(1, null, "WOOCOMMERCE");
     await reserve(harness);
 
-    await expect(harness.service.commit({
-      shopId,
-      sourceKey: "paid-included:period-1:recovery-1",
-    })).resolves.toMatchObject({ kind: "committed" });
+    await expect(
+      harness.service.commit({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "committed" });
     expect(harness.state.usageEvents[0]).toMatchObject({
       provider: "WOOCOMMERCE",
       shopifyReportState: "NOT_APPLICABLE",
@@ -380,9 +515,16 @@ describe("PaidIncludedRecoveryReservationService", () => {
     await reserve(harness);
 
     const sourceKey = "paid-included:period-1:recovery-1";
-    await expect(harness.service.commit({ shopId, sourceKey })).resolves.toMatchObject({ kind: "committed" });
-    await expect(harness.service.commit({ shopId, sourceKey })).resolves.toMatchObject({ kind: "already-committed" });
-    expect(harness.state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
+    await expect(
+      harness.service.commit({ shopId, sourceKey }),
+    ).resolves.toMatchObject({ kind: "committed" });
+    await expect(
+      harness.service.commit({ shopId, sourceKey }),
+    ).resolves.toMatchObject({ kind: "already-committed" });
+    expect(harness.state.counter).toMatchObject({
+      committedQuantity: 1,
+      reservedQuantity: 0,
+    });
     expect(harness.state.usageEvents).toHaveLength(1);
     expect(harness.state.usageEvents[0]).toMatchObject({
       provider: "SHOPIFY",
@@ -396,19 +538,30 @@ describe("PaidIncludedRecoveryReservationService", () => {
     const harness = createHarness();
     harness.state.plan.shopifyUsageEventHandle = "  ";
     await reserve(harness);
-    await expect(harness.service.commit({
-      shopId, sourceKey: "paid-included:period-1:recovery-1",
-    })).resolves.toMatchObject({ kind: "committed" });
+    await expect(
+      harness.service.commit({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "committed" });
     expect(harness.state.usageEvents[0]).toMatchObject({
-      shopifyReportState: "NOT_APPLICABLE", shopifyEventHandle: null, shopifyIdempotencyKey: null,
+      shopifyReportState: "NOT_APPLICABLE",
+      shopifyEventHandle: null,
+      shopifyIdempotencyKey: null,
     });
   });
 
   it("does not create a second event or increment on duplicate commit", async () => {
     const harness = createHarness();
     await reserve(harness);
-    await harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" });
-    await harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" });
+    await harness.service.commit({
+      shopId,
+      sourceKey: "paid-included:period-1:recovery-1",
+    });
+    await harness.service.commit({
+      shopId,
+      sourceKey: "paid-included:period-1:recovery-1",
+    });
     expect(harness.state.usageEvents).toHaveLength(1);
     expect(harness.state.counter.committedQuantity).toBe(1);
   });
@@ -416,8 +569,18 @@ describe("PaidIncludedRecoveryReservationService", () => {
   it("releases definitive failure capacity once", async () => {
     const harness = createHarness();
     await reserve(harness);
-    await expect(harness.service.release({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).resolves.toMatchObject({ kind: "released" });
-    await expect(harness.service.release({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).resolves.toMatchObject({ kind: "already-released" });
+    await expect(
+      harness.service.release({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "released" });
+    await expect(
+      harness.service.release({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "already-released" });
     expect(harness.state.counter.reservedQuantity).toBe(0);
   });
 
@@ -426,45 +589,82 @@ describe("PaidIncludedRecoveryReservationService", () => {
     await reserve(harness);
     harness.state.period.status = "CLOSED" as never;
 
-    await expect(harness.service.release({ shopId, sourceKey: "paid-included:period-1:recovery-1" }))
-      .resolves.toMatchObject({ kind: "released" });
-    await expect(harness.service.release({ shopId, sourceKey: "paid-included:period-1:recovery-1" }))
-      .resolves.toMatchObject({ kind: "already-released" });
+    await expect(
+      harness.service.release({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "released" });
+    await expect(
+      harness.service.release({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "already-released" });
     expect(harness.state.counter.reservedQuantity).toBe(0);
-    await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" }))
-      .resolves.toMatchObject({ kind: "already-released" });
+    await expect(
+      harness.service.commit({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "already-released" });
   });
 
   it("keeps ambiguous capacity protected", async () => {
     const harness = createHarness();
     await reserve(harness);
-    await expect(harness.service.markAmbiguous({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).resolves.toMatchObject({ kind: "ambiguous" });
+    await expect(
+      harness.service.markAmbiguous({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).resolves.toMatchObject({ kind: "ambiguous" });
     expect(harness.state.counter.reservedQuantity).toBe(1);
   });
 
   it("rejects release of a committed reservation", async () => {
     const harness = createHarness();
     await reserve(harness);
-    await harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" });
-    await expect(harness.service.release({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    await harness.service.commit({
+      shopId,
+      sourceKey: "paid-included:period-1:recovery-1",
+    });
+    await expect(
+      harness.service.release({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
   });
 
   it("rejects commit after the owning period closes", async () => {
     const harness = createHarness();
     await reserve(harness);
     harness.state.period.status = "CLOSED" as never;
-    await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    await expect(
+      harness.service.commit({
+        shopId,
+        sourceKey: "paid-included:period-1:recovery-1",
+      }),
+    ).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
   });
 
   it("retries P2034 conflicts with a bounded attempt count", async () => {
     const harness = createHarness();
     let failures = 0;
-    harness.database.$transaction = vi.fn(async (callback: (client: typeof harness.transaction) => Promise<unknown>) => {
-      if (failures++ < 2) {
-        throw new Prisma.PrismaClientKnownRequestError("serialization conflict", { code: "P2034", clientVersion: "test" });
-      }
-      return callback(harness.transaction);
-    }) as never;
+    harness.database.$transaction = vi.fn(
+      async (
+        callback: (client: typeof harness.transaction) => Promise<unknown>,
+      ) => {
+        if (failures++ < 2) {
+          throw new Prisma.PrismaClientKnownRequestError(
+            "serialization conflict",
+            { code: "P2034", clientVersion: "test" },
+          );
+        }
+        return callback(harness.transaction);
+      },
+    ) as never;
     await expect(reserve(harness)).resolves.toMatchObject({ kind: "reserved" });
     expect(harness.database.$transaction).toHaveBeenCalledTimes(3);
     expect(harness.state.counter.reservedQuantity).toBe(1);
@@ -473,12 +673,19 @@ describe("PaidIncludedRecoveryReservationService", () => {
   it("retries a P2002 conflict without duplicating the reservation", async () => {
     const harness = createHarness();
     let failures = 0;
-    harness.database.$transaction = vi.fn(async (callback: (client: typeof harness.transaction) => Promise<unknown>) => {
-      if (failures++ === 0) {
-        throw new Prisma.PrismaClientKnownRequestError("unique conflict", { code: "P2002", clientVersion: "test" });
-      }
-      return callback(harness.transaction);
-    }) as never;
+    harness.database.$transaction = vi.fn(
+      async (
+        callback: (client: typeof harness.transaction) => Promise<unknown>,
+      ) => {
+        if (failures++ === 0) {
+          throw new Prisma.PrismaClientKnownRequestError("unique conflict", {
+            code: "P2002",
+            clientVersion: "test",
+          });
+        }
+        return callback(harness.transaction);
+      },
+    ) as never;
 
     await expect(reserve(harness)).resolves.toMatchObject({ kind: "reserved" });
     expect(harness.database.$transaction).toHaveBeenCalledTimes(2);
@@ -488,21 +695,28 @@ describe("PaidIncludedRecoveryReservationService", () => {
 
   it("retries an internal CAS conflict when updateMany affects no rows", async () => {
     const harness = createHarness();
-    const updateMany = harness.transaction.billingPeriodEntitlementCounter.updateMany;
-    harness.transaction.billingPeriodEntitlementCounter.updateMany = vi.fn()
+    const updateMany =
+      harness.transaction.billingPeriodEntitlementCounter.updateMany;
+    harness.transaction.billingPeriodEntitlementCounter.updateMany = vi
+      .fn()
       .mockResolvedValueOnce({ count: 0 })
       .mockImplementation(updateMany);
 
     await expect(reserve(harness)).resolves.toMatchObject({ kind: "reserved" });
     expect(harness.database.$transaction).toHaveBeenCalledTimes(2);
-    expect(harness.transaction.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledTimes(2);
+    expect(
+      harness.transaction.billingPeriodEntitlementCounter.updateMany,
+    ).toHaveBeenCalledTimes(2);
     expect(harness.state.counter.reservedQuantity).toBe(1);
   });
 
   it("stops after maxRetries when every transaction conflicts", async () => {
     const harness = createHarness();
     harness.database.$transaction = vi.fn(async () => {
-      throw new Prisma.PrismaClientKnownRequestError("serialization conflict", { code: "P2034", clientVersion: "test" });
+      throw new Prisma.PrismaClientKnownRequestError("serialization conflict", {
+        code: "P2034",
+        clientVersion: "test",
+      });
     }) as never;
 
     await expect(reserve(harness)).rejects.toMatchObject({ code: "P2034" });

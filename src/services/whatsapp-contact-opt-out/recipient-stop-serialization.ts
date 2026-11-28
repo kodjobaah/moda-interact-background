@@ -19,10 +19,13 @@ export async function lockWhatsAppStopRecipient(
     .readBigInt64BE(0);
   // Materialization forces the volatile lock function to run, and returns an
   // ordinary integer instead of PostgreSQL's unsupported 'void' wire type.
-  await tx.$queryRawUnsafe<Array<{ acquired: number }>>(`
+  await tx.$queryRawUnsafe<Array<{ acquired: number }>>(
+    `
     WITH recipient_lock AS MATERIALIZED (
       SELECT pg_advisory_xact_lock($1::bigint)
     )
     SELECT COUNT(*)::integer AS "acquired" FROM recipient_lock
-  `, key);
+  `,
+    key,
+  );
 }

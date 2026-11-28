@@ -1,5 +1,8 @@
 import { Prisma } from "@prisma/client";
-import { CommerceEnvironmentSchema, type CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
+import {
+  CommerceEnvironmentSchema,
+  type CommerceEnvironment,
+} from "@modainteract/moda-interact-shared/commerce/model";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import {
@@ -45,10 +48,16 @@ type ExpectedItem = {
 type ResultTransaction = StoreCategoryTranslationRunStateTransaction;
 
 type ResultDatabase = {
-  $transaction<T>(callback: (transaction: ResultTransaction) => Promise<T>): Promise<T>;
+  $transaction<T>(
+    callback: (transaction: ResultTransaction) => Promise<T>,
+  ): Promise<T>;
 };
 
-type ProviderFactory = (options: { provider: string; model: string; apiKey: string }) => TranslationProvider;
+type ProviderFactory = (options: {
+  provider: string;
+  model: string;
+  apiKey: string;
+}) => TranslationProvider;
 
 const logger = createLogger({
   serviceName: "moda-merchant-communications-worker",
@@ -70,49 +79,78 @@ export class StoreCategoryTranslationBatchResultsService {
   private readonly database: ResultDatabase;
   private readonly providerFactory: ProviderFactory;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
-  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
+  private readonly credentialResolverFactory: () =>
+    | TranslationProviderCredentialResolver
+    | Promise<TranslationProviderCredentialResolver>;
   private readonly runStateService: StoreCategoryTranslationRunStateService;
 
-  constructor(options: {
-    database?: ResultDatabase;
-    providerFactory?: ProviderFactory;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-    credentialResolverFactory?: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
-    runStateService?: StoreCategoryTranslationRunStateService;
-  } = {}) {
+  constructor(
+    options: {
+      database?: ResultDatabase;
+      providerFactory?: ProviderFactory;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+      credentialResolverFactory?: () =>
+        | TranslationProviderCredentialResolver
+        | Promise<TranslationProviderCredentialResolver>;
+      runStateService?: StoreCategoryTranslationRunStateService;
+    } = {},
+  ) {
     this.database = options.database ?? prisma;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) =>
-      createOpenAITranslationProvider(providerOptions));
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
-    this.credentialResolverFactory = options.credentialResolverFactory ?? defaultCredentialResolver;
-    this.runStateService = options.runStateService ?? new StoreCategoryTranslationRunStateService(this.database);
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.credentialResolverFactory =
+      options.credentialResolverFactory ?? defaultCredentialResolver;
+    this.runStateService =
+      options.runStateService ??
+      new StoreCategoryTranslationRunStateService(this.database);
   }
 
-  async apply(input: { translationBatchId: string }): Promise<StoreCategoryTranslationBatchResultsResult> {
+  async apply(input: {
+    translationBatchId: string;
+  }): Promise<StoreCategoryTranslationBatchResultsResult> {
     const startedAt = Date.now();
     const batch = await this.loadBatch(input.translationBatchId);
-    if (!batch || batch.status === "COMPLETED" || batch.status !== "PROVIDER_COMPLETED") {
+    if (
+      !batch ||
+      batch.status === "COMPLETED" ||
+      batch.status !== "PROVIDER_COMPLETED"
+    ) {
       return { status: "skipped", batchId: input.translationBatchId };
     }
 
-    const environment = CommerceEnvironmentSchema.parse(batch.environment) as CommerceEnvironment;
-    const apiKey = await (await this.credentialResolverFactory()).resolve({
+    const environment = CommerceEnvironmentSchema.parse(
+      batch.environment,
+    ) as CommerceEnvironment;
+    const apiKey = await (
+      await this.credentialResolverFactory()
+    ).resolve({
       environment,
       provider: batch.provider,
     });
-    const provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
+    const provider = this.providerFactory({
+      provider: batch.provider,
+      model: batch.model,
+      apiKey,
+    });
     const { applied } = await applyTranslationProviderResults({
       provider,
       outputFileId: batch.outputFileId,
       errorFileId: batch.errorFileId,
       missingResultFileMessage: `Store Category translation Batch ${batch.id} has no provider result file`,
       loadExpectedProviderCustomIds: async () =>
-        (await this.loadExpectedItems(batch.id)).map((item) => item.providerCustomId),
+        (await this.loadExpectedItems(batch.id)).map(
+          (item) => item.providerCustomId,
+        ),
       membershipMessages: {
-        countMismatch: "Store Category translation Batch output does not contain exactly one result per expected item",
+        countMismatch:
+          "Store Category translation Batch output does not contain exactly one result per expected item",
         unknownProviderCustomId: (providerCustomId) =>
           `Unknown Store Category translation provider custom ID: ${providerCustomId}`,
-        duplicateProviderCustomId: "Store Category translation Batch output contains duplicate provider custom IDs",
+        duplicateProviderCustomId:
+          "Store Category translation Batch output contains duplicate provider custom IDs",
       },
       applyResult: (result) => this.applyResult(batch.id, result),
     });
@@ -142,21 +180,28 @@ export class StoreCategoryTranslationBatchResultsService {
   }
 
   private async loadExpectedItems(batchId: string): Promise<ExpectedItem[]> {
-    return this.database.$transaction(async (transaction) => transaction.$queryRaw<ExpectedItem[]>(Prisma.sql`
+    return this.database.$transaction(async (transaction) =>
+      transaction.$queryRaw<ExpectedItem[]>(Prisma.sql`
       SELECT "providerCustomId", "translationItemId"
       FROM "commerce"."CommerceStoreCategoryTranslationBatchItem"
       WHERE "batchId" = ${batchId}
-    `));
+    `),
+    );
   }
 
-  private async applyResult(batchId: string, result: TranslationProviderResult): Promise<boolean> {
+  private async applyResult(
+    batchId: string,
+    result: TranslationProviderResult,
+  ): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<Array<{
-        translationItemId: string;
-        status: string;
-        currentBatchId: string | null;
-        retryCount: number;
-      }>>(Prisma.sql`
+      const rows = await transaction.$queryRaw<
+        Array<{
+          translationItemId: string;
+          status: string;
+          currentBatchId: string | null;
+          retryCount: number;
+        }>
+      >(Prisma.sql`
         SELECT t."id" AS "translationItemId", t."status"::text AS "status",
           t."currentBatchId", t."retryCount"
         FROM "commerce"."CommerceStoreCategoryTranslationBatchItem" i
@@ -166,8 +211,12 @@ export class StoreCategoryTranslationBatchResultsService {
           AND i."providerCustomId" = ${result.providerCustomId}
       `);
       const record = rows[0];
-      if (!record) throw new Error(`Provider custom ID is not a member of Batch ${batchId}`);
-      if (record.status !== "PENDING" || record.currentBatchId !== batchId) return false;
+      if (!record)
+        throw new Error(
+          `Provider custom ID is not a member of Batch ${batchId}`,
+        );
+      if (record.status !== "PENDING" || record.currentBatchId !== batchId)
+        return false;
 
       const translatedText = result.translatedText?.trim();
       if (result.status === "completed" && translatedText) {
@@ -212,9 +261,14 @@ export class StoreCategoryTranslationBatchResultsService {
     });
   }
 
-  private async completeBatchAndAdvanceRun(batchId: string, runId: string): Promise<void> {
+  private async completeBatchAndAdvanceRun(
+    batchId: string,
+    runId: string,
+  ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
-      const pending = await transaction.$queryRaw<Array<{ count: bigint }>>(Prisma.sql`
+      const pending = await transaction.$queryRaw<
+        Array<{ count: bigint }>
+      >(Prisma.sql`
         SELECT COUNT(*)::bigint AS "count"
         FROM "commerce"."CommerceStoreCategoryTranslationBatchItem" i
         INNER JOIN "commerce"."CommerceStoreCategoryTranslationItem" t ON t."id" = i."translationItemId"
@@ -223,7 +277,9 @@ export class StoreCategoryTranslationBatchResultsService {
           AND t."currentBatchId" = ${batchId}
       `);
       if (Number(pending[0]?.count ?? 0) !== 0) {
-        throw new Error(`Store Category translation Batch ${batchId} still has unapplied items`);
+        throw new Error(
+          `Store Category translation Batch ${batchId} still has unapplied items`,
+        );
       }
 
       await transaction.$executeRaw(Prisma.sql`
@@ -234,10 +290,13 @@ export class StoreCategoryTranslationBatchResultsService {
 
       const transition = await this.runStateService.advance(runId, transaction);
       if (transition.status === "READY_TO_PUBLISH") {
-        logger.info("background.store_category_translation.run_ready_to_publish", {
-          runId,
-          localeItemCount: transition.localeItemCount,
-        });
+        logger.info(
+          "background.store_category_translation.run_ready_to_publish",
+          {
+            runId,
+            localeItemCount: transition.localeItemCount,
+          },
+        );
       }
     });
   }

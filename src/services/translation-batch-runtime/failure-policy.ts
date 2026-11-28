@@ -15,7 +15,8 @@ export function classifyTranslationSubmissionFailure(
   if (error && typeof error === "object") {
     const candidate = error as SubmissionFailureLike;
     if (candidate.classification) return candidate.classification;
-    if (candidate.submissionClassification) return candidate.submissionClassification;
+    if (candidate.submissionClassification)
+      return candidate.submissionClassification;
   }
   return fallback;
 }

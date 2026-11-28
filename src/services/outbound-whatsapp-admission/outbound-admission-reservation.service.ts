@@ -4,7 +4,13 @@ import { checkInitialRetryPermit } from "../recovery-delivery-retry/initial-perm
 import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
 import { RecoveryCompensationLineageError } from "../recovery-delivery-compensation/types.js";
 import { lockRecoveryContext } from "../recovery-conversation/recovery-conversation.sql.js";
-import { AllowanceHeld, currentAllowance, allowanceUsage, notifyAllowanceBoundary, exactBlockSource } from "../recovery-allowance/storage.js";
+import {
+  AllowanceHeld,
+  currentAllowance,
+  allowanceUsage,
+  notifyAllowanceBoundary,
+  exactBlockSource,
+} from "../recovery-allowance/storage.js";
 import { RecoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import { MessageStatus, Prisma, UsageMetric } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
@@ -52,8 +58,9 @@ export class OutboundAdmissionReservationService {
     createPolicyResolver: PolicyResolverFactory = (client) =>
       new EffectiveBillingPolicyResolver(client),
     private readonly maxRetries = MAX_TRANSACTION_RETRIES,
-    createPostContractPolicyResolver: PostContractPolicyResolverFactory =
-      (client) => new PostContractRecoveryPolicyResolver(client),
+    createPostContractPolicyResolver: PostContractPolicyResolverFactory = (
+      client,
+    ) => new PostContractRecoveryPolicyResolver(client),
   ) {
     this.allowance = new RecoveryAllowanceService(database as PrismaClient);
     this.policy = new OutboundAdmissionPolicyService(
@@ -68,12 +75,21 @@ export class OutboundAdmissionReservationService {
       select: { sourceId: true },
     });
     if (!usage?.sourceId) {
-      const historical = await failedRecipientOutreach(this.database, idempotencyKey);
+      const historical = await failedRecipientOutreach(
+        this.database,
+        idempotencyKey,
+      );
       return historical?.message ?? null;
     }
     return this.database.conversationMessage.findUnique({
       where: { id: usage.sourceId },
-      select: { id: true, conversationId: true, status: true, sentAt: true, providerFailureCode: true },
+      select: {
+        id: true,
+        conversationId: true,
+        status: true,
+        sentAt: true,
+        providerFailureCode: true,
+      },
     });
   }
 
@@ -81,120 +97,244 @@ export class OutboundAdmissionReservationService {
     scope: InitialOutreachAdmissionScope,
   ): Promise<InitialOutreachAdmissionLookup> {
     const conflict = { kind: "held", reason: "lineage-conflict" } as const;
-    const unknown = { kind: "held", reason: "provider-outcome-unknown" } as const;
-    if (!scope.shopId || !scope.recoveryId || !/^[A-Za-z0-9_-]+$/.test(scope.outreachAttemptId))
+    const unknown = {
+      kind: "held",
+      reason: "provider-outcome-unknown",
+    } as const;
+    if (
+      !scope.shopId ||
+      !scope.recoveryId ||
+      !/^[A-Za-z0-9_-]+$/.test(scope.outreachAttemptId)
+    )
       return conflict;
-    return this.database.$transaction(async (tx) => {
-      const attempt = await tx.recoveryOutreachAttempt.findUnique({
-        where: { id: scope.outreachAttemptId },
-        include: { checkoutRecovery: { select: { shopId: true, status: true } } },
-      });
-      const retry = isInitialRetryId(scope.outreachAttemptId);
-      if (!attempt || (retry ? attempt.sequence < 3 : attempt.sequence !== 1) || attempt.trigger !== "INITIAL" ||
-          attempt.checkoutRecoveryId !== scope.recoveryId ||
-          attempt.checkoutRecovery.shopId !== scope.shopId || !attempt.recipient)
-        return conflict;
-
-      const usage = await tx.usageEvent.findUnique({
-        where: { idempotencyKey: `recovery-outreach:${scope.outreachAttemptId}` },
-      });
-      if (usage && (!usage.sourceId || usage.shopId !== scope.shopId ||
-          usage.metric !== UsageMetric.OUTBOUND_AUTOMATED_MESSAGE ||
-          usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" || Number(usage.quantity) !== 1 ||
-          (attempt.outboundMessageId && attempt.outboundMessageId !== usage.sourceId)))
-        return conflict;
-      const conversation = await tx.conversation.findUnique({
-        where: { checkoutRecoveryId: scope.recoveryId },
-        select: { id: true, type: true, shopId: true },
-      });
-      if (!conversation || conversation.type !== "RECOVERY" ||
-          (conversation.shopId !== null && conversation.shopId !== scope.shopId))
-        return conflict;
-
-      if (retry) {
-        // Historical lineage is intentionally separate from current eligibility:
-        // already-admitted receipts must remain inspectable after cancellation.
-        try { await readRetryFundingLineage(tx, { recoveryId: scope.recoveryId, conversationId: conversation.id, attemptId: attempt.id }); }
-        catch (error) { if (error instanceof RecoveryCompensationLineageError) return conflict; throw error; }
-      }
-      const eligible = (attempt.status === "PENDING" || attempt.status === "CAPACITY_BLOCKED") &&
-        (attempt.checkoutRecovery.status === "DETECTED" || retry && attempt.checkoutRecovery.status === "MESSAGE_SENT") && !attempt.sentAt &&
-        !attempt.outboundMessageId && !attempt.followUpDueAt && !attempt.closedAt;
-      const messageId = usage?.sourceId ?? attempt.outboundMessageId;
-      if (!messageId) {
-        if (!eligible) return conflict;
-        const orphan = await tx.conversationMessage.findFirst({
-          where: { conversationId: conversation.id, direction: "OUTBOUND", senderType: "AUTOMATION",
-            recoveryOutreachAttempt: null },
-          select: { id: true },
+    return this.database.$transaction(
+      async (tx) => {
+        const attempt = await tx.recoveryOutreachAttempt.findUnique({
+          where: { id: scope.outreachAttemptId },
+          include: {
+            checkoutRecovery: { select: { shopId: true, status: true } },
+          },
         });
-        return orphan ? conflict : { kind: "absent" };
-      }
-      const row = await tx.conversationMessage.findUnique({
-        where: { id: messageId },
-        include: {
-          merchantSendCommand: { select: { id: true } },
-          recoveryOutreachAttempt: { select: { id: true } },
-        },
-      });
-      if (!row || row.conversationId !== conversation.id || row.direction !== "OUTBOUND" ||
-          row.senderType !== "AUTOMATION" || row.merchantSendCommand ||
-          (row.recoveryOutreachAttempt && row.recoveryOutreachAttempt.id !== attempt.id))
-        return conflict;
+        const retry = isInitialRetryId(scope.outreachAttemptId);
+        if (
+          !attempt ||
+          (retry ? attempt.sequence < 3 : attempt.sequence !== 1) ||
+          attempt.trigger !== "INITIAL" ||
+          attempt.checkoutRecoveryId !== scope.recoveryId ||
+          attempt.checkoutRecovery.shopId !== scope.shopId ||
+          !attempt.recipient
+        )
+          return conflict;
 
-      const message = {
-        id: row.id, conversationId: row.conversationId, status: row.status,
-        providerMessageId: row.providerMessageId, sentAt: row.sentAt,
-        deliveredAt: row.deliveredAt, readAt: row.readAt, failedAt: row.failedAt,
-        providerDispatchKey: row.providerDispatchKey,
-        providerDispatchAdmittedAt: row.providerDispatchAdmittedAt,
-        providerDispatchControlRevision: row.providerDispatchControlRevision,
-        providerFailureCode: row.providerFailureCode,
-      };
-      const noPermit = row.providerDispatchKey === null && row.providerDispatchAdmittedAt === null &&
-        row.providerDispatchControlRevision === null;
-      const fullPermit = row.providerDispatchKey !== null && row.providerDispatchAdmittedAt !== null &&
-        row.providerDispatchControlRevision !== null;
-      const noReceipt = !row.providerMessageId && !row.sentAt && !row.deliveredAt && !row.readAt && !row.failedAt;
-      if (row.status === "PENDING") {
-        if (!noPermit || !noReceipt || row.providerFailureCode) return unknown;
-        return eligible && usage ? { kind: "prepared", message } : conflict;
-      }
-      if (attempt.sentAt && (!row.sentAt || attempt.sentAt.getTime() !== row.sentAt.getTime()))
-        return conflict;
-      if (row.sentAt && row.providerMessageId && !row.failedAt && !row.providerFailureCode &&
+        const usage = await tx.usageEvent.findUnique({
+          where: {
+            idempotencyKey: `recovery-outreach:${scope.outreachAttemptId}`,
+          },
+        });
+        if (
+          usage &&
+          (!usage.sourceId ||
+            usage.shopId !== scope.shopId ||
+            usage.metric !== UsageMetric.OUTBOUND_AUTOMATED_MESSAGE ||
+            usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" ||
+            Number(usage.quantity) !== 1 ||
+            (attempt.outboundMessageId &&
+              attempt.outboundMessageId !== usage.sourceId))
+        )
+          return conflict;
+        const conversation = await tx.conversation.findUnique({
+          where: { checkoutRecoveryId: scope.recoveryId },
+          select: { id: true, type: true, shopId: true },
+        });
+        if (
+          !conversation ||
+          conversation.type !== "RECOVERY" ||
+          (conversation.shopId !== null && conversation.shopId !== scope.shopId)
+        )
+          return conflict;
+
+        if (retry) {
+          // Historical lineage is intentionally separate from current eligibility:
+          // already-admitted receipts must remain inspectable after cancellation.
+          try {
+            await readRetryFundingLineage(tx, {
+              recoveryId: scope.recoveryId,
+              conversationId: conversation.id,
+              attemptId: attempt.id,
+            });
+          } catch (error) {
+            if (error instanceof RecoveryCompensationLineageError)
+              return conflict;
+            throw error;
+          }
+        }
+        const eligible =
+          (attempt.status === "PENDING" ||
+            attempt.status === "CAPACITY_BLOCKED") &&
+          (attempt.checkoutRecovery.status === "DETECTED" ||
+            (retry && attempt.checkoutRecovery.status === "MESSAGE_SENT")) &&
+          !attempt.sentAt &&
+          !attempt.outboundMessageId &&
+          !attempt.followUpDueAt &&
+          !attempt.closedAt;
+        const messageId = usage?.sourceId ?? attempt.outboundMessageId;
+        if (!messageId) {
+          if (!eligible) return conflict;
+          const orphan = await tx.conversationMessage.findFirst({
+            where: {
+              conversationId: conversation.id,
+              direction: "OUTBOUND",
+              senderType: "AUTOMATION",
+              recoveryOutreachAttempt: null,
+            },
+            select: { id: true },
+          });
+          return orphan ? conflict : { kind: "absent" };
+        }
+        const row = await tx.conversationMessage.findUnique({
+          where: { id: messageId },
+          include: {
+            merchantSendCommand: { select: { id: true } },
+            recoveryOutreachAttempt: { select: { id: true } },
+          },
+        });
+        if (
+          !row ||
+          row.conversationId !== conversation.id ||
+          row.direction !== "OUTBOUND" ||
+          row.senderType !== "AUTOMATION" ||
+          row.merchantSendCommand ||
+          (row.recoveryOutreachAttempt &&
+            row.recoveryOutreachAttempt.id !== attempt.id)
+        )
+          return conflict;
+
+        const message = {
+          id: row.id,
+          conversationId: row.conversationId,
+          status: row.status,
+          providerMessageId: row.providerMessageId,
+          sentAt: row.sentAt,
+          deliveredAt: row.deliveredAt,
+          readAt: row.readAt,
+          failedAt: row.failedAt,
+          providerDispatchKey: row.providerDispatchKey,
+          providerDispatchAdmittedAt: row.providerDispatchAdmittedAt,
+          providerDispatchControlRevision: row.providerDispatchControlRevision,
+          providerFailureCode: row.providerFailureCode,
+        };
+        const noPermit =
+          row.providerDispatchKey === null &&
+          row.providerDispatchAdmittedAt === null &&
+          row.providerDispatchControlRevision === null;
+        const fullPermit =
+          row.providerDispatchKey !== null &&
+          row.providerDispatchAdmittedAt !== null &&
+          row.providerDispatchControlRevision !== null;
+        const noReceipt =
+          !row.providerMessageId &&
+          !row.sentAt &&
+          !row.deliveredAt &&
+          !row.readAt &&
+          !row.failedAt;
+        if (row.status === "PENDING") {
+          if (!noPermit || !noReceipt || row.providerFailureCode)
+            return unknown;
+          return eligible && usage ? { kind: "prepared", message } : conflict;
+        }
+        if (
+          attempt.sentAt &&
+          (!row.sentAt || attempt.sentAt.getTime() !== row.sentAt.getTime())
+        )
+          return conflict;
+        if (
+          row.sentAt &&
+          row.providerMessageId &&
+          !row.failedAt &&
+          !row.providerFailureCode &&
           (noPermit || fullPermit) &&
-          (row.status === "SENT" || (row.status === "DELIVERED" && row.deliveredAt) ||
-            (row.status === "READ" && row.readAt))) {
-        return { kind: "confirmed", message: { ...message, sentAt: row.sentAt } };
-      }
-      if (row.status === "FAILED" && !row.sentAt && !row.deliveredAt && !row.readAt) {
-        if (noPermit && noReceipt && !row.providerFailureCode &&
-            (usage || attempt.failureCode === "PRE_PROVIDER_REFUSED"))
-          return { kind: "failed", message, disposition: "pre-permit-refused" };
-        if (fullPermit && !row.providerMessageId && row.failedAt &&
-            (row.providerFailureCode || attempt.failureCode === "PROVIDER_REJECTED"))
-          return { kind: "failed", message, disposition: row.providerFailureCode === "131026"
-            ? "recipient-unreachable" : "provider-rejected" };
-      }
-      return unknown;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+          (row.status === "SENT" ||
+            (row.status === "DELIVERED" && row.deliveredAt) ||
+            (row.status === "READ" && row.readAt))
+        ) {
+          return {
+            kind: "confirmed",
+            message: { ...message, sentAt: row.sentAt },
+          };
+        }
+        if (
+          row.status === "FAILED" &&
+          !row.sentAt &&
+          !row.deliveredAt &&
+          !row.readAt
+        ) {
+          if (
+            noPermit &&
+            noReceipt &&
+            !row.providerFailureCode &&
+            (usage || attempt.failureCode === "PRE_PROVIDER_REFUSED")
+          )
+            return {
+              kind: "failed",
+              message,
+              disposition: "pre-permit-refused",
+            };
+          if (
+            fullPermit &&
+            !row.providerMessageId &&
+            row.failedAt &&
+            (row.providerFailureCode ||
+              attempt.failureCode === "PROVIDER_REJECTED")
+          )
+            return {
+              kind: "failed",
+              message,
+              disposition:
+                row.providerFailureCode === "131026"
+                  ? "recipient-unreachable"
+                  : "provider-rejected",
+            };
+        }
+        return unknown;
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
   }
 
-  async reserve(input: OutboundAdmissionInput): Promise<OutboundAdmissionResult> {
+  async reserve(
+    input: OutboundAdmissionInput,
+  ): Promise<OutboundAdmissionResult> {
     validateInput(input);
     try {
-      const reserve = () => this.withRetry(() => this.database.$transaction(
-        tx => this.reserveInTransaction(tx, input), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
-      if (input.continuation) await this.allowance.reconcileConversation(input.conversationId);
-      let result=await reserve();
-      if(result.kind==="suppressed"&&result.reason==="allowance-exhausted"&&input.continuation&&!input.clarification){
-        const funded=await this.allowance.fundContinuation({...input,...input.continuation},await this.allowance.limits(input.shopId));
-        if(funded)result=await reserve();
-        else return {kind:"suppressed",reason:"allowance-funding-held"};
+      const reserve = () =>
+        this.withRetry(() =>
+          this.database.$transaction(
+            (tx) => this.reserveInTransaction(tx, input),
+            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+          ),
+        );
+      if (input.continuation)
+        await this.allowance.reconcileConversation(input.conversationId);
+      let result = await reserve();
+      if (
+        result.kind === "suppressed" &&
+        result.reason === "allowance-exhausted" &&
+        input.continuation &&
+        !input.clarification
+      ) {
+        const funded = await this.allowance.fundContinuation(
+          { ...input, ...input.continuation },
+          await this.allowance.limits(input.shopId),
+        );
+        if (funded) result = await reserve();
+        else return { kind: "suppressed", reason: "allowance-funding-held" };
       }
       return result;
-    } catch(error){ if(error instanceof AllowanceHeld)return {kind:"suppressed",reason:"allowance-funding-held"}; throw error; }
+    } catch (error) {
+      if (error instanceof AllowanceHeld)
+        return { kind: "suppressed", reason: "allowance-funding-held" };
+      throw error;
+    }
   }
 
   private async reserveInTransaction(
@@ -206,9 +346,14 @@ export class OutboundAdmissionReservationService {
       select: { sourceId: true },
     });
     if (existing) return { kind: "suppressed", reason: "duplicate" };
-    const historical = await failedRecipientOutreach(transaction, input.idempotencyKey);
-    if (historical?.shopId === input.shopId &&
-        historical.message.conversationId === input.conversationId) {
+    const historical = await failedRecipientOutreach(
+      transaction,
+      input.idempotencyKey,
+    );
+    if (
+      historical?.shopId === input.shopId &&
+      historical.message.conversationId === input.conversationId
+    ) {
       return { kind: "suppressed", reason: "duplicate" };
     }
 
@@ -227,43 +372,95 @@ export class OutboundAdmissionReservationService {
 
     if (input.initialOutreach) {
       const scope = input.initialOutreach;
-      if (input.senderType !== "AUTOMATION" || scope.shopId !== input.shopId ||
-          input.idempotencyKey !== `recovery-outreach:${scope.outreachAttemptId}` ||
-          !input.recoveryCreditSourceKey)
+      if (
+        input.senderType !== "AUTOMATION" ||
+        scope.shopId !== input.shopId ||
+        input.idempotencyKey !==
+          `recovery-outreach:${scope.outreachAttemptId}` ||
+        !input.recoveryCreditSourceKey
+      )
         return { kind: "suppressed", reason: "conversation-invalid" };
       const retry = isInitialRetryId(scope.outreachAttemptId);
       if (retry) {
-        const owner = await lockRecoveryContext(transaction, input.conversationId);
-        if (!owner || owner.shopId !== input.shopId || owner.recoveryId !== scope.recoveryId)
+        const owner = await lockRecoveryContext(
+          transaction,
+          input.conversationId,
+        );
+        if (
+          !owner ||
+          owner.shopId !== input.shopId ||
+          owner.recoveryId !== scope.recoveryId
+        )
           return { kind: "suppressed", reason: "conversation-invalid" };
         // Re-read after waiting for the owner lock. A concurrent reserve may
         // have created the exact outbound usage while we were waiting.
-        if (await transaction.usageEvent.findUnique({ where: {idempotencyKey: input.idempotencyKey}, select: {id: true} }))
+        if (
+          await transaction.usageEvent.findUnique({
+            where: { idempotencyKey: input.idempotencyKey },
+            select: { id: true },
+          })
+        )
           return { kind: "suppressed", reason: "duplicate" };
       }
       const attempt = await transaction.recoveryOutreachAttempt.findFirst({
-        where: { id: scope.outreachAttemptId, checkoutRecoveryId: scope.recoveryId,
-          sequence: retry ? { gte: 3 } : 1, trigger: "INITIAL", status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
-          outboundMessageId: null, sentAt: null, followUpDueAt: null, closedAt: null,
-          checkoutRecovery: { shopId: input.shopId, status: retry ? {in: ["DETECTED", "MESSAGE_SENT"]} : "DETECTED",
-            conversation: { id: input.conversationId } } },
+        where: {
+          id: scope.outreachAttemptId,
+          checkoutRecoveryId: scope.recoveryId,
+          sequence: retry ? { gte: 3 } : 1,
+          trigger: "INITIAL",
+          status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
+          outboundMessageId: null,
+          sentAt: null,
+          followUpDueAt: null,
+          closedAt: null,
+          checkoutRecovery: {
+            shopId: input.shopId,
+            status: retry ? { in: ["DETECTED", "MESSAGE_SENT"] } : "DETECTED",
+            conversation: { id: input.conversationId },
+          },
+        },
         select: { id: true },
       });
-      if (!attempt) return { kind: "suppressed", reason: "conversation-invalid" };
+      if (!attempt)
+        return { kind: "suppressed", reason: "conversation-invalid" };
       if (retry) {
-        const recipient = await transaction.recoveryOutreachAttempt.findUniqueOrThrow({where: {id: attempt.id}, select: {recipient: true}});
-        const gate = await checkInitialRetryPermit(transaction, {shopId: input.shopId, recoveryId: scope.recoveryId,
-          conversationId: input.conversationId, attemptId: attempt.id, recipient: recipient.recipient, now: new Date()});
-        if (gate.kind !== "ready") return {kind: "suppressed", reason: "conversation-invalid"};
+        const recipient =
+          await transaction.recoveryOutreachAttempt.findUniqueOrThrow({
+            where: { id: attempt.id },
+            select: { recipient: true },
+          });
+        const gate = await checkInitialRetryPermit(transaction, {
+          shopId: input.shopId,
+          recoveryId: scope.recoveryId,
+          conversationId: input.conversationId,
+          attemptId: attempt.id,
+          recipient: recipient.recipient,
+          now: new Date(),
+        });
+        if (gate.kind !== "ready")
+          return { kind: "suppressed", reason: "conversation-invalid" };
         // A deleted usage event must not make an earlier unlinked provider
         // permit or message look like a fresh retry.
-        if (await transaction.conversationMessage.findFirst({where: {conversationId: input.conversationId,
-          direction: "OUTBOUND", senderType: "AUTOMATION", recoveryOutreachAttempt: null}, select: {id: true}}))
-          return {kind: "suppressed", reason: "conversation-invalid"};
+        if (
+          await transaction.conversationMessage.findFirst({
+            where: {
+              conversationId: input.conversationId,
+              direction: "OUTBOUND",
+              senderType: "AUTOMATION",
+              recoveryOutreachAttempt: null,
+            },
+            select: { id: true },
+          })
+        )
+          return { kind: "suppressed", reason: "conversation-invalid" };
       }
     }
 
-    const resolved = await this.policy.resolve(transaction, input, conversation);
+    const resolved = await this.policy.resolve(
+      transaction,
+      input,
+      conversation,
+    );
     if (resolved.kind === "suppressed") return resolved;
     const { policy, executionScope } = resolved;
 
@@ -273,55 +470,68 @@ export class OutboundAdmissionReservationService {
 
     let allowanceBlockId: string | undefined;
     let isTerminal = false;
-    if(conversation.checkoutRecovery && !input.initialOutreach){
-      const block=await currentAllowance(transaction,input.conversationId,policy);
-      if(block.state==="EXHAUSTED"||block.state==="CANCELLED")return {kind:"suppressed",reason:"allowance-exhausted"};
-      if(block.state==="PENDING"){
-        if(isFollowUpRetryBlock(block.id))return {kind:"suppressed",reason:"allowance-funding-held"};
-        const source=await exactBlockSource(transaction,block);
-        if(!source||source.reservation.status!=="RESERVED"||await transaction.conversationMessage.count({where:{allowanceBlockId:block.id}})>0)
-          return {kind:"suppressed",reason:"allowance-funding-held"};
-        if(input.clarification)return {kind:"suppressed",reason:"allowance-funding-held"};
+    if (conversation.checkoutRecovery && !input.initialOutreach) {
+      const block = await currentAllowance(
+        transaction,
+        input.conversationId,
+        policy,
+      );
+      if (block.state === "EXHAUSTED" || block.state === "CANCELLED")
+        return { kind: "suppressed", reason: "allowance-exhausted" };
+      if (block.state === "PENDING") {
+        if (isFollowUpRetryBlock(block.id))
+          return { kind: "suppressed", reason: "allowance-funding-held" };
+        const source = await exactBlockSource(transaction, block);
+        if (
+          !source ||
+          source.reservation.status !== "RESERVED" ||
+          (await transaction.conversationMessage.count({
+            where: { allowanceBlockId: block.id },
+          })) > 0
+        )
+          return { kind: "suppressed", reason: "allowance-funding-held" };
+        if (input.clarification)
+          return { kind: "suppressed", reason: "allowance-funding-held" };
       }
-      const count=await allowanceUsage(transaction,block);
-      if(count>=block.hardMessageLimit-block.terminalReservedSlots){
-        await notifyAllowanceBoundary(transaction,block,new Date());
-        return {kind:"suppressed",reason:"allowance-exhausted"};
+      const count = await allowanceUsage(transaction, block);
+      if (count >= block.hardMessageLimit - block.terminalReservedSlots) {
+        await notifyAllowanceBoundary(transaction, block, new Date());
+        return { kind: "suppressed", reason: "allowance-exhausted" };
       }
-      allowanceBlockId=block.id;
+      allowanceBlockId = block.id;
     } else {
-    const outboundMessages = await transaction.conversationMessage.findMany({
-      where: {
-        conversationId: input.conversationId,
-        direction: "OUTBOUND",
-        senderType: { in: ["AGENT", "AUTOMATION"] },
-      },
-      select: { id: true },
-    });
-    const counts = outboundMessages.length
-      ? await transaction.usageEvent.groupBy({
-          by: ["sourceType"],
-          where: {
-            shopId: input.shopId,
-            metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE,
-            sourceId: { in: outboundMessages.map((message) => message.id) },
-          },
-          _sum: { quantity: true },
-        })
-      : [];
-    const total = quantityFor(counts, "OUTBOUND_AUTOMATED_MESSAGE");
-    const terminal = quantityFor(counts, "OUTBOUND_AUTOMATED_TERMINAL") > 0;
-    const normalLimit =
-      policy.outboundHardLimit - policy.terminalMessageReservedSlots;
+      const outboundMessages = await transaction.conversationMessage.findMany({
+        where: {
+          conversationId: input.conversationId,
+          direction: "OUTBOUND",
+          senderType: { in: ["AGENT", "AUTOMATION"] },
+        },
+        select: { id: true },
+      });
+      const counts = outboundMessages.length
+        ? await transaction.usageEvent.groupBy({
+            by: ["sourceType"],
+            where: {
+              shopId: input.shopId,
+              metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE,
+              sourceId: { in: outboundMessages.map((message) => message.id) },
+            },
+            _sum: { quantity: true },
+          })
+        : [];
+      const total = quantityFor(counts, "OUTBOUND_AUTOMATED_MESSAGE");
+      const terminal = quantityFor(counts, "OUTBOUND_AUTOMATED_TERMINAL") > 0;
+      const normalLimit =
+        policy.outboundHardLimit - policy.terminalMessageReservedSlots;
 
-    if (total >= normalLimit) {
-      if (input.initialOutreach) return { kind: "suppressed", reason: "normal-cap-reached" };
-      if (terminal) {
-        return { kind: "suppressed", reason: "terminal-already-used" };
+      if (total >= normalLimit) {
+        if (input.initialOutreach)
+          return { kind: "suppressed", reason: "normal-cap-reached" };
+        if (terminal) {
+          return { kind: "suppressed", reason: "terminal-already-used" };
+        }
+        isTerminal = true;
       }
-      isTerminal = true;
-    }
-
     }
 
     const message = await transaction.conversationMessage.create({
@@ -330,8 +540,10 @@ export class OutboundAdmissionReservationService {
         direction: "OUTBOUND",
         senderType: input.senderType,
         status: MessageStatus.PENDING,
-        content: isTerminal ? TERMINAL_MESSAGE : input.content ?? PENDING_CONTENT,
-        ...(allowanceBlockId ? {allowanceBlockId} : {}),
+        content: isTerminal
+          ? TERMINAL_MESSAGE
+          : (input.content ?? PENDING_CONTENT),
+        ...(allowanceBlockId ? { allowanceBlockId } : {}),
       },
       select: { id: true },
     });
@@ -349,10 +561,17 @@ export class OutboundAdmissionReservationService {
       },
     });
 
-    if(allowanceBlockId){
-      const block=await transaction.conversationAllowanceBlock.findUniqueOrThrow({where:{id:allowanceBlockId}});
-      if(block.state==="ACTIVE"&&await allowanceUsage(transaction,block)>=block.hardMessageLimit-block.terminalReservedSlots)
-        await notifyAllowanceBoundary(transaction,block,new Date());
+    if (allowanceBlockId) {
+      const block =
+        await transaction.conversationAllowanceBlock.findUniqueOrThrow({
+          where: { id: allowanceBlockId },
+        });
+      if (
+        block.state === "ACTIVE" &&
+        (await allowanceUsage(transaction, block)) >=
+          block.hardMessageLimit - block.terminalReservedSlots
+      )
+        await notifyAllowanceBoundary(transaction, block, new Date());
     }
     return {
       kind: "admitted",
@@ -408,6 +627,7 @@ function validateInput(input: OutboundAdmissionInput): void {
 
 function isSerializationConflict(error: unknown): boolean {
   return (
-    error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034"
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2034"
   );
 }

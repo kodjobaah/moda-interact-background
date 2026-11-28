@@ -10,7 +10,10 @@ import prisma from "../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
 
-type OAuthConfigurationReader = Pick<typeof platformConsumerConfiguration, "read">;
+type OAuthConfigurationReader = Pick<
+  typeof platformConsumerConfiguration,
+  "read"
+>;
 
 const logger = createLogger({
   serviceName: "moda-recovery-worker",
@@ -18,11 +21,13 @@ const logger = createLogger({
 });
 
 /** Compose the published Shared reader with this service's own Prisma/config/fetch ports. */
-export function createShopifySessionService(input: {
-  database?: PrismaClient;
-  configuration?: OAuthConfigurationReader;
-  fetchImpl?: typeof fetch;
-} = {}) {
+export function createShopifySessionService(
+  input: {
+    database?: PrismaClient;
+    configuration?: OAuthConfigurationReader;
+    fetchImpl?: typeof fetch;
+  } = {},
+) {
   const database = input.database ?? prisma;
   const configuration = input.configuration ?? platformConsumerConfiguration;
   const provider = createShopifyOfflineTokenProvider({
@@ -65,7 +70,9 @@ export function createShopifySessionService(input: {
 const shopifySessionService = createShopifySessionService();
 
 /** Resolve domain-only internal callers back to one active, stored Shopify Shop. */
-export async function resolveShopifyShopId(shopDomain: string): Promise<string> {
+export async function resolveShopifyShopId(
+  shopDomain: string,
+): Promise<string> {
   let shops: Array<{ id: string }>;
   try {
     shops = await prisma.shop.findMany({
@@ -77,7 +84,8 @@ export async function resolveShopifyShopId(shopDomain: string): Promise<string> 
     throw new ShopifyOfflineTokenError("PERSISTENCE_UNAVAILABLE");
   }
   if (shops.length === 0) throw new ShopifyOfflineTokenError("SESSION_MISSING");
-  if (shops.length !== 1) throw new ShopifyOfflineTokenError("SESSION_IDENTITY_CONFLICT");
+  if (shops.length !== 1)
+    throw new ShopifyOfflineTokenError("SESSION_IDENTITY_CONFLICT");
   return shops[0]!.id;
 }
 

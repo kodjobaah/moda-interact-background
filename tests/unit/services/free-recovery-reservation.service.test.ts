@@ -31,7 +31,10 @@ const policy = {
   policyVersions: { platform: 1, shopOverride: null, plan: new Date() },
 } as EffectiveBillingPolicy;
 
-function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy, provider = "SHOPIFY") {
+function createHarness(
+  resolvedPolicy: EffectiveBillingPolicy = policy,
+  provider = "SHOPIFY",
+) {
   const state = {
     counter: {
       id: "counter-1",
@@ -49,23 +52,57 @@ function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy, provider
   const transaction = {
     shop: { findUnique: vi.fn(async () => ({ platform: provider })) },
     shopEntitlementCounter: {
-      findUnique: vi.fn(async ({ select }: { select?: { version?: boolean; counter?: boolean } }) =>
-        select?.counter
-          ? { counter: state.counter.counter }
-          : select?.version
-            ? { version: state.counter.version }
-            : state.counter),
+      findUnique: vi.fn(
+        async ({
+          select,
+        }: {
+          select?: { version?: boolean; counter?: boolean };
+        }) =>
+          select?.counter
+            ? { counter: state.counter.counter }
+            : select?.version
+              ? { version: state.counter.version }
+              : state.counter,
+      ),
       create: vi.fn(async () => state.counter),
-      updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; reservedQuantity?: { gte: number } }; data: Record<string, unknown> }) => {
-        if (where.id !== state.counter.id || where.version !== state.counter.version) return { count: 0 };
-        if (where.reservedQuantity && state.counter.reservedQuantity < where.reservedQuantity.gte) return { count: 0 };
-        const increment = (data.reservedQuantity as { increment?: number } | undefined)?.increment ?? 0;
-        const decrement = (data.reservedQuantity as { decrement?: number } | undefined)?.decrement ?? 0;
-        state.counter.reservedQuantity += increment - decrement;
-        state.counter.committedQuantity += (data.committedQuantity as { increment?: number } | undefined)?.increment ?? 0;
-        state.counter.version += (data.version as { increment: number }).increment;
-        return { count: 1 };
-      }),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: {
+            id: string;
+            version: number;
+            reservedQuantity?: { gte: number };
+          };
+          data: Record<string, unknown>;
+        }) => {
+          if (
+            where.id !== state.counter.id ||
+            where.version !== state.counter.version
+          )
+            return { count: 0 };
+          if (
+            where.reservedQuantity &&
+            state.counter.reservedQuantity < where.reservedQuantity.gte
+          )
+            return { count: 0 };
+          const increment =
+            (data.reservedQuantity as { increment?: number } | undefined)
+              ?.increment ?? 0;
+          const decrement =
+            (data.reservedQuantity as { decrement?: number } | undefined)
+              ?.decrement ?? 0;
+          state.counter.reservedQuantity += increment - decrement;
+          state.counter.committedQuantity +=
+            (data.committedQuantity as { increment?: number } | undefined)
+              ?.increment ?? 0;
+          state.counter.version += (
+            data.version as { increment: number }
+          ).increment;
+          return { count: 1 };
+        },
+      ),
     },
     usageReservation: {
       findUnique: vi.fn(async () => state.reservation),
@@ -93,7 +130,10 @@ function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy, provider
 
   const database = {
     ...transaction,
-    $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    $transaction: vi.fn(
+      async (callback: (tx: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+    ),
   };
   const service = new FreeRecoveryReservationService(
     database as never,
@@ -106,21 +146,31 @@ describe("FreeRecoveryReservationService", () => {
   it("keeps same-transaction commits direct and preserves the owner's original error", async () => {
     const { service, database } = createHarness();
     const original = new Error("owner transaction failed");
-    const transaction = { usageReservation: { findUnique: vi.fn().mockRejectedValue(original) } };
+    const transaction = {
+      usageReservation: { findUnique: vi.fn().mockRejectedValue(original) },
+    };
 
-    await expect(service.commitInExistingTransaction(transaction as never, {
-      shopId: "shop-1",
-      sourceKey: "recovery:existing-transaction",
-    })).rejects.toBe(original);
+    await expect(
+      service.commitInExistingTransaction(transaction as never, {
+        shopId: "shop-1",
+        sourceKey: "recovery:existing-transaction",
+      }),
+    ).rejects.toBe(original);
     expect(database.$transaction).not.toHaveBeenCalled();
   });
 
   it("replays the same source key without reserving twice", async () => {
     const { service, transaction } = createHarness();
 
-    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:1" })).resolves.toMatchObject({ kind: "reserved" });
-    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:1" })).resolves.toMatchObject({ kind: "already-reserved" });
-    expect(transaction.shopEntitlementCounter.updateMany).toHaveBeenCalledTimes(1);
+    await expect(
+      service.reserve({ shopId: "shop-1", sourceKey: "recovery:1" }),
+    ).resolves.toMatchObject({ kind: "reserved" });
+    await expect(
+      service.reserve({ shopId: "shop-1", sourceKey: "recovery:1" }),
+    ).resolves.toMatchObject({ kind: "already-reserved" });
+    expect(transaction.shopEntitlementCounter.updateMany).toHaveBeenCalledTimes(
+      1,
+    );
   });
 
   it("reserves lifetime capacity after contract end without requiring an active billing policy", async () => {
@@ -135,87 +185,141 @@ describe("FreeRecoveryReservationService", () => {
       kind: "reserved",
       counter: "LIFETIME_FREE_RECOVERY_CREDITS",
     });
-    expect(transaction.shopEntitlementCounter.updateMany).toHaveBeenCalledOnce();
+    expect(
+      transaction.shopEntitlementCounter.updateMany,
+    ).toHaveBeenCalledOnce();
   });
 
-  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)("writes explicit %s provider on lifetime Free usage", async (provider) => {
-    const { service, transaction, state } = createHarness(policy, provider);
-    await service.reserve({ shopId: "shop-1", sourceKey: "recovery:2" });
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)(
+    "writes explicit %s provider on lifetime Free usage",
+    async (provider) => {
+      const { service, transaction, state } = createHarness(policy, provider);
+      await service.reserve({ shopId: "shop-1", sourceKey: "recovery:2" });
 
-    await expect(service.commit({ shopId: "shop-1", sourceKey: "recovery:2" })).resolves.toMatchObject({ kind: "committed" });
-    await expect(service.commit({ shopId: "shop-1", sourceKey: "recovery:2" })).resolves.toMatchObject({ kind: "already-committed" });
-    expect(state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
-    expect(state.usageEvent).toMatchObject({
-      idempotencyKey: "recovery:shop-1:recovery:2",
-      metric: "RECOVERY_CONVERSATION",
-      provider,
-      shopifyReportState: "NOT_APPLICABLE",
-    });
-    expect(transaction.usageEvent.create).toHaveBeenCalledTimes(1);
-  });
+      await expect(
+        service.commit({ shopId: "shop-1", sourceKey: "recovery:2" }),
+      ).resolves.toMatchObject({ kind: "committed" });
+      await expect(
+        service.commit({ shopId: "shop-1", sourceKey: "recovery:2" }),
+      ).resolves.toMatchObject({ kind: "already-committed" });
+      expect(state.counter).toMatchObject({
+        committedQuantity: 1,
+        reservedQuantity: 0,
+      });
+      expect(state.usageEvent).toMatchObject({
+        idempotencyKey: "recovery:shop-1:recovery:2",
+        metric: "RECOVERY_CONVERSATION",
+        provider,
+        shopifyReportState: "NOT_APPLICABLE",
+      });
+      expect(transaction.usageEvent.create).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("releases once and preserves capacity without creating usage", async () => {
     const { service, state, transaction } = createHarness();
     await service.reserve({ shopId: "shop-1", sourceKey: "recovery:3" });
 
-    await expect(service.release({ shopId: "shop-1", sourceKey: "recovery:3" })).resolves.toMatchObject({ kind: "released" });
-    await expect(service.release({ shopId: "shop-1", sourceKey: "recovery:3" })).resolves.toMatchObject({ kind: "already-released" });
-    expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
+    await expect(
+      service.release({ shopId: "shop-1", sourceKey: "recovery:3" }),
+    ).resolves.toMatchObject({ kind: "released" });
+    await expect(
+      service.release({ shopId: "shop-1", sourceKey: "recovery:3" }),
+    ).resolves.toMatchObject({ kind: "already-released" });
+    expect(state.counter).toMatchObject({
+      committedQuantity: 0,
+      reservedQuantity: 0,
+    });
     expect(transaction.usageEvent.create).not.toHaveBeenCalled();
   });
 
   it("reactivates a released reservation on the same row and counter", async () => {
     const { service, state, transaction } = createHarness();
-    await service.reserve({ shopId: "shop-1", sourceKey: "recovery:reactivate" });
+    await service.reserve({
+      shopId: "shop-1",
+      sourceKey: "recovery:reactivate",
+    });
     const reservationId = state.reservation!.id;
     const counterId = state.reservation!.counterId;
-    await service.release({ shopId: "shop-1", sourceKey: "recovery:reactivate" });
+    await service.release({
+      shopId: "shop-1",
+      sourceKey: "recovery:reactivate",
+    });
 
-    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:reactivate" }))
-      .resolves.toMatchObject({ kind: "reserved", reservation: { id: reservationId, counterId, status: "RESERVED" } });
+    await expect(
+      service.reserve({ shopId: "shop-1", sourceKey: "recovery:reactivate" }),
+    ).resolves.toMatchObject({
+      kind: "reserved",
+      reservation: { id: reservationId, counterId, status: "RESERVED" },
+    });
     expect(state.counter).toMatchObject({ reservedQuantity: 1, version: 3 });
     expect(transaction.usageReservation.create).toHaveBeenCalledTimes(1);
   });
 
   it("rejects release after commit and cross-shop source replay", async () => {
     const { service, state } = createHarness();
-    await service.reserve({ shopId: "shop-1", sourceKey: "recovery:committed" });
+    await service.reserve({
+      shopId: "shop-1",
+      sourceKey: "recovery:committed",
+    });
     await service.commit({ shopId: "shop-1", sourceKey: "recovery:committed" });
 
-    await expect(service.release({ shopId: "shop-1", sourceKey: "recovery:committed" })).rejects.toThrow("cannot be released");
+    await expect(
+      service.release({ shopId: "shop-1", sourceKey: "recovery:committed" }),
+    ).rejects.toThrow("cannot be released");
     state.reservation!.shopId = "shop-2";
-    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:committed" })).rejects.toThrow("another shop");
+    await expect(
+      service.reserve({ shopId: "shop-1", sourceKey: "recovery:committed" }),
+    ).rejects.toThrow("another shop");
   });
 
   it("marks ambiguous without releasing capacity and rejects invalid transitions", async () => {
     const { service, state } = createHarness();
     await service.reserve({ shopId: "shop-1", sourceKey: "recovery:4" });
 
-    await expect(service.markAmbiguous({ shopId: "shop-1", sourceKey: "recovery:4" })).resolves.toMatchObject({ kind: "ambiguous" });
-    await expect(service.release({ shopId: "shop-1", sourceKey: "recovery:4" })).resolves.toMatchObject({ kind: "already-ambiguous" });
+    await expect(
+      service.markAmbiguous({ shopId: "shop-1", sourceKey: "recovery:4" }),
+    ).resolves.toMatchObject({ kind: "ambiguous" });
+    await expect(
+      service.release({ shopId: "shop-1", sourceKey: "recovery:4" }),
+    ).resolves.toMatchObject({ kind: "already-ambiguous" });
     expect(state.counter.reservedQuantity).toBe(1);
-    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:5", quantity: 0 })).rejects.toThrow("positive safe integer");
+    await expect(
+      service.reserve({
+        shopId: "shop-1",
+        sourceKey: "recovery:5",
+        quantity: 0,
+      }),
+    ).rejects.toThrow("positive safe integer");
   });
 
   it("retries a bounded serializable/CAS conflict", async () => {
     const { service, database } = createHarness();
-    const conflict = new Prisma.PrismaClientKnownRequestError("serialization conflict", {
-      code: "P2034",
-      clientVersion: "test",
-    });
+    const conflict = new Prisma.PrismaClientKnownRequestError(
+      "serialization conflict",
+      {
+        code: "P2034",
+        clientVersion: "test",
+      },
+    );
     const transaction = database.$transaction;
     transaction.mockRejectedValueOnce(conflict);
 
-    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:5" })).resolves.toMatchObject({ kind: "reserved" });
+    await expect(
+      service.reserve({ shopId: "shop-1", sourceKey: "recovery:5" }),
+    ).resolves.toMatchObject({ kind: "reserved" });
     expect(transaction).toHaveBeenCalledTimes(2);
   });
 
   it("replays the winning same-source reservation after a P2002 loser conflict", async () => {
     const { service, database, transaction, state } = createHarness();
-    const conflict = new Prisma.PrismaClientKnownRequestError("unique source conflict", {
-      code: "P2002",
-      clientVersion: "test",
-    });
+    const conflict = new Prisma.PrismaClientKnownRequestError(
+      "unique source conflict",
+      {
+        code: "P2002",
+        clientVersion: "test",
+      },
+    );
     state.counter.reservedQuantity = 1;
     state.reservation = {
       id: "winner-reservation",
@@ -230,22 +334,32 @@ describe("FreeRecoveryReservationService", () => {
       throw conflict;
     });
 
-    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:p2002" }))
-      .resolves.toMatchObject({ kind: "already-reserved", reservation: { id: "winner-reservation" } });
-    expect(transaction.shopEntitlementCounter.updateMany).not.toHaveBeenCalled();
+    await expect(
+      service.reserve({ shopId: "shop-1", sourceKey: "recovery:p2002" }),
+    ).resolves.toMatchObject({
+      kind: "already-reserved",
+      reservation: { id: "winner-reservation" },
+    });
+    expect(
+      transaction.shopEntitlementCounter.updateMany,
+    ).not.toHaveBeenCalled();
     expect(database.$transaction).toHaveBeenCalledTimes(2);
   });
 
   it("enforces the retry maximum when conflicts never resolve", async () => {
     const { service, database } = createHarness();
-    const conflict = new Prisma.PrismaClientKnownRequestError("serialization conflict", {
-      code: "P2034",
-      clientVersion: "test",
-    });
+    const conflict = new Prisma.PrismaClientKnownRequestError(
+      "serialization conflict",
+      {
+        code: "P2034",
+        clientVersion: "test",
+      },
+    );
     database.$transaction.mockRejectedValue(conflict);
 
-    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:exhausted" }))
-      .rejects.toBe(conflict);
+    await expect(
+      service.reserve({ shopId: "shop-1", sourceKey: "recovery:exhausted" }),
+    ).rejects.toBe(conflict);
     expect(database.$transaction).toHaveBeenCalledTimes(3);
   });
 
@@ -263,8 +377,13 @@ describe("FreeRecoveryReservationService", () => {
     const { service, state } = createHarness(reducedPolicy);
     state.counter.committedQuantity = 2;
     state.counter.reservedQuantity = 1;
-    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:reduced" }))
-      .rejects.toThrow("Invalid lifetime Free recovery counter");
-    expect(state.counter).toMatchObject({ committedQuantity: 2, reservedQuantity: 1, version: 0 });
+    await expect(
+      service.reserve({ shopId: "shop-1", sourceKey: "recovery:reduced" }),
+    ).rejects.toThrow("Invalid lifetime Free recovery counter");
+    expect(state.counter).toMatchObject({
+      committedQuantity: 2,
+      reservedQuantity: 1,
+      version: 0,
+    });
   });
 });

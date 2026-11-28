@@ -32,7 +32,8 @@ function resolve(
 describe("shared outbound-limit policy", () => {
   it.each([
     {
-      title: "caps the default hard limit without changing the default soft limit",
+      title:
+        "caps the default hard limit without changing the default soft limit",
       override: null,
       expected: { soft: 10, hard: 15 },
     },
@@ -77,13 +78,15 @@ describe("shared outbound-limit policy", () => {
       title: "platform default hard minimum",
       limits: [1, 1, 15] as const,
       override: null,
-      detail: "platform default hard limit must be a finite integer of at least 2",
+      detail:
+        "platform default hard limit must be a finite integer of at least 2",
     },
     {
       title: "absolute hard minimum",
       limits: [1, 20, Number.NaN] as const,
       override: null,
-      detail: "platform absolute hard limit must be a finite integer of at least 2",
+      detail:
+        "platform absolute hard limit must be a finite integer of at least 2",
     },
     {
       title: "platform soft larger than platform default hard",
@@ -109,23 +112,37 @@ describe("shared outbound-limit policy", () => {
       override: { outboundSoftLimit: 9, outboundHardLimit: 8 },
       detail: "shop soft limit exceeds shop hard limit",
     },
-  ])("rejects $title with the original detail", ({ limits, override, detail }) => {
-    expect(() => resolve(...limits, override)).toThrow(
-      `Invalid policy for shop shop-1: ${detail}`,
-    );
-  });
+  ])(
+    "rejects $title with the original detail",
+    ({ limits, override, detail }) => {
+      expect(() => resolve(...limits, override)).toThrow(
+        `Invalid policy for shop shop-1: ${detail}`,
+      );
+    },
+  );
 
   it("accepts reserved slots below the effective hard limit", () => {
-    expect(validateTerminalMessageReservedSlots("shop-1", 14, 15, invalidConfiguration))
-      .toBe(14);
+    expect(
+      validateTerminalMessageReservedSlots(
+        "shop-1",
+        14,
+        15,
+        invalidConfiguration,
+      ),
+    ).toBe(14);
   });
 
   it.each([0, -1, 15, 16, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
     "rejects invalid reserved slots %s",
     (value) => {
-      expect(() => validateTerminalMessageReservedSlots(
-        "shop-1", value, 15, invalidConfiguration,
-      )).toThrow(
+      expect(() =>
+        validateTerminalMessageReservedSlots(
+          "shop-1",
+          value,
+          15,
+          invalidConfiguration,
+        ),
+      ).toThrow(
         "Invalid policy for shop shop-1: terminalMessageReservedSlots must be at least 1 and less than the effective hard limit",
       );
     },

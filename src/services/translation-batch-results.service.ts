@@ -1,9 +1,16 @@
 import { Prisma } from "@prisma/client";
-import { createOpenAITranslationProvider, type TranslationProvider, type TranslationProviderResult } from "../providers/translation.provider.js";
+import {
+  createOpenAITranslationProvider,
+  type TranslationProvider,
+  type TranslationProviderResult,
+} from "../providers/translation.provider.js";
 import prisma from "../lib/db.js";
 import { readSupportTranslationCredential } from "./platform-configuration/support-translation.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
-import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
+import {
+  currentTranslationRuntimeConfig,
+  type TranslationRuntimeConfigReader,
+} from "./translation-runtime-config.js";
 import { translationItemRetryDisposition } from "./translation-batch-runtime/item-retry.js";
 import { applyTranslationProviderResults } from "./translation-batch-runtime/provider-results.js";
 
@@ -28,9 +35,9 @@ type TranslationRecord = {
   threadId: string;
   kind: "ADMINISTRATIVE" | "SYSTEM" | "MERCHANT";
   translationStatus: "PENDING" | "AVAILABLE" | "FAILED";
-    currentBatchId: string | null;
-    targetLanguageTag: string;
-    displayLanguageTag: string;
+  currentBatchId: string | null;
+  targetLanguageTag: string;
+  displayLanguageTag: string;
   retryCount: number;
   messageState: "PROCESSING" | "AVAILABLE" | "FAILED";
   messageCreatedAt: Date;
@@ -43,10 +50,16 @@ type ResultTransaction = {
 };
 
 type ResultDatabase = {
-  $transaction<T>(callback: (transaction: ResultTransaction) => Promise<T>): Promise<T>;
+  $transaction<T>(
+    callback: (transaction: ResultTransaction) => Promise<T>,
+  ): Promise<T>;
 };
 
-type ProviderFactory = (options: { provider: string; model: string; apiKey?: string }) => TranslationProvider;
+type ProviderFactory = (options: {
+  provider: string;
+  model: string;
+  apiKey?: string;
+}) => TranslationProvider;
 
 export type TranslationBatchResultsResult =
   | { status: "skipped"; batchId: string }
@@ -58,20 +71,27 @@ export class TranslationBatchResultsService {
   private readonly credentialReader: (provider: string) => Promise<string>;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
-  constructor(options: {
-    database?: ResultDatabase;
-    providerFactory?: ProviderFactory;
-    credentialReader?: (provider: string) => Promise<string>;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-  } = {}) {
+  constructor(
+    options: {
+      database?: ResultDatabase;
+      providerFactory?: ProviderFactory;
+      credentialReader?: (provider: string) => Promise<string>;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+    } = {},
+  ) {
     this.database = options.database ?? prisma;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) =>
-      createOpenAITranslationProvider(providerOptions));
-    this.credentialReader = options.credentialReader ?? readSupportTranslationCredential;
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.credentialReader =
+      options.credentialReader ?? readSupportTranslationCredential;
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
-  async apply(input: { translationBatchId: string }): Promise<TranslationBatchResultsResult> {
+  async apply(input: {
+    translationBatchId: string;
+  }): Promise<TranslationBatchResultsResult> {
     const batch = await this.loadBatch(input.translationBatchId);
     if (!batch || batch.status === "COMPLETED") {
       return { status: "skipped", batchId: input.translationBatchId };
@@ -80,20 +100,27 @@ export class TranslationBatchResultsService {
       return { status: "skipped", batchId: input.translationBatchId };
     }
 
-    const provider = this.providerFactory({ provider: batch.provider, model: batch.model,
-      apiKey: await this.credentialReader(batch.provider) });
+    const provider = this.providerFactory({
+      provider: batch.provider,
+      model: batch.model,
+      apiKey: await this.credentialReader(batch.provider),
+    });
     const { applied } = await applyTranslationProviderResults({
       provider,
       outputFileId: batch.outputFileId,
       errorFileId: batch.errorFileId,
       missingResultFileMessage: `Translation Batch ${batch.id} has no provider result file`,
       loadExpectedProviderCustomIds: async () =>
-        (await this.loadExpectedItems(batch.id)).map((item) => item.providerCustomId),
+        (await this.loadExpectedItems(batch.id)).map(
+          (item) => item.providerCustomId,
+        ),
       membershipMessages: {
-        countMismatch: "Translation Batch output does not contain exactly one result per expected item",
+        countMismatch:
+          "Translation Batch output does not contain exactly one result per expected item",
         unknownProviderCustomId: (providerCustomId) =>
           `Unknown translation Batch provider custom ID: ${providerCustomId}`,
-        duplicateProviderCustomId: "Translation Batch output contains duplicate provider custom IDs",
+        duplicateProviderCustomId:
+          "Translation Batch output contains duplicate provider custom IDs",
       },
       applyResult: (result) => this.applyResult(batch.id, result),
     });
@@ -114,14 +141,19 @@ export class TranslationBatchResultsService {
   }
 
   private async loadExpectedItems(batchId: string): Promise<ExpectedItem[]> {
-    return this.database.$transaction(async (transaction) => transaction.$queryRaw<ExpectedItem[]>(Prisma.sql`
+    return this.database.$transaction(async (transaction) =>
+      transaction.$queryRaw<ExpectedItem[]>(Prisma.sql`
       SELECT "providerCustomId", "translationId"
       FROM "support"."MerchantTranslationBatchItem"
       WHERE "batchId" = ${batchId}
-    `));
+    `),
+    );
   }
 
-  private async applyResult(batchId: string, result: TranslationProviderResult): Promise<boolean> {
+  private async applyResult(
+    batchId: string,
+    result: TranslationProviderResult,
+  ): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
       const rows = await transaction.$queryRaw<TranslationRecord[]>(Prisma.sql`
         SELECT
@@ -144,14 +176,19 @@ export class TranslationBatchResultsService {
           AND i."providerCustomId" = ${result.providerCustomId}
       `);
       const record = rows[0];
-      if (!record) throw new Error(`Provider custom ID is not a member of Batch ${batchId}`);
+      if (!record)
+        throw new Error(
+          `Provider custom ID is not a member of Batch ${batchId}`,
+        );
       if (
         record.translationStatus === "AVAILABLE" ||
         record.translationStatus !== "PENDING" ||
         record.currentBatchId !== batchId
-      ) return false;
+      )
+        return false;
 
-      const successful = result.status === "completed" && Boolean(result.translatedText?.trim());
+      const successful =
+        result.status === "completed" && Boolean(result.translatedText?.trim());
       if (successful) {
         const affected = await transaction.$executeRaw(Prisma.sql`
           UPDATE "support"."MerchantMessageTranslation"
@@ -207,7 +244,9 @@ export class TranslationBatchResultsService {
 
   private async completeBatch(batchId: string): Promise<void> {
     await this.database.$transaction(async (transaction) => {
-      const pending = await transaction.$queryRaw<Array<{ count: bigint }>>(Prisma.sql`
+      const pending = await transaction.$queryRaw<
+        Array<{ count: bigint }>
+      >(Prisma.sql`
         SELECT COUNT(*)::bigint AS "count"
         FROM "support"."MerchantTranslationBatchItem" i
         INNER JOIN "support"."MerchantMessageTranslation" t ON t."id" = i."translationId"
@@ -216,7 +255,9 @@ export class TranslationBatchResultsService {
                 AND t."currentBatchId" = ${batchId}
       `);
       if (Number(pending[0]?.count ?? 0) !== 0) {
-        throw new Error(`Translation Batch ${batchId} still has unapplied items`);
+        throw new Error(
+          `Translation Batch ${batchId} still has unapplied items`,
+        );
       }
       await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
@@ -234,7 +275,8 @@ async function markMessageAvailable(
   if (
     record.kind === "MERCHANT" ||
     record.targetLanguageTag !== record.displayLanguageTag
-  ) return;
+  )
+    return;
   await transaction.$executeRaw(Prisma.sql`
     UPDATE "support"."MerchantSupportMessage" m
     SET "state" = 'AVAILABLE', "availableAt" = COALESCE("availableAt", NOW()), "updatedAt" = NOW()
@@ -261,7 +303,8 @@ async function markMessageAvailable(
   }
 }
 
-export const translationBatchResultsService = new TranslationBatchResultsService();
+export const translationBatchResultsService =
+  new TranslationBatchResultsService();
 
 export const translationBatchResultsTestInternals = {
   resultFailureIsRetryable: (failureCode: string | null) =>

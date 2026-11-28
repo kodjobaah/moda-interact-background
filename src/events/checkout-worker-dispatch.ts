@@ -8,9 +8,15 @@ import {
 
 /** Keep the consent signal outside checkout-v2/v3 parsing and recovery logic. */
 export interface CheckoutQueueHandlers {
-  checkoutCreated(input: ReturnType<typeof mapCheckoutCreatedContractInput>): Promise<unknown>;
-  checkoutUpdated(input: ReturnType<typeof mapCheckoutUpdatedContractInput>): Promise<unknown>;
-  cartActivity(input: ReturnType<typeof mapCartActivityContractInput>): Promise<unknown>;
+  checkoutCreated(
+    input: ReturnType<typeof mapCheckoutCreatedContractInput>,
+  ): Promise<unknown>;
+  checkoutUpdated(
+    input: ReturnType<typeof mapCheckoutUpdatedContractInput>,
+  ): Promise<unknown>;
+  cartActivity(
+    input: ReturnType<typeof mapCartActivityContractInput>,
+  ): Promise<unknown>;
   consentSync(data: unknown): Promise<unknown>;
 }
 
@@ -35,28 +41,52 @@ export async function dispatchCheckoutQueueJob(
 
     case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.jobName: {
       const event = parseRuntimeShopifyEvent(job.data);
-      const result = await handlers.checkoutCreated(mapCheckoutCreatedContractInput(event));
-      onOutcome?.({ eventType: "checkout-created", shopId: event.tenant.shopId,
-        ...("checkoutToken" in event.payload && typeof event.payload.checkoutToken === "string"
-          ? { checkoutToken: event.payload.checkoutToken } : {}), result });
+      const result = await handlers.checkoutCreated(
+        mapCheckoutCreatedContractInput(event),
+      );
+      onOutcome?.({
+        eventType: "checkout-created",
+        shopId: event.tenant.shopId,
+        ...("checkoutToken" in event.payload &&
+        typeof event.payload.checkoutToken === "string"
+          ? { checkoutToken: event.payload.checkoutToken }
+          : {}),
+        result,
+      });
       return;
     }
 
     case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_UPDATED_EVENTS.jobName: {
       const event = parseRuntimeShopifyEvent(job.data);
-      const result = await handlers.checkoutUpdated(mapCheckoutUpdatedContractInput(event));
-      onOutcome?.({ eventType: "checkout-updated", shopId: event.tenant.shopId,
-        ...("checkoutToken" in event.payload && typeof event.payload.checkoutToken === "string"
-          ? { checkoutToken: event.payload.checkoutToken } : {}), result });
+      const result = await handlers.checkoutUpdated(
+        mapCheckoutUpdatedContractInput(event),
+      );
+      onOutcome?.({
+        eventType: "checkout-updated",
+        shopId: event.tenant.shopId,
+        ...("checkoutToken" in event.payload &&
+        typeof event.payload.checkoutToken === "string"
+          ? { checkoutToken: event.payload.checkoutToken }
+          : {}),
+        result,
+      });
       return;
     }
 
     case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CART_ACTIVITY_EVENTS.jobName: {
       const event = parseRuntimeShopifyEvent(job.data);
-      const result = await handlers.cartActivity(mapCartActivityContractInput(event));
-      onOutcome?.({ eventType: "cart-activity", shopId: event.tenant.shopId,
-        ...("checkoutToken" in event.payload && typeof event.payload.checkoutToken === "string"
-          ? { checkoutToken: event.payload.checkoutToken } : {}), result });
+      const result = await handlers.cartActivity(
+        mapCartActivityContractInput(event),
+      );
+      onOutcome?.({
+        eventType: "cart-activity",
+        shopId: event.tenant.shopId,
+        ...("checkoutToken" in event.payload &&
+        typeof event.payload.checkoutToken === "string"
+          ? { checkoutToken: event.payload.checkoutToken }
+          : {}),
+        result,
+      });
       return;
     }
 

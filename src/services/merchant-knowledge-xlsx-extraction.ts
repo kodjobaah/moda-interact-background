@@ -3,7 +3,9 @@ import JSZip from "jszip";
 import yauzl, { type Entry } from "yauzl";
 
 export class MerchantKnowledgeXlsxExtractionError extends Error {
-  constructor(readonly code: "INVALID_FILENAME" | "INVALID_XLSX" | "UNSAFE_XLSX") {
+  constructor(
+    readonly code: "INVALID_FILENAME" | "INVALID_XLSX" | "UNSAFE_XLSX",
+  ) {
     super(code);
     this.name = "MerchantKnowledgeXlsxExtractionError";
   }
@@ -34,18 +36,20 @@ export function assertSafeMerchantKnowledgeXlsxEntries(
     }
 
     const normalizedPath = entry.fileName.replaceAll("\\", "/").toLowerCase();
-    if (forbiddenArchivePaths.some((path) =>
-      path.endsWith("/")
-        ? normalizedPath.startsWith(path)
-        : normalizedPath === path,
-    )) {
+    if (
+      forbiddenArchivePaths.some((path) =>
+        path.endsWith("/")
+          ? normalizedPath.startsWith(path)
+          : normalizedPath === path,
+      )
+    ) {
       throw new MerchantKnowledgeXlsxExtractionError("UNSAFE_XLSX");
     }
 
     if (
-      !Number.isSafeInteger(entry.uncompressedSize)
-      || entry.uncompressedSize < 0
-      || totalUncompressedBytes > maximumUncompressedBytes - entry.uncompressedSize
+      !Number.isSafeInteger(entry.uncompressedSize) ||
+      entry.uncompressedSize < 0 ||
+      totalUncompressedBytes > maximumUncompressedBytes - entry.uncompressedSize
     ) {
       throw new MerchantKnowledgeXlsxExtractionError("UNSAFE_XLSX");
     }
@@ -56,7 +60,9 @@ export function assertSafeMerchantKnowledgeXlsxEntries(
 export function assertValidMerchantKnowledgeXlsxEntries(
   entries: readonly Pick<ArchiveEntryMetadata, "fileName">[],
 ): void {
-  const paths = new Set(entries.map((entry) => entry.fileName.replaceAll("\\", "/").toLowerCase()));
+  const paths = new Set(
+    entries.map((entry) => entry.fileName.replaceAll("\\", "/").toLowerCase()),
+  );
   if (!paths.has("[content_types].xml") || !paths.has("xl/workbook.xml")) {
     throw new MerchantKnowledgeXlsxExtractionError("INVALID_XLSX");
   }
@@ -74,7 +80,10 @@ async function normalizeExcelJsWorkbook(bytes: Uint8Array): Promise<Buffer> {
   const zip = await JSZip.loadAsync(Buffer.from(bytes));
   const workbookXml = await zip.file("xl/workbook.xml")?.async("string");
   const namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-  if (!workbookXml?.includes("<x:workbook") || !workbookXml.includes(`xmlns:x="${namespace}"`)) {
+  if (
+    !workbookXml?.includes("<x:workbook") ||
+    !workbookXml.includes(`xmlns:x="${namespace}"`)
+  ) {
     return Buffer.from(bytes);
   }
 
@@ -83,7 +92,10 @@ async function normalizeExcelJsWorkbook(bytes: Uint8Array): Promise<Buffer> {
     if (/^xl\/worksheets\/_rels\/sheet\d+\.xml\.rels$/.test(name)) {
       // ExcelJS resolves table references relative to xl/worksheets/.
       const rels = await entry.async("string");
-      const relativeRels = rels.replace(/Target="\/xl\/tables\/([^"/]+\.xml)"/g, 'Target="../tables/$1"');
+      const relativeRels = rels.replace(
+        /Target="\/xl\/tables\/([^"/]+\.xml)"/g,
+        'Target="../tables/$1"',
+      );
       if (relativeRels !== rels) zip.file(name, relativeRels);
       continue;
     }
@@ -92,7 +104,8 @@ async function normalizeExcelJsWorkbook(bytes: Uint8Array): Promise<Buffer> {
     if (!xml.includes(`xmlns:x="${namespace}"`)) continue;
     zip.file(
       name,
-      xml.replaceAll(`xmlns:x="${namespace}"`, `xmlns="${namespace}"`)
+      xml
+        .replaceAll(`xmlns:x="${namespace}"`, `xmlns="${namespace}"`)
         .replace(/(<\/?)(x:)([A-Za-z][\w.-]*)/g, "$1$3"),
     );
   }
@@ -120,7 +133,9 @@ async function readCentralDirectory(bytes: Uint8Array): Promise<Entry[]> {
           reject(failure);
         };
 
-        zipfile.on("error", () => fail(new MerchantKnowledgeXlsxExtractionError("INVALID_XLSX")));
+        zipfile.on("error", () =>
+          fail(new MerchantKnowledgeXlsxExtractionError("INVALID_XLSX")),
+        );
         zipfile.on("entry", (entry) => {
           entries.push(entry);
           zipfile.readEntry();
@@ -143,7 +158,10 @@ function scalar(value: ExcelJS.CellValue | undefined): string | undefined {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (value instanceof Date) return value.toISOString();
 
-  if (typeof value === "object" && ("formula" in value || "sharedFormula" in value)) {
+  if (
+    typeof value === "object" &&
+    ("formula" in value || "sharedFormula" in value)
+  ) {
     return scalar(value.result as ExcelJS.CellValue | undefined);
   }
 
@@ -162,7 +180,10 @@ export async function extractMerchantKnowledgeXlsx(
   if (!filename.toLowerCase().endsWith(".xlsx")) {
     throw new MerchantKnowledgeXlsxExtractionError("INVALID_FILENAME");
   }
-  if (!Number.isSafeInteger(maximumUncompressedBytes) || maximumUncompressedBytes <= 0) {
+  if (
+    !Number.isSafeInteger(maximumUncompressedBytes) ||
+    maximumUncompressedBytes <= 0
+  ) {
     throw new MerchantKnowledgeXlsxExtractionError("UNSAFE_XLSX");
   }
 
@@ -176,7 +197,9 @@ export async function extractMerchantKnowledgeXlsx(
   const workbook = new ExcelJS.Workbook();
   try {
     const normalizedBytes = await normalizeExcelJsWorkbook(bytes);
-    await workbook.xlsx.load(normalizedBytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
+    await workbook.xlsx.load(
+      normalizedBytes as unknown as Parameters<typeof workbook.xlsx.load>[0],
+    );
   } catch {
     throw new MerchantKnowledgeXlsxExtractionError("INVALID_XLSX");
   }

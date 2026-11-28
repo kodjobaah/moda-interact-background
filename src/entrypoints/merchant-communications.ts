@@ -25,28 +25,33 @@ void startReadyWorkerProcess({
   serviceName: "moda-merchant-communications-worker",
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
-    const [{ closeWorkerResources }, { createMerchantCommunicationsWorker }] = await Promise.all([
-      import("./resources.js"),
-      import("../workers/merchant-communications.worker.js"),
-    ]);
+    const [{ closeWorkerResources }, { createMerchantCommunicationsWorker }] =
+      await Promise.all([
+        import("./resources.js"),
+        import("../workers/merchant-communications.worker.js"),
+      ]);
     const merchantCommunicationsWorker = createMerchantCommunicationsWorker();
-    const stopQueueConcurrencyController = await startQueueConcurrencyController({
-      config: backgroundRuntimeConfigService,
-      lease: backgroundRuntimeLeaseService,
-    });
+    const stopQueueConcurrencyController =
+      await startQueueConcurrencyController({
+        config: backgroundRuntimeConfigService,
+        lease: backgroundRuntimeLeaseService,
+      });
     const stopScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
       leaseName: "TRANSLATION_RECONCILIATION",
       intervalMs: 0,
       runImmediately: true,
-      getIntervalMs: (snapshot) => snapshot.translationReconciliationIntervalSeconds * 1000,
+      getIntervalMs: (snapshot) =>
+        snapshot.translationReconciliationIntervalSeconds * 1000,
       run: async (snapshot) => {
         const reconciliationOutcomes = await Promise.allSettled([
           translationReconciliationService.reconcile(undefined, snapshot),
           storeCategoryTranslationReconciliationService.reconcile(snapshot),
           merchantPricingTranslationReconciliationService.reconcile(snapshot),
-          templateTranslationCoordinator.reconcile(snapshot.translationReconciliationPageSize),
+          templateTranslationCoordinator.reconcile(
+            snapshot.translationReconciliationPageSize,
+          ),
         ]);
         const publicationOutcomes = await Promise.allSettled([
           storeCategoryTranslationPublicationService.reconcile(
@@ -56,8 +61,12 @@ void startReadyWorkerProcess({
             snapshot.translationReconciliationPageSize,
           ),
         ]);
-        const failures = [...reconciliationOutcomes, ...publicationOutcomes].filter(
-          (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+        const failures = [
+          ...reconciliationOutcomes,
+          ...publicationOutcomes,
+        ].filter(
+          (outcome): outcome is PromiseRejectedResult =>
+            outcome.status === "rejected",
         );
         if (failures.length > 0) {
           throw new AggregateError(
@@ -66,10 +75,17 @@ void startReadyWorkerProcess({
           );
         }
       },
-      onError: (error) => logger.error("background.merchant_communications.reconciliation_failed", {
-        error, errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
-        errorMessage: error instanceof Error ? error.message : String(error),
-      }),
+      onError: (error) =>
+        logger.error(
+          "background.merchant_communications.reconciliation_failed",
+          {
+            error,
+            errorName:
+              error instanceof Error ? error.name.slice(0, 128) : "unknown",
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+          },
+        ),
     });
 
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
@@ -98,7 +114,8 @@ void startReadyWorkerProcess({
 
 async function reportReadinessFailure(error: unknown): Promise<void> {
   logger.error("background.merchant_communications.readiness_failed", {
-    error, errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
+    error,
+    errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
     errorMessage: error instanceof Error ? error.message : String(error),
   });
   await closeWorkerObservability();

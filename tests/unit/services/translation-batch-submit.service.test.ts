@@ -2,34 +2,41 @@ import { describe, expect, it, vi } from "vitest";
 
 // Unit-only trusted credential fixture. Production must always read the Commerce row;
 // deliberately setting OPENAI_API_KEY in these tests is NOT an allowed fallback.
-vi.mock("../../../src/services/platform-configuration/support-translation.js", () => ({
-  readSupportTranslationCredential: vi.fn(async () => "unit-test-commerce-credential"),
-}));
+vi.mock(
+  "../../../src/services/platform-configuration/support-translation.js",
+  () => ({
+    readSupportTranslationCredential: vi.fn(
+      async () => "unit-test-commerce-credential",
+    ),
+  }),
+);
 
 process.env.REDIS_URL ??= "redis://localhost:6379/translation-submit-tests";
 process.env.OPENAI_API_KEY ??= "test-key";
 process.env.TRANSLATION_MODEL ??= "test-model";
 
-const {
-  TranslationBatchSubmissionError,
-  TranslationBatchSubmitService,
-} =
+const { TranslationBatchSubmissionError, TranslationBatchSubmitService } =
   await import("../../../src/services/translation-batch-submit.service.js");
 
-function createDatabase(options: {
-  claim?: Record<string, unknown>[];
-  requests?: Record<string, unknown>[];
-} = {}) {
+function createDatabase(
+  options: {
+    claim?: Record<string, unknown>[];
+    requests?: Record<string, unknown>[];
+  } = {},
+) {
   const execute = vi.fn(async () => 1);
   let queryCall = 0;
-  const transaction = vi.fn(async (callback: (transaction: unknown) => Promise<unknown>) => {
-    queryCall += 1;
-    const rows = queryCall === 1 ? options.claim ?? [] : options.requests ?? [];
-    return callback({
-      $queryRaw: vi.fn(async () => rows),
-      $executeRaw: execute,
-    });
-  });
+  const transaction = vi.fn(
+    async (callback: (transaction: unknown) => Promise<unknown>) => {
+      queryCall += 1;
+      const rows =
+        queryCall === 1 ? (options.claim ?? []) : (options.requests ?? []);
+      return callback({
+        $queryRaw: vi.fn(async () => rows),
+        $executeRaw: execute,
+      });
+    },
+  );
   return { database: { $transaction: transaction }, execute, transaction };
 }
 
@@ -77,12 +84,14 @@ function sqlText(query: { strings: readonly string[] }): string {
 }
 
 function runtimeConfig(overrides: Record<string, number> = {}) {
-  return { current: vi.fn(() => ({
-    translationInitialPollSeconds: 420,
-    translationSubmitRetrySeconds: 660,
-    translationSubmitMaxAttempts: 3,
-    ...overrides,
-  })) } as any;
+  return {
+    current: vi.fn(() => ({
+      translationInitialPollSeconds: 420,
+      translationSubmitRetrySeconds: 660,
+      translationSubmitMaxAttempts: 3,
+      ...overrides,
+    })),
+  } as any;
 }
 
 function changingRuntimeConfig() {
@@ -92,7 +101,9 @@ function changingRuntimeConfig() {
     translationSubmitMaxAttempts: 3,
   };
   const second = { ...first, translationInitialPollSeconds: 60 };
-  return { current: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } as any;
+  return {
+    current: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second),
+  } as any;
 }
 
 describe("TranslationBatchSubmitService", () => {
@@ -125,12 +136,17 @@ describe("TranslationBatchSubmitService", () => {
       service.submit({ translationBatchId: "batch-1" }),
     ]);
 
-    expect(results.filter((result) => result.status === "claimed")).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "claimed"),
+    ).toHaveLength(1);
     expect(provider.createBatch).toHaveBeenCalledTimes(1);
   });
 
   it("loads authoritative requests, persists success, and schedules the first poll in minutes", async () => {
-    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    const database = createDatabase({
+      claim: [claimedBatch],
+      requests: [request],
+    });
     const provider = createProvider();
     const add = vi.fn(async () => undefined);
     const service = new TranslationBatchSubmitService({
@@ -142,7 +158,10 @@ describe("TranslationBatchSubmitService", () => {
 
     const result = await service.submit({ translationBatchId: "batch-1" });
 
-    expect(result).toMatchObject({ status: "claimed", providerBatchId: "provider-batch-1" });
+    expect(result).toMatchObject({
+      status: "claimed",
+      providerBatchId: "provider-batch-1",
+    });
     expect(provider.prepareBatchInput).toHaveBeenCalledWith([request]);
     expect(provider.createBatch).toHaveBeenCalledWith("batch-1", "file-1");
     expect(add).toHaveBeenCalledWith(
@@ -154,7 +173,10 @@ describe("TranslationBatchSubmitService", () => {
   });
 
   it("uses one runtime snapshot for persisted and queued initial poll timing", async () => {
-    const database = createDatabase({ claim: [{ ...claimedBatch, inputFileId: "file-existing" }], requests: [] });
+    const database = createDatabase({
+      claim: [{ ...claimedBatch, inputFileId: "file-existing" }],
+      requests: [],
+    });
     const add = vi.fn(async () => undefined);
     const config = changingRuntimeConfig();
     const service = new TranslationBatchSubmitService({
@@ -186,7 +208,9 @@ describe("TranslationBatchSubmitService", () => {
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toEqual({
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).resolves.toEqual({
       status: "skipped",
       batchId: "batch-1",
     });
@@ -194,7 +218,10 @@ describe("TranslationBatchSubmitService", () => {
   });
 
   it("returns definite retryable preparation failure to READY with a minute delay", async () => {
-    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    const database = createDatabase({
+      claim: [claimedBatch],
+      requests: [request],
+    });
     const provider = createProvider({
       prepareBatchInput: vi.fn(async () => {
         throw new TranslationBatchSubmissionError(
@@ -210,20 +237,27 @@ describe("TranslationBatchSubmitService", () => {
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toEqual({
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).resolves.toEqual({
       status: "skipped",
       batchId: "batch-1",
     });
     expect(provider.createBatch).not.toHaveBeenCalled();
     expect(database.execute).toHaveBeenCalledTimes(1);
     const update = database.execute.mock.calls[0]?.[0];
-    expect(sqlText(update)).toContain('CAST(');
-    expect(sqlText(update)).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(sqlText(update)).toContain("CAST(");
+    expect(sqlText(update)).toContain(
+      'AS "support"."MerchantTranslationBatchStatus"',
+    );
     expect(update.values).toContain("READY");
   });
 
   it("preserves an explicit terminal preparation failure", async () => {
-    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    const database = createDatabase({
+      claim: [claimedBatch],
+      requests: [request],
+    });
     const provider = createProvider({
       prepareBatchInput: vi.fn(async () => {
         throw new TranslationBatchSubmissionError(
@@ -239,21 +273,31 @@ describe("TranslationBatchSubmitService", () => {
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toEqual({
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).resolves.toEqual({
       status: "skipped",
       batchId: "batch-1",
     });
     expect(database.execute).toHaveBeenCalledTimes(1);
     const update = database.execute.mock.calls[0]?.[0];
-    expect(sqlText(update)).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(sqlText(update)).toContain(
+      'AS "support"."MerchantTranslationBatchStatus"',
+    );
     expect(update.values).toContain("FAILED");
   });
 
   it("records ambiguous create as SUBMISSION_UNKNOWN and never retries create", async () => {
-    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    const database = createDatabase({
+      claim: [claimedBatch],
+      requests: [request],
+    });
     const provider = createProvider({
       createBatch: vi.fn(async () => {
-        throw new TranslationBatchSubmissionError("AMBIGUOUS_CREATE", "timeout");
+        throw new TranslationBatchSubmissionError(
+          "AMBIGUOUS_CREATE",
+          "timeout",
+        );
       }),
     });
     const service = new TranslationBatchSubmitService({
@@ -263,11 +307,15 @@ describe("TranslationBatchSubmitService", () => {
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).rejects.toThrow("timeout");
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).rejects.toThrow("timeout");
     expect(provider.createBatch).toHaveBeenCalledTimes(1);
     expect(database.execute).toHaveBeenCalledTimes(2);
     const update = database.execute.mock.calls[1]?.[0];
-    expect(sqlText(update)).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(sqlText(update)).toContain(
+      'AS "support"."MerchantTranslationBatchStatus"',
+    );
     expect(update.values).toContain("SUBMISSION_UNKNOWN");
   });
 
@@ -278,7 +326,10 @@ describe("TranslationBatchSubmitService", () => {
     });
     const provider = createProvider({
       createBatch: vi.fn(async () => {
-        throw new TranslationBatchSubmissionError("AMBIGUOUS_CREATE", "timeout");
+        throw new TranslationBatchSubmissionError(
+          "AMBIGUOUS_CREATE",
+          "timeout",
+        );
       }),
     });
     const service = new TranslationBatchSubmitService({
@@ -288,25 +339,39 @@ describe("TranslationBatchSubmitService", () => {
       runtimeConfig: runtimeConfig({ translationSubmitMaxAttempts: 1 }),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).rejects.toThrow("timeout");
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).rejects.toThrow("timeout");
     expect(database.execute).toHaveBeenCalledTimes(2);
   });
 
   it("keeps durable SUBMITTED state when poll enqueue fails", async () => {
-    const database = createDatabase({ claim: [{ ...claimedBatch, inputFileId: "file-existing" }], requests: [] });
+    const database = createDatabase({
+      claim: [{ ...claimedBatch, inputFileId: "file-existing" }],
+      requests: [],
+    });
     const provider = createProvider();
     const service = new TranslationBatchSubmitService({
       database: database.database,
       provider,
-      queue: { add: vi.fn(async () => { throw new Error("Redis unavailable"); }) },
+      queue: {
+        add: vi.fn(async () => {
+          throw new Error("Redis unavailable");
+        }),
+      },
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toMatchObject({
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).resolves.toMatchObject({
       status: "claimed",
     });
     expect(provider.prepareBatchInput).not.toHaveBeenCalled();
-    expect(provider.createBatch).toHaveBeenCalledWith("batch-1", "file-existing");
+    expect(provider.createBatch).toHaveBeenCalledWith(
+      "batch-1",
+      "file-existing",
+    );
     expect(database.execute).toHaveBeenCalledTimes(1);
   });
 
@@ -314,7 +379,9 @@ describe("TranslationBatchSubmitService", () => {
     process.env.TRANSLATION_PROVIDER = "openai";
     process.env.TRANSLATION_MODEL = "current-deployment-model";
     const database = createDatabase({
-      claim: [{ ...claimedBatch, provider: "openai", model: "persisted-model" }],
+      claim: [
+        { ...claimedBatch, provider: "openai", model: "persisted-model" },
+      ],
       requests: [request],
     });
     const provider = createProvider();
@@ -336,7 +403,10 @@ describe("TranslationBatchSubmitService", () => {
   });
 
   it("does not create after input-file persistence affects zero rows", async () => {
-    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    const database = createDatabase({
+      claim: [claimedBatch],
+      requests: [request],
+    });
     database.execute.mockResolvedValueOnce(0).mockResolvedValue(1);
     const provider = createProvider();
     const service = new TranslationBatchSubmitService({
@@ -353,7 +423,10 @@ describe("TranslationBatchSubmitService", () => {
   });
 
   it("does not retry create when accepted provider persistence affects zero rows", async () => {
-    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    const database = createDatabase({
+      claim: [claimedBatch],
+      requests: [request],
+    });
     database.execute
       .mockResolvedValueOnce(1)
       .mockResolvedValueOnce(0)
@@ -366,9 +439,9 @@ describe("TranslationBatchSubmitService", () => {
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.submit({ translationBatchId: "batch-1" })).rejects.toThrow(
-      "unexpected number of rows",
-    );
+    await expect(
+      service.submit({ translationBatchId: "batch-1" }),
+    ).rejects.toThrow("unexpected number of rows");
     expect(provider.createBatch).toHaveBeenCalledTimes(1);
   });
 

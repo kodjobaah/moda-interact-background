@@ -2,40 +2,88 @@ import { describe, expect, it, vi } from "vitest";
 import { OutboundMessageDeliveryService } from "../../../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
 
 const wooScope = {
-  recoveryId: "recovery-1", checkoutToken: "checkout-1", customerId: "customer-1", attemptId: "attempt-1",
-  consent: { shopId: "shop-1", installationId: "install-1", credentialVersion: 1,
-    customerId: "customer-1", customerPhoneId: "phone-1", canonicalRecipient: "447400123456",
-    consentRevision: 2n, consentDecisionSequence: 2n, noContactRevision: 0n },
-  idempotencyKey: "recovery-outreach:attempt-1", recoveryCreditSourceKey: "source-1",
+  recoveryId: "recovery-1",
+  checkoutToken: "checkout-1",
+  customerId: "customer-1",
+  attemptId: "attempt-1",
+  consent: {
+    shopId: "shop-1",
+    installationId: "install-1",
+    credentialVersion: 1,
+    customerId: "customer-1",
+    customerPhoneId: "phone-1",
+    canonicalRecipient: "447400123456",
+    consentRevision: 2n,
+    consentDecisionSequence: 2n,
+    noContactRevision: 0n,
+  },
+  idempotencyKey: "recovery-outreach:attempt-1",
+  recoveryCreditSourceKey: "source-1",
 };
-const admission = { kind: "admitted" as const, shopId: "shop-1", conversationId: "conversation-1",
-  messageId: "message-1", terminal: false, executionScope: "recovery" as const };
-const template = { to: "+447400123456", templateName: "woo_recovery", languageCode: "en_GB",
-  templateRegistration: { shopId: "shop-1", senderWabaId: "waba-1",
-    purpose: "INITIAL_NO_OFFER", variantId: "variant-1", registrationId: "registration-1",
-    definitionId: "definition-1", providerTemplateId: "meta-1",
-    providerTemplateName: "woo_recovery", providerLanguageCode: "en_GB",
-    submittedContentHash: "a".repeat(64), bindingFingerprint: "a".repeat(64) },
-  recoveryPromise: { kind: "NO_OFFER" as const } };
+const admission = {
+  kind: "admitted" as const,
+  shopId: "shop-1",
+  conversationId: "conversation-1",
+  messageId: "message-1",
+  terminal: false,
+  executionScope: "recovery" as const,
+};
+const template = {
+  to: "+447400123456",
+  templateName: "woo_recovery",
+  languageCode: "en_GB",
+  templateRegistration: {
+    shopId: "shop-1",
+    senderWabaId: "waba-1",
+    purpose: "INITIAL_NO_OFFER",
+    variantId: "variant-1",
+    registrationId: "registration-1",
+    definitionId: "definition-1",
+    providerTemplateId: "meta-1",
+    providerTemplateName: "woo_recovery",
+    providerLanguageCode: "en_GB",
+    submittedContentHash: "a".repeat(64),
+    bindingFingerprint: "a".repeat(64),
+  },
+  recoveryPromise: { kind: "NO_OFFER" as const },
+};
 
 function harness(senderType: "AGENT" | "AUTOMATION" = "AUTOMATION") {
   let content = "[pending]";
   let status = "PENDING";
-  const sendWhatsAppTemplate = vi.fn(async () => ({ providerMessageId: "wamid-1" }));
+  const sendWhatsAppTemplate = vi.fn(async () => ({
+    providerMessageId: "wamid-1",
+  }));
   const admitFinalSend = vi.fn(async () => ({ kind: "admitted" as const }));
-  const generalFence = { admitFinalSend: vi.fn(async () => ({
-    kind: "suppressed" as const, reason: "local-no-contact",
-  })) };
-  const recoveryFence = { admitFinalSend: vi.fn(async () => ({
-    kind: "suppressed" as const, reason: "local-no-contact",
-  })) };
-  const ownership = { readTurnOwnership: vi.fn(async () =>
-    null as null | { recoveryId: string; revision: number }) };
-  const failPrepared = vi.fn(async () => { status = "FAILED"; });
+  const generalFence = {
+    admitFinalSend: vi.fn(async () => ({
+      kind: "suppressed" as const,
+      reason: "local-no-contact",
+    })),
+  };
+  const recoveryFence = {
+    admitFinalSend: vi.fn(async () => ({
+      kind: "suppressed" as const,
+      reason: "local-no-contact",
+    })),
+  };
+  const ownership = {
+    readTurnOwnership: vi.fn(
+      async () => null as null | { recoveryId: string; revision: number },
+    ),
+  };
+  const failPrepared = vi.fn(async () => {
+    status = "FAILED";
+  });
   const afterProviderError = vi.fn(async () => undefined);
-  const findUnique = vi.fn(async () => ({ conversationId: "conversation-1",
-    senderType, status, content,
-    providerDispatchKey: null, providerDispatchAdmittedAt: null }));
+  const findUnique = vi.fn(async () => ({
+    conversationId: "conversation-1",
+    senderType,
+    status,
+    content,
+    providerDispatchKey: null,
+    providerDispatchAdmittedAt: null,
+  }));
   const update = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     if (typeof data.content === "string") content = data.content;
     if (data.status === "SENT") status = "SENT";
@@ -45,7 +93,9 @@ function harness(senderType: "AGENT" | "AUTOMATION" = "AUTOMATION") {
     conversationMessage: { findUnique, update },
     conversation: { update: vi.fn(async () => ({})) },
     usageEvent: { deleteMany: vi.fn(async () => ({ count: 1 })) },
-    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(db)),
+    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback(db),
+    ),
     $queryRawUnsafe: vi.fn(),
   };
   const moderation = {
@@ -54,43 +104,91 @@ function harness(senderType: "AGENT" | "AUTOMATION" = "AUTOMATION") {
   };
   const service = new OutboundMessageDeliveryService(
     db as never,
-    { sendWhatsAppTemplate, sendWhatsAppText: vi.fn(), getProviderAccountId: vi.fn(async () => "waba-1") } as never,
+    {
+      sendWhatsAppTemplate,
+      sendWhatsAppText: vi.fn(),
+      getProviderAccountId: vi.fn(async () => "waba-1"),
+    } as never,
     { evaluate: vi.fn(async () => ({ allowed: true })) } as never,
-    ownership as never, recoveryFence as never, moderation as never,
+    ownership as never,
+    recoveryFence as never,
+    moderation as never,
     { failPrepared, afterProviderError } as never,
-    generalFence as never, {} as never, { admitFinalSend } as never,
+    generalFence as never,
+    {} as never,
+    { admitFinalSend } as never,
   );
-  return { service, sendWhatsAppTemplate, admitFinalSend, failPrepared,
-    afterProviderError, moderation, generalFence, recoveryFence, ownership,
-    get content() { return content; } };
+  return {
+    service,
+    sendWhatsAppTemplate,
+    admitFinalSend,
+    failPrepared,
+    afterProviderError,
+    moderation,
+    generalFence,
+    recoveryFence,
+    ownership,
+    get content() {
+      return content;
+    },
+  };
 }
 
 describe("ARCH-046 Woo prepared-template delivery reuses existing provider pipeline", () => {
   it("commits the dedicated permit before calling Meta, retaining one moderated prepared body", async () => {
-    const f = harness(); const ordered: string[] = [];
+    const f = harness();
+    const ordered: string[] = [];
     f.admitFinalSend.mockImplementationOnce(async () => {
       ordered.push("committed-final-permit");
       return { kind: "admitted" };
     });
     f.sendWhatsAppTemplate.mockImplementationOnce(async () => {
-      ordered.push("meta"); return { providerMessageId: "wamid-1" };
+      ordered.push("meta");
+      return { providerMessageId: "wamid-1" };
     });
-    expect((await f.service.sendPreparedWooInitialTemplate(admission, template, wooScope)).kind).toBe("admitted");
+    expect(
+      (
+        await f.service.sendPreparedWooInitialTemplate(
+          admission,
+          template,
+          wooScope,
+        )
+      ).kind,
+    ).toBe("admitted");
     expect(ordered).toEqual(["committed-final-permit", "meta"]);
-    expect(f.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({
-      ...wooScope, shopId: "shop-1", conversationId: "conversation-1", messageId: "message-1",
-      recipient: template.to, expectedContent: f.content, verifiedCategory: "MARKETING",
-      templateRegistration: template.templateRegistration,
-    }));
+    expect(f.admitFinalSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...wooScope,
+        shopId: "shop-1",
+        conversationId: "conversation-1",
+        messageId: "message-1",
+        recipient: template.to,
+        expectedContent: f.content,
+        verifiedCategory: "MARKETING",
+        templateRegistration: template.templateRegistration,
+      }),
+    );
   });
 
-  it.each(["TEMPLATE_REGISTRATION_UNAVAILABLE", "TEMPLATE_PROVIDER_STATUS_UNRESOLVED",
-    "TEMPLATE_PROVIDER_STATUS_STALE"])(
-    "suppresses the SQL final-fence %s result before any Meta send", async (reason) => {
+  it.each([
+    "TEMPLATE_REGISTRATION_UNAVAILABLE",
+    "TEMPLATE_PROVIDER_STATUS_UNRESOLVED",
+    "TEMPLATE_PROVIDER_STATUS_STALE",
+  ])(
+    "suppresses the SQL final-fence %s result before any Meta send",
+    async (reason) => {
       const f = harness();
-      f.admitFinalSend.mockResolvedValueOnce({ kind: "suppressed", reason } as never);
-      expect(await f.service.sendPreparedWooInitialTemplate(admission, template, wooScope))
-        .toEqual({ kind: "suppressed", reason });
+      f.admitFinalSend.mockResolvedValueOnce({
+        kind: "suppressed",
+        reason,
+      } as never);
+      expect(
+        await f.service.sendPreparedWooInitialTemplate(
+          admission,
+          template,
+          wooScope,
+        ),
+      ).toEqual({ kind: "suppressed", reason });
       expect(f.admitFinalSend).toHaveBeenCalledOnce();
       expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
       expect(f.failPrepared).toHaveBeenCalledWith("message-1");
@@ -99,18 +197,36 @@ describe("ARCH-046 Woo prepared-template delivery reuses existing provider pipel
 
   it("suppresses STOP/consent denial and refunds unadmitted usage via existing failure adapter", async () => {
     const f = harness();
-    f.admitFinalSend.mockResolvedValueOnce({ kind: "suppressed", reason: "woo-consent-changed" } as never);
-    expect((await f.service.sendPreparedWooInitialTemplate(admission, template, wooScope)).kind)
-      .toBe("suppressed");
+    f.admitFinalSend.mockResolvedValueOnce({
+      kind: "suppressed",
+      reason: "woo-consent-changed",
+    } as never);
+    expect(
+      (
+        await f.service.sendPreparedWooInitialTemplate(
+          admission,
+          template,
+          wooScope,
+        )
+      ).kind,
+    ).toBe("suppressed");
     expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
     expect(f.failPrepared).toHaveBeenCalledWith("message-1");
   });
 
   it("preserves admission evidence on duplicate final permit, including uncertain provider outcome", async () => {
     const f = harness();
-    f.admitFinalSend.mockResolvedValueOnce({ kind: "suppressed", reason: "already-admitted-or-sent" } as never);
-    expect(await f.service.sendPreparedWooInitialTemplate(admission, template, wooScope))
-      .toEqual({ kind: "suppressed", reason: "duplicate" });
+    f.admitFinalSend.mockResolvedValueOnce({
+      kind: "suppressed",
+      reason: "already-admitted-or-sent",
+    } as never);
+    expect(
+      await f.service.sendPreparedWooInitialTemplate(
+        admission,
+        template,
+        wooScope,
+      ),
+    ).toEqual({ kind: "suppressed", reason: "duplicate" });
     expect(f.failPrepared).not.toHaveBeenCalled();
     expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
@@ -119,33 +235,49 @@ describe("ARCH-046 Woo prepared-template delivery reuses existing provider pipel
     const f = harness();
     const failure = new Error("moderation API unavailable");
     f.moderation.assessText.mockRejectedValueOnce(failure);
-    await expect(f.service.sendPreparedWooInitialTemplate(admission, template, wooScope))
-      .rejects.toBe(failure);
+    await expect(
+      f.service.sendPreparedWooInitialTemplate(admission, template, wooScope),
+    ).rejects.toBe(failure);
     expect(f.failPrepared).not.toHaveBeenCalled();
     expect(f.admitFinalSend).not.toHaveBeenCalled();
     expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
     expect(f.afterProviderError).not.toHaveBeenCalled();
     expect(JSON.parse(f.content)).toMatchObject({
-      templateName: template.templateName, languageCode: template.languageCode,
+      templateName: template.templateName,
+      languageCode: template.languageCode,
       recoveryPromise: template.recoveryPromise,
     });
-    expect(f.moderation.assessText).toHaveBeenCalledWith(expect.objectContaining({ effectiveText: f.content }));
+    expect(f.moderation.assessText).toHaveBeenCalledWith(
+      expect.objectContaining({ effectiveText: f.content }),
+    );
   });
 
   it("never clears committed Woo provider idempotency on an uncertain error", async () => {
     const f = harness();
     f.sendWhatsAppTemplate.mockRejectedValueOnce(new Error("timeout"));
-    await expect(f.service.sendPreparedWooInitialTemplate(admission, template, wooScope))
-      .rejects.toThrow("timeout");
-    expect(f.afterProviderError).toHaveBeenCalledWith("message-1", template.to,
-      expect.any(Error), true);
+    await expect(
+      f.service.sendPreparedWooInitialTemplate(admission, template, wooScope),
+    ).rejects.toThrow("timeout");
+    expect(f.afterProviderError).toHaveBeenCalledWith(
+      "message-1",
+      template.to,
+      expect.any(Error),
+      true,
+    );
     expect(f.failPrepared).not.toHaveBeenCalled();
   });
 
   it("never substitutes terminal TEXT after a hard-limit reservation", async () => {
     const f = harness();
-    const result = await f.service.sendPreparedWooInitialTemplate({ ...admission, terminal: true }, template, wooScope);
-    expect(result).toEqual({ kind: "suppressed", reason: "normal-cap-reached" });
+    const result = await f.service.sendPreparedWooInitialTemplate(
+      { ...admission, terminal: true },
+      template,
+      wooScope,
+    );
+    expect(result).toEqual({
+      kind: "suppressed",
+      reason: "normal-cap-reached",
+    });
     expect(f.failPrepared).toHaveBeenCalled();
     expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
     expect(f.admitFinalSend).not.toHaveBeenCalled();
@@ -157,21 +289,35 @@ describe("ARCH-046 Woo prepared-template delivery reuses existing provider pipel
     const reconciliation = new Error("database unavailable");
     f.sendWhatsAppTemplate.mockRejectedValueOnce(original);
     f.afterProviderError.mockRejectedValueOnce(reconciliation);
-    await expect(f.service.sendPreparedWooInitialTemplate(admission, template, wooScope))
-      .rejects.toMatchObject({ name: "AggregateError", errors: [original, reconciliation] });
+    await expect(
+      f.service.sendPreparedWooInitialTemplate(admission, template, wooScope),
+    ).rejects.toMatchObject({
+      name: "AggregateError",
+      errors: [original, reconciliation],
+    });
     expect(f.failPrepared).not.toHaveBeenCalled();
   });
 
   it("keeps ordinary HUMAN text on the general STOP fence, never the Woo permit", async () => {
     const f = harness("AGENT");
     const result = await f.service.sendPreparedText({
-      ...admission, executionScope: "general", to: template.to, text: "Merchant reply",
+      ...admission,
+      executionScope: "general",
+      to: template.to,
+      text: "Merchant reply",
     });
-    expect(result).toEqual({ kind: "suppressed", reason: "conversation-invalid" });
-    expect(f.generalFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({
-      messageId: admission.messageId, conversationId: admission.conversationId,
-      recipient: template.to, expectedContent: "Merchant reply",
-    }));
+    expect(result).toEqual({
+      kind: "suppressed",
+      reason: "conversation-invalid",
+    });
+    expect(f.generalFence.admitFinalSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: admission.messageId,
+        conversationId: admission.conversationId,
+        recipient: template.to,
+        expectedContent: "Merchant reply",
+      }),
+    );
     expect(f.recoveryFence.admitFinalSend).not.toHaveBeenCalled();
     expect(f.admitFinalSend).not.toHaveBeenCalled();
     expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
@@ -180,19 +326,32 @@ describe("ARCH-046 Woo prepared-template delivery reuses existing provider pipel
 
   it("keeps ordinary in-window AI recovery replies on their existing STOP/revision fence", async () => {
     const f = harness("AGENT");
-    f.ownership.readTurnOwnership.mockResolvedValueOnce({ recoveryId: "recovery-1", revision: 3 });
+    f.ownership.readTurnOwnership.mockResolvedValueOnce({
+      recoveryId: "recovery-1",
+      revision: 3,
+    });
     const result = await f.service.sendPreparedText({
-      ...admission, executionScope: "recovery", to: template.to, text: "AI recovery reply",
+      ...admission,
+      executionScope: "recovery",
+      to: template.to,
+      text: "AI recovery reply",
       expectedControlRevision: 3,
     });
-    expect(result).toEqual({ kind: "suppressed", reason: "conversation-invalid" });
-    expect(f.recoveryFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({
-      senderType: "AGENT", recoveryId: "recovery-1", expectedControlRevision: 3,
-      recipient: template.to, deliveryKind: "TEXT",
-    }));
+    expect(result).toEqual({
+      kind: "suppressed",
+      reason: "conversation-invalid",
+    });
+    expect(f.recoveryFence.admitFinalSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        senderType: "AGENT",
+        recoveryId: "recovery-1",
+        expectedControlRevision: 3,
+        recipient: template.to,
+        deliveryKind: "TEXT",
+      }),
+    );
     expect(f.generalFence.admitFinalSend).not.toHaveBeenCalled();
     expect(f.admitFinalSend).not.toHaveBeenCalled();
     expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
-
 });

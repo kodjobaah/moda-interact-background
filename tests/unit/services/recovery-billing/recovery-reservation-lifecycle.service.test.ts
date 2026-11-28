@@ -11,21 +11,38 @@ import {
 import type { RecoveryBillingAdmission } from "../../../../src/services/recovery-billing/recovery-billing.types.js";
 
 function lifecycleService(serviceLogger?: StructuredLogger) {
-  const commit = (kind: string) => vi.fn(async (input: { shopId: string; sourceKey: string }) => ({
-    kind: "committed" as const,
-    reservation: {
-      id: `reservation-${kind}`,
-      shopId: input.shopId,
-      sourceKey: input.sourceKey,
-      quantity: 1,
-      status: "COMMITTED",
-      committedUsageEventId: `usage-${kind}`,
-    },
-  }));
-  const free = { commit: commit("free"), release: vi.fn(), markAmbiguous: vi.fn() };
-  const purchased = { commit: commit("purchased"), release: vi.fn(), markAmbiguous: vi.fn() };
-  const paid = { commit: commit("paid"), release: vi.fn(), markAmbiguous: vi.fn() };
-  const promotional = { commit: commit("promotional"), release: vi.fn(), markAmbiguous: vi.fn() };
+  const commit = (kind: string) =>
+    vi.fn(async (input: { shopId: string; sourceKey: string }) => ({
+      kind: "committed" as const,
+      reservation: {
+        id: `reservation-${kind}`,
+        shopId: input.shopId,
+        sourceKey: input.sourceKey,
+        quantity: 1,
+        status: "COMMITTED",
+        committedUsageEventId: `usage-${kind}`,
+      },
+    }));
+  const free = {
+    commit: commit("free"),
+    release: vi.fn(),
+    markAmbiguous: vi.fn(),
+  };
+  const purchased = {
+    commit: commit("purchased"),
+    release: vi.fn(),
+    markAmbiguous: vi.fn(),
+  };
+  const paid = {
+    commit: commit("paid"),
+    release: vi.fn(),
+    markAmbiguous: vi.fn(),
+  };
+  const promotional = {
+    commit: commit("promotional"),
+    release: vi.fn(),
+    markAmbiguous: vi.fn(),
+  };
 
   return {
     service: new RecoveryReservationLifecycleService(
@@ -72,7 +89,9 @@ function postContractPolicy() {
   } as never;
 }
 
-function admission(kind: RecoveryBillingAdmission["kind"]): RecoveryBillingAdmission {
+function admission(
+  kind: RecoveryBillingAdmission["kind"],
+): RecoveryBillingAdmission {
   const sourceKey = `source:${kind}`;
   switch (kind) {
     case "promotional":
@@ -100,20 +119,23 @@ describe("RecoveryReservationLifecycleService", () => {
     ["free", "free"],
     ["lifetime-free", "free"],
     ["purchased", "purchased"],
-  ] as const)("commits %s capacity through its reservation owner", async (kind, owner) => {
-    const harness = lifecycleService();
-    await harness.service.commit({
-      admission: admission(kind),
-      occurredAt: new Date("2026-10-07T12:00:00.000Z"),
-    });
+  ] as const)(
+    "commits %s capacity through its reservation owner",
+    async (kind, owner) => {
+      const harness = lifecycleService();
+      await harness.service.commit({
+        admission: admission(kind),
+        occurredAt: new Date("2026-10-07T12:00:00.000Z"),
+      });
 
-    expect(harness[owner].commit).toHaveBeenCalledWith({
-      shopId: "shop-1",
-      sourceKey: `source:${kind}`,
-    });
-    expect(harness.paid.commit).not.toHaveBeenCalled();
-    expect(harness.promotional.commit).not.toHaveBeenCalled();
-  });
+      expect(harness[owner].commit).toHaveBeenCalledWith({
+        shopId: "shop-1",
+        sourceKey: `source:${kind}`,
+      });
+      expect(harness.paid.commit).not.toHaveBeenCalled();
+      expect(harness.promotional.commit).not.toHaveBeenCalled();
+    },
+  );
 
   it("commits Paid included capacity with the successful provider-initiation time", async () => {
     const harness = lifecycleService();
@@ -146,10 +168,12 @@ describe("RecoveryReservationLifecycleService", () => {
     const harness = lifecycleService();
     harness.free.commit.mockResolvedValue(undefined as never);
 
-    await expect(harness.service.commit({
-      admission: admission("free"),
-      occurredAt: new Date("2026-10-07T12:00:00.000Z"),
-    })).rejects.toMatchObject<Partial<RecoveryCreditNotCommittedError>>({
+    await expect(
+      harness.service.commit({
+        admission: admission("free"),
+        occurredAt: new Date("2026-10-07T12:00:00.000Z"),
+      }),
+    ).rejects.toMatchObject<Partial<RecoveryCreditNotCommittedError>>({
       name: "RecoveryCreditNotCommittedError",
       shopId: "shop-1",
       sourceKey: "source:free",
@@ -169,18 +193,23 @@ describe("RecoveryReservationLifecycleService", () => {
     const harness = lifecycleService(serviceLogger);
     harness.free.commit.mockResolvedValue(undefined as never);
 
-    await expect(harness.service.commit({
-      admission: admission("free"),
-      occurredAt: new Date("2026-10-07T12:00:00.000Z"),
-    })).rejects.toBeInstanceOf(RecoveryCreditNotCommittedError);
+    await expect(
+      harness.service.commit({
+        admission: admission("free"),
+        occurredAt: new Date("2026-10-07T12:00:00.000Z"),
+      }),
+    ).rejects.toBeInstanceOf(RecoveryCreditNotCommittedError);
 
-    const [record] = records.map((entry) => JSON.parse(entry) as {
-      event: string;
-      level: string;
-      "service.name": string;
-      "deployment.environment.name": string;
-      data: Record<string, unknown>;
-    });
+    const [record] = records.map(
+      (entry) =>
+        JSON.parse(entry) as {
+          event: string;
+          level: string;
+          "service.name": string;
+          "deployment.environment.name": string;
+          data: Record<string, unknown>;
+        },
+    );
     expect(record).toMatchObject({
       event: "recovery.credit_commit.failed",
       level: "error",
@@ -193,7 +222,8 @@ describe("RecoveryReservationLifecycleService", () => {
         sourceKey: "source:free",
         error: {
           name: "RecoveryCreditNotCommittedError",
-          message: "Recovery reservation owner did not confirm a committed credit",
+          message:
+            "Recovery reservation owner did not confirm a committed credit",
         },
       },
     });
@@ -205,15 +235,19 @@ describe("RecoveryReservationLifecycleService", () => {
     const serviceLogger = createLogger({
       serviceName: "moda-recovery-worker",
       environment: "test",
-      sink: () => { throw new Error("sink failure"); },
+      sink: () => {
+        throw new Error("sink failure");
+      },
     });
     const harness = lifecycleService(serviceLogger);
     harness.free.commit.mockRejectedValue(injectedError);
 
-    await expect(harness.service.commit({
-      admission: admission("free"),
-      occurredAt: new Date("2026-10-07T12:00:00.000Z"),
-    })).rejects.toBe(injectedError);
+    await expect(
+      harness.service.commit({
+        admission: admission("free"),
+        occurredAt: new Date("2026-10-07T12:00:00.000Z"),
+      }),
+    ).rejects.toBe(injectedError);
   });
 
   it.each([
@@ -221,15 +255,18 @@ describe("RecoveryReservationLifecycleService", () => {
     ["lifetime-free", "free"],
     ["purchased", "purchased"],
     ["paid", "paid"],
-  ] as const)("releases %s capacity through its reservation owner", async (kind, owner) => {
-    const harness = lifecycleService();
-    await harness.service.release(admission(kind));
+  ] as const)(
+    "releases %s capacity through its reservation owner",
+    async (kind, owner) => {
+      const harness = lifecycleService();
+      await harness.service.release(admission(kind));
 
-    expect(harness[owner].release).toHaveBeenCalledWith({
-      shopId: "shop-1",
-      sourceKey: `source:${kind}`,
-    });
-  });
+      expect(harness[owner].release).toHaveBeenCalledWith({
+        shopId: "shop-1",
+        sourceKey: `source:${kind}`,
+      });
+    },
+  );
 
   it("releases promotional capacity with the frozen plan identity", async () => {
     const harness = lifecycleService();
@@ -284,19 +321,22 @@ describe("RecoveryReservationLifecycleService", () => {
     ["lifetime-free", "free"],
     ["purchased", "purchased"],
     ["paid", "paid"],
-  ] as const)("keeps ambiguous %s capacity attached to its exact owner", async (kind, owner) => {
-    const harness = lifecycleService();
-    await harness.service.handleProviderFailure({
-      admission: admission(kind),
-      error: providerError("invalid-provider-response"),
-    });
+  ] as const)(
+    "keeps ambiguous %s capacity attached to its exact owner",
+    async (kind, owner) => {
+      const harness = lifecycleService();
+      await harness.service.handleProviderFailure({
+        admission: admission(kind),
+        error: providerError("invalid-provider-response"),
+      });
 
-    expect(harness[owner].markAmbiguous).toHaveBeenCalledWith({
-      shopId: "shop-1",
-      sourceKey: `source:${kind}`,
-    });
-    expect(harness[owner].release).not.toHaveBeenCalled();
-  });
+      expect(harness[owner].markAmbiguous).toHaveBeenCalledWith({
+        shopId: "shop-1",
+        sourceKey: `source:${kind}`,
+      });
+      expect(harness[owner].release).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps promotional definitive and ambiguous outcomes on the exact grant owner", async () => {
     const harness = lifecycleService();
@@ -317,7 +357,9 @@ describe("RecoveryReservationLifecycleService", () => {
       planId: "plan-1",
     };
     expect(harness.promotional.release).toHaveBeenCalledWith(reservationInput);
-    expect(harness.promotional.markAmbiguous).toHaveBeenCalledWith(reservationInput);
+    expect(harness.promotional.markAmbiguous).toHaveBeenCalledWith(
+      reservationInput,
+    );
     expect(harness.free.release).not.toHaveBeenCalled();
     expect(harness.purchased.release).not.toHaveBeenCalled();
     expect(harness.paid.release).not.toHaveBeenCalled();

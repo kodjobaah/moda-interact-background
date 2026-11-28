@@ -41,16 +41,10 @@ describe("CommerceAgent GenAI metrics", () => {
     const fixture = fileURLToPath(
       new URL("../../fixtures/genai-metrics.ts", import.meta.url),
     );
-    const processResult = await spawnProcess([
-      "--import",
-      "tsx",
-      fixture,
-    ]);
+    const processResult = await spawnProcess(["--import", "tsx", fixture]);
 
     expect(processResult.code).toBe(0);
-    const serialized = processResult.stdout.match(
-      /^GENAI_METRICS (.+)$/m,
-    )?.[1];
+    const serialized = processResult.stdout.match(/^GENAI_METRICS (.+)$/m)?.[1];
     expect(serialized, processResult.stderr).toBeDefined();
     const result = JSON.parse(serialized!) as FixtureResult;
 
@@ -78,8 +72,8 @@ describe("CommerceAgent GenAI metrics", () => {
     }
 
     for (const name of expectedMetricNames) {
-      const metric = result.collected.find((candidate) =>
-        candidate.name === name
+      const metric = result.collected.find(
+        (candidate) => candidate.name === name,
       );
       expect(metric).toBeDefined();
       const expectedSuccess = name.startsWith("moda.conversation.turn")
@@ -89,11 +83,15 @@ describe("CommerceAgent GenAI metrics", () => {
       expect(pointCount(metric!, "error")).toBe(1);
       if (name.endsWith("duration_ms")) {
         for (const point of metric!.points) {
-          expect(point.value).toEqual(expect.objectContaining({
-            count: expect.any(Number),
-            sum: expect.any(Number),
-          }));
-          expect((point.value as { sum: number }).sum).toBeGreaterThanOrEqual(0);
+          expect(point.value).toEqual(
+            expect.objectContaining({
+              count: expect.any(Number),
+              sum: expect.any(Number),
+            }),
+          );
+          expect((point.value as { sum: number }).sum).toBeGreaterThanOrEqual(
+            0,
+          );
         }
       }
     }
@@ -110,17 +108,12 @@ describe("CommerceAgent GenAI metrics", () => {
   }, 20_000);
 });
 
-function pointCount(
-  metric: Metric,
-  outcome: "success" | "error",
-): number {
-  const point = metric.points.find((candidate) =>
-    candidate.attributes.outcome === outcome
+function pointCount(metric: Metric, outcome: "success" | "error"): number {
+  const point = metric.points.find(
+    (candidate) => candidate.attributes.outcome === outcome,
   );
   expect(point).toBeDefined();
-  return typeof point!.value === "number"
-    ? point!.value
-    : point!.value.count;
+  return typeof point!.value === "number" ? point!.value : point!.value.count;
 }
 
 function spawnProcess(

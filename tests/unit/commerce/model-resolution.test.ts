@@ -61,12 +61,15 @@ function fixture() {
     platformConfiguration: { modelId: "platform-model" } as null | {
       modelId: string | null;
     },
-    plans: new Map<string, {
-      id: string;
-      shopifyPlanHandle: string;
-      commerceModelId: string | null;
-      isActive?: boolean;
-    }>(),
+    plans: new Map<
+      string,
+      {
+        id: string;
+        shopifyPlanHandle: string;
+        commerceModelId: string | null;
+        isActive?: boolean;
+      }
+    >(),
     models: new Map<string, ModelFixture>(),
   };
   state.models.set("platform-model", model("platform-model"));
@@ -76,7 +79,9 @@ function fixture() {
 
   const transaction = {
     shop: {
-      findUnique: vi.fn(async () => state.shopExists ? { id: "shop-a" } : null),
+      findUnique: vi.fn(async () =>
+        state.shopExists ? { id: "shop-a" } : null,
+      ),
     },
     subscription: {
       findUnique: vi.fn(async () => state.subscription),
@@ -89,13 +94,15 @@ function fixture() {
       ),
     },
     merchantPricingPlan: {
-      findUnique: vi.fn(async ({ where }: { where: { shopifyPlanHandle: string } }) =>
-        state.plans.get(where.shopifyPlanHandle) ?? null,
+      findUnique: vi.fn(
+        async ({ where }: { where: { shopifyPlanHandle: string } }) =>
+          state.plans.get(where.shopifyPlanHandle) ?? null,
       ),
     },
     commerceModelCatalogueEntry: {
-      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
-        state.models.get(where.id) ?? null,
+      findUnique: vi.fn(
+        async ({ where }: { where: { id: string } }) =>
+          state.models.get(where.id) ?? null,
       ),
     },
   };
@@ -122,12 +129,13 @@ const addPlan = (
   handle: string,
   modelId: string | null,
   isActive = true,
-) => state.plans.set(handle, {
-  id: `merchant-plan-${handle}`,
-  shopifyPlanHandle: handle,
-  commerceModelId: modelId,
-  isActive,
-});
+) =>
+  state.plans.set(handle, {
+    id: `merchant-plan-${handle}`,
+    shopifyPlanHandle: handle,
+    commerceModelId: modelId,
+    isActive,
+  });
 
 function expectWinner(
   result: ResolvedProductionCommerceModel,
@@ -178,23 +186,38 @@ describe("resolveProductionCommerceModel", () => {
     expectWinner(result, "SHOP", "shop-model");
     expect(f.transaction.merchantPricingPlan.findUnique).not.toHaveBeenCalled();
     expect(f.transaction.subscription.findUnique).not.toHaveBeenCalled();
-    expect(f.transaction.commerceAgentConfiguration.findFirst).toHaveBeenCalledOnce();
+    expect(
+      f.transaction.commerceAgentConfiguration.findFirst,
+    ).toHaveBeenCalledOnce();
   });
 
   it.each([
     ["cross-Shop availability", model("foreign-model", "SHOP", "shop-b")],
     ["disabled model", { ...model("disabled-model"), enabled: false }],
-    ["disabled availability", {
-      ...model("disabled-availability-model"),
-      availability: { ...model("disabled-availability-model").availability, enabled: false },
-    }],
-  ])("fails closed for an explicit Shop selection with %s", async (_label, selected) => {
-    const f = fixture();
-    f.state.models.set(selected.id, selected);
-    f.state.shopConfiguration = { modelId: selected.id };
-    await expect(resolve(f.db)).rejects.toThrow("Commerce model is unavailable");
-    expect(f.transaction.merchantPricingPlan.findUnique).not.toHaveBeenCalled();
-  });
+    [
+      "disabled availability",
+      {
+        ...model("disabled-availability-model"),
+        availability: {
+          ...model("disabled-availability-model").availability,
+          enabled: false,
+        },
+      },
+    ],
+  ])(
+    "fails closed for an explicit Shop selection with %s",
+    async (_label, selected) => {
+      const f = fixture();
+      f.state.models.set(selected.id, selected);
+      f.state.shopConfiguration = { modelId: selected.id };
+      await expect(resolve(f.db)).rejects.toThrow(
+        "Commerce model is unavailable",
+      );
+      expect(
+        f.transaction.merchantPricingPlan.findUnique,
+      ).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["ACTIVE", "TRIALING"])(
     "uses the exact current Price Plan assignment for %s subscriptions",
@@ -221,7 +244,9 @@ describe("resolveProductionCommerceModel", () => {
       f.state.subscription = { ...activeSubscription(), status };
       addPlan(f.state, "starter", "starter-model");
       expectWinner(await resolve(f.db), "PLATFORM", "platform-model");
-      expect(f.transaction.merchantPricingPlan.findUnique).not.toHaveBeenCalled();
+      expect(
+        f.transaction.merchantPricingPlan.findUnique,
+      ).not.toHaveBeenCalled();
     },
   );
 
@@ -265,15 +290,28 @@ describe("resolveProductionCommerceModel", () => {
 
   it.each([
     ["missing model", "missing-model", undefined],
-    ["disabled model", "disabled-plan-model", { ...model("disabled-plan-model"), enabled: false }],
-    ["Shop-only model", "shop-only-plan-model", model("shop-only-plan-model", "SHOP", "shop-a")],
-  ])("fails closed for a Price Plan assignment with %s", async (_label, modelId, selected) => {
-    const f = fixture();
-    f.state.subscription = activeSubscription();
-    addPlan(f.state, "starter", modelId);
-    if (selected) f.state.models.set(selected.id, selected);
-    await expect(resolve(f.db)).rejects.toThrow("Commerce model is unavailable");
-  });
+    [
+      "disabled model",
+      "disabled-plan-model",
+      { ...model("disabled-plan-model"), enabled: false },
+    ],
+    [
+      "Shop-only model",
+      "shop-only-plan-model",
+      model("shop-only-plan-model", "SHOP", "shop-a"),
+    ],
+  ])(
+    "fails closed for a Price Plan assignment with %s",
+    async (_label, modelId, selected) => {
+      const f = fixture();
+      f.state.subscription = activeSubscription();
+      addPlan(f.state, "starter", modelId);
+      if (selected) f.state.models.set(selected.id, selected);
+      await expect(resolve(f.db)).rejects.toThrow(
+        "Commerce model is unavailable",
+      );
+    },
+  );
 
   it("lets an explicit Shop model win over an otherwise valid Price Plan model", async () => {
     const f = fixture();
@@ -301,18 +339,24 @@ describe("resolveProductionCommerceModel", () => {
   it("fails when Shop or Platform selection is missing or disabled", async () => {
     const missing = fixture();
     missing.state.shopExists = false;
-    await expect(resolve(missing.db)).rejects.toThrow("Commerce model is unavailable");
+    await expect(resolve(missing.db)).rejects.toThrow(
+      "Commerce model is unavailable",
+    );
 
     const noPlatform = fixture();
     noPlatform.state.platformConfiguration = null;
-    await expect(resolve(noPlatform.db)).rejects.toThrow("Commerce model is unavailable");
+    await expect(resolve(noPlatform.db)).rejects.toThrow(
+      "Commerce model is unavailable",
+    );
 
     const disabled = fixture();
     disabled.state.models.set("platform-model", {
       ...model("platform-model"),
       enabled: false,
     });
-    await expect(resolve(disabled.db)).rejects.toThrow("Commerce model is unavailable");
+    await expect(resolve(disabled.db)).rejects.toThrow(
+      "Commerce model is unavailable",
+    );
   });
 
   it("preserves malformed persisted model configuration errors without mutating selections", async () => {
@@ -332,7 +376,9 @@ describe("resolveProductionCommerceModel", () => {
     );
 
     expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).not.toBe("Commerce model is unavailable");
+    expect((failure as Error).message).not.toBe(
+      "Commerce model is unavailable",
+    );
     expect({
       shop: f.state.shopConfiguration,
       platform: f.state.platformConfiguration,

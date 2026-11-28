@@ -9,7 +9,10 @@ const RETRY_TIERS = [
   { ageMs: RETRY_WINDOW_MS, delayMs: 30 * 60 * 1000 },
 ] as const;
 
-export function nextSubscriptionReconcileAt(pendingEffectiveAt: Date, now = new Date()): Date | null {
+export function nextSubscriptionReconcileAt(
+  pendingEffectiveAt: Date,
+  now = new Date(),
+): Date | null {
   const ageMs = Math.max(0, now.getTime() - pendingEffectiveAt.getTime());
   const tier = RETRY_TIERS.find(({ ageMs: tierAge }) => ageMs < tierAge);
   return tier ? new Date(now.getTime() + tier.delayMs) : null;

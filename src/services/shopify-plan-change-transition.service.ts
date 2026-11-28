@@ -46,35 +46,72 @@ export type ShopifyPlanChangeInput = {
 
 export type ShopifyPlanChangeResult =
   | { kind: "not-applicable" }
-  | { kind: "transitioned"; billingPeriodId: string | null; nextReconcileAt: Date | null; planKind: BillingPlanKind };
+  | {
+      kind: "transitioned";
+      billingPeriodId: string | null;
+      nextReconcileAt: Date | null;
+      planKind: BillingPlanKind;
+    };
 
 export class ShopifyPlanChangeTransitionService {
   constructor(private readonly database: TransitionDatabase) {}
 
-  async transition(input: ShopifyPlanChangeInput): Promise<ShopifyPlanChangeResult> {
-    return this.database.$transaction((transaction) => this.transitionInTransaction(transaction, input));
+  async transition(
+    input: ShopifyPlanChangeInput,
+  ): Promise<ShopifyPlanChangeResult> {
+    return this.database.$transaction((transaction) =>
+      this.transitionInTransaction(transaction, input),
+    );
   }
 
-  async transitionInTransaction(transaction: Transition, input: ShopifyPlanChangeInput): Promise<ShopifyPlanChangeResult> {
+  async transitionInTransaction(
+    transaction: Transition,
+    input: ShopifyPlanChangeInput,
+  ): Promise<ShopifyPlanChangeResult> {
     const start = input.provider.currentPeriodStart;
     const end = input.provider.currentPeriodEnd;
     const allowance = input.plan.includedRecoveryConversationAllowance;
-    if (!input.plan.active || input.provider.planHandle !== input.plan.shopifyPlanHandle) {
+    if (
+      !input.plan.active ||
+      input.provider.planHandle !== input.plan.shopifyPlanHandle
+    ) {
       return { kind: "not-applicable" };
     }
-    const requiresExactCycle = input.plan.kind === BillingPlanKind.PAID_METERED
-      || (input.plan.kind === BillingPlanKind.FREE && input.plan.recoveryCreditPackEnabled);
-    if (requiresExactCycle && (!start || !end || start >= end)) return { kind: "not-applicable" };
+    const requiresExactCycle =
+      input.plan.kind === BillingPlanKind.PAID_METERED ||
+      (input.plan.kind === BillingPlanKind.FREE &&
+        input.plan.recoveryCreditPackEnabled);
+    if (requiresExactCycle && (!start || !end || start >= end))
+      return { kind: "not-applicable" };
     if (input.plan.kind === BillingPlanKind.PAID_METERED) {
       if (!Number.isSafeInteger(allowance) || (allowance ?? -1) < 0) {
-        throw new Error("Provider-confirmed paid plan is missing a valid included recovery allowance");
+        throw new Error(
+          "Provider-confirmed paid plan is missing a valid included recovery allowance",
+        );
       }
-      if (input.plan.recoveryCreditPackEnabled && (!input.plan.shopifyRecoveryCreditPackEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyRecoveryCreditPackEventHandle))) {
-        throw new Error("Provider-confirmed Paid plan is missing its recovery pack meter");
+      if (
+        input.plan.recoveryCreditPackEnabled &&
+        (!input.plan.shopifyRecoveryCreditPackEventHandle ||
+          !input.provider.usageEventHandles.includes(
+            input.plan.shopifyRecoveryCreditPackEventHandle,
+          ))
+      ) {
+        throw new Error(
+          "Provider-confirmed Paid plan is missing its recovery pack meter",
+        );
       }
     }
-    if (input.plan.kind === BillingPlanKind.FREE && input.plan.recoveryCreditPackEnabled && (!input.plan.shopifyRecoveryCreditPackEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyRecoveryCreditPackEventHandle))) {
-      throw new Error("Provider-confirmed Free plan is missing its recovery pack meter");
+    if (
+      input.plan.kind === BillingPlanKind.FREE &&
+      input.plan.recoveryCreditPackEnabled &&
+      (!input.plan.shopifyRecoveryCreditPackEventHandle ||
+        !input.provider.usageEventHandles.includes(
+          input.plan.shopifyRecoveryCreditPackEventHandle,
+        ))
+    ) {
+      throw new Error(
+        "Provider-confirmed Free plan is missing its recovery pack meter",
+      );
     }
 
     await lockSubscription(transaction, input.subscriptionId);
@@ -82,32 +119,62 @@ export class ShopifyPlanChangeTransitionService {
       where: { id: input.subscriptionId },
       include: { billingPeriod: true, plan: true },
     });
-    const retryableSyncError = RETRYABLE_PLAN_CHANGE_SYNC_ERRORS.includes(subscription?.lastSyncErrorCode as typeof RETRYABLE_PLAN_CHANGE_SYNC_ERRORS[number]);
-    if (!subscription || subscription.shopId !== input.shopId || subscription.planId !== input.expectedCurrentPlanId || ((subscription.status !== "ACTIVE" && subscription.status !== "TRIALING") && !(subscription.status === "SYNC_ERROR" && retryableSyncError))) {
+    const retryableSyncError = RETRYABLE_PLAN_CHANGE_SYNC_ERRORS.includes(
+      subscription?.lastSyncErrorCode as (typeof RETRYABLE_PLAN_CHANGE_SYNC_ERRORS)[number],
+    );
+    if (
+      !subscription ||
+      subscription.shopId !== input.shopId ||
+      subscription.planId !== input.expectedCurrentPlanId ||
+      (subscription.status !== "ACTIVE" &&
+        subscription.status !== "TRIALING" &&
+        !(subscription.status === "SYNC_ERROR" && retryableSyncError))
+    ) {
       return { kind: "not-applicable" };
     }
-    const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, input.provider.planHandle, input.provider.usageEventHandles);
-    const outgoingPlanKind = subscription.billingPeriod?.planKindSnapshot ?? subscription.plan?.kind;
-    if (outgoingPlanKind === BillingPlanKind.PAID_METERED && (!subscription.billingPeriod || !subscription.currentPeriodEnd)) {
+    const usageEventMapping = await resolveShopifyUsageEventMapping(
+      transaction,
+      input.provider.planHandle,
+      input.provider.usageEventHandles,
+    );
+    const outgoingPlanKind =
+      subscription.billingPeriod?.planKindSnapshot ?? subscription.plan?.kind;
+    if (
+      outgoingPlanKind === BillingPlanKind.PAID_METERED &&
+      (!subscription.billingPeriod || !subscription.currentPeriodEnd)
+    ) {
       return { kind: "not-applicable" };
     }
-    if (start && subscription.currentPeriodEnd && start < subscription.currentPeriodEnd) throw new Error("Provider plan change cycle overlaps the current billing period");
+    if (
+      start &&
+      subscription.currentPeriodEnd &&
+      start < subscription.currentPeriodEnd
+    )
+      throw new Error(
+        "Provider plan change cycle overlaps the current billing period",
+      );
 
     if (!start || !end) {
       if (subscription.billingPeriod) {
         await closeBillingPeriod(transaction, {
           billingPeriodId: subscription.billingPeriod.id,
-          planKind: subscription.billingPeriod.planKindSnapshot ?? subscription.plan?.kind ?? BillingPlanKind.FREE,
+          planKind:
+            subscription.billingPeriod.planKindSnapshot ??
+            subscription.plan?.kind ??
+            BillingPlanKind.FREE,
           closedAt: subscription.billingPeriod.periodEnd,
           closeReason: BillingPeriodCloseReason.PLAN_CHANGED,
-          openPeriodFailureMessage: "Billing period was not open while applying plan change",
-          providerResponseSummary: "Billing period closed before Shopify App Event report",
+          openPeriodFailureMessage:
+            "Billing period was not open while applying plan change",
+          providerResponseSummary:
+            "Billing period closed before Shopify App Event report",
         });
       }
       await transaction.subscription.update({
         where: { id: subscription.id },
         data: {
-          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
+          unmappedShopifyUsageEventHandles:
+            usageEventMapping.unmappedProviderHandles,
           planId: input.plan.id,
           observedShopifyPlanHandle: input.provider.planHandle,
           status: input.provider.status === "TRIALING" ? "TRIALING" : "ACTIVE",
@@ -126,7 +193,12 @@ export class ShopifyPlanChangeTransitionService {
           lastSyncErrorAt: null,
         },
       });
-      return { kind: "transitioned", billingPeriodId: null, nextReconcileAt: null, planKind: input.plan.kind };
+      return {
+        kind: "transitioned",
+        billingPeriodId: null,
+        nextReconcileAt: null,
+        planKind: input.plan.kind,
+      };
     }
 
     const successorInput = {
@@ -136,35 +208,60 @@ export class ShopifyPlanChangeTransitionService {
       shopifyPlanHandleSnapshot: input.provider.planHandle,
       planNameSnapshot: input.plan.name,
       planKindSnapshot: input.plan.kind,
-      includedRecoveryCreditsGranted: input.plan.kind === BillingPlanKind.PAID_METERED ? allowance as number : null,
+      includedRecoveryCreditsGranted:
+        input.plan.kind === BillingPlanKind.PAID_METERED
+          ? (allowance as number)
+          : null,
       periodStart: start,
       periodEnd: end,
       errors: {
         closedPeriod: "Provider plan change has a closed successor period",
-        incompatiblePeriod: "Provider plan change has an incompatible successor period",
-        incompatibleIncludedCounter: "Provider plan change has an incompatible included-credit grant",
+        incompatiblePeriod:
+          "Provider plan change has an incompatible successor period",
+        incompatibleIncludedCounter:
+          "Provider plan change has an incompatible included-credit grant",
       },
     };
-    const successor = await findCompatibleSuccessorBillingPeriod(transaction, successorInput);
+    const successor = await findCompatibleSuccessorBillingPeriod(
+      transaction,
+      successorInput,
+    );
 
     if (subscription.billingPeriod) {
       await closeBillingPeriod(transaction, {
         billingPeriodId: subscription.billingPeriod.id,
-        planKind: subscription.billingPeriod.planKindSnapshot ?? subscription.plan?.kind ?? BillingPlanKind.FREE,
+        planKind:
+          subscription.billingPeriod.planKindSnapshot ??
+          subscription.plan?.kind ??
+          BillingPlanKind.FREE,
         closedAt: subscription.billingPeriod.periodEnd,
         closeReason: BillingPeriodCloseReason.PLAN_CHANGED,
-        openPeriodFailureMessage: "Billing period was not open while applying plan change",
-        providerResponseSummary: "Billing period closed before Shopify App Event report",
+        openPeriodFailureMessage:
+          "Billing period was not open while applying plan change",
+        providerResponseSummary:
+          "Billing period closed before Shopify App Event report",
       });
     }
-    const period = await ensureSuccessorBillingPeriod(transaction, successorInput, successor);
-    const nextReconcileAt = input.plan.kind === BillingPlanKind.FREE && !input.plan.recoveryCreditPackEnabled
-      ? null
-      : new Date(Math.max(input.now.getTime(), end.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS));
+    const period = await ensureSuccessorBillingPeriod(
+      transaction,
+      successorInput,
+      successor,
+    );
+    const nextReconcileAt =
+      input.plan.kind === BillingPlanKind.FREE &&
+      !input.plan.recoveryCreditPackEnabled
+        ? null
+        : new Date(
+            Math.max(
+              input.now.getTime(),
+              end.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS,
+            ),
+          );
     await transaction.subscription.update({
       where: { id: subscription.id },
       data: {
-        unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
+        unmappedShopifyUsageEventHandles:
+          usageEventMapping.unmappedProviderHandles,
         planId: input.plan.id,
         observedShopifyPlanHandle: input.provider.planHandle,
         status: input.provider.status === "TRIALING" ? "TRIALING" : "ACTIVE",
@@ -183,10 +280,20 @@ export class ShopifyPlanChangeTransitionService {
         lastSyncErrorAt: null,
       },
     });
-    return { kind: "transitioned", billingPeriodId: period.id, nextReconcileAt, planKind: input.plan.kind };
+    return {
+      kind: "transitioned",
+      billingPeriodId: period.id,
+      nextReconcileAt,
+      planKind: input.plan.kind,
+    };
   }
 }
 
-async function lockSubscription(transaction: Transition, subscriptionId: string): Promise<void> {
-  await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "billing"."Subscription" WHERE "id" = ${subscriptionId} FOR UPDATE`);
+async function lockSubscription(
+  transaction: Transition,
+  subscriptionId: string,
+): Promise<void> {
+  await transaction.$queryRaw(
+    Prisma.sql`SELECT "id" FROM "billing"."Subscription" WHERE "id" = ${subscriptionId} FOR UPDATE`,
+  );
 }

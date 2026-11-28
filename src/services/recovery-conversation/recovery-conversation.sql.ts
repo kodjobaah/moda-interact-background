@@ -7,17 +7,35 @@ import { historicalInitialRetryReceiptSql } from "../recovery-delivery-retry/his
 import type { PrismaClient, Prisma } from "@prisma/client";
 import prisma from "../../lib/db.js";
 
-export type SqlTransaction = Pick<Prisma.TransactionClient, "$queryRawUnsafe" | "$executeRawUnsafe">;
-export type RecoveryDatabase = Pick<PrismaClient, "$transaction" | "$queryRawUnsafe" | "$executeRawUnsafe">;
+export type SqlTransaction = Pick<
+  Prisma.TransactionClient,
+  "$queryRawUnsafe" | "$executeRawUnsafe"
+>;
+export type RecoveryDatabase = Pick<
+  PrismaClient,
+  "$transaction" | "$queryRawUnsafe" | "$executeRawUnsafe"
+>;
 export const recoveryDatabase: RecoveryDatabase = prisma;
 
-export async function rows<T>(db: SqlTransaction, statement: string, ...params: unknown[]): Promise<T[]> {
+export async function rows<T>(
+  db: SqlTransaction,
+  statement: string,
+  ...params: unknown[]
+): Promise<T[]> {
   return db.$queryRawUnsafe<T[]>(statement, ...params);
 }
-export async function first<T>(db: SqlTransaction, statement: string, ...params: unknown[]): Promise<T | null> {
+export async function first<T>(
+  db: SqlTransaction,
+  statement: string,
+  ...params: unknown[]
+): Promise<T | null> {
   return (await rows<T>(db, statement, ...params))[0] ?? null;
 }
-export async function changed(db: SqlTransaction, statement: string, ...params: unknown[]): Promise<number> {
+export async function changed(
+  db: SqlTransaction,
+  statement: string,
+  ...params: unknown[]
+): Promise<number> {
   return db.$executeRawUnsafe(statement, ...params);
 }
 
@@ -37,17 +55,26 @@ export const terminalRecovery = (status: string): boolean =>
   ["COMPLETED", "EXPIRED", "CANCELLED"].includes(status);
 
 export async function readRecoveryContext(
-  db: SqlTransaction, conversationId: string,
+  db: SqlTransaction,
+  conversationId: string,
 ): Promise<RecoveryContext | null> {
   return readRecoveryContextRow(db, conversationId);
 }
 
-type RetryOwnerPointer = { shopId: string; recoveryId: string; contention: "nowait" };
+type RetryOwnerPointer = {
+  shopId: string;
+  recoveryId: string;
+  contention: "nowait";
+};
 
 async function readRecoveryContextRow(
-  db: SqlTransaction, conversationId: string, expectedOwner?: RetryOwnerPointer,
+  db: SqlTransaction,
+  conversationId: string,
+  expectedOwner?: RetryOwnerPointer,
 ): Promise<RecoveryContext | null> {
-  return first<RecoveryContext>(db, `
+  return first<RecoveryContext>(
+    db,
+    `
     SELECT c."id", r."shopId", r."id" AS "recoveryId", r."checkoutToken",
       r."status"::text AS "recoveryStatus", c."controlMode"::text AS "mode",
       c."controlRevision" AS "revision", c."inboundVersion", c."lastInboundAt"
@@ -56,7 +83,9 @@ async function readRecoveryContextRow(
     WHERE c."id"=$1 AND c."type"='RECOVERY'
       AND (c."shopId" IS NULL OR c."shopId"=r."shopId")
     ${expectedOwner ? 'AND r."shopId"=$2 AND r."id"=$3 FOR UPDATE OF c NOWAIT' : ""}`,
-    conversationId, ...(expectedOwner ? [expectedOwner.shopId, expectedOwner.recoveryId] : []));
+    conversationId,
+    ...(expectedOwner ? [expectedOwner.shopId, expectedOwner.recoveryId] : []),
+  );
 }
 
 /** Lock order mandated by DATABASE-001: Shop -> Conversation -> command/attempt/message.
@@ -64,7 +93,8 @@ async function readRecoveryContextRow(
  * Never call Meta, Redis, or an HTTP policy adapter inside this transaction.
  */
 export async function lockRecoveryContext(
-  tx: SqlTransaction, conversationId: string,
+  tx: SqlTransaction,
+  conversationId: string,
   expectedOwner?: RetryOwnerPointer,
 ): Promise<RecoveryContext | null> {
   // Retry callers already read a durable owner pointer in this Serializable
@@ -73,27 +103,49 @@ export async function lockRecoveryContext(
   // NOWAIT throws SQLSTATE 55P03, aborting this transaction, rather than
   // spending its execution budget waiting behind a different worker.
   if (expectedOwner) {
-    const shop = await first<{ id: string }>(tx,
-      `SELECT "id" FROM "commerce"."Shop" WHERE "id"=$1 FOR UPDATE NOWAIT`, expectedOwner.shopId);
+    const shop = await first<{ id: string }>(
+      tx,
+      `SELECT "id" FROM "commerce"."Shop" WHERE "id"=$1 FOR UPDATE NOWAIT`,
+      expectedOwner.shopId,
+    );
     if (!shop) return null;
-    const current = await readRecoveryContextRow(tx, conversationId, expectedOwner);
-    return current?.shopId === expectedOwner.shopId && current.recoveryId === expectedOwner.recoveryId ? current : null;
+    const current = await readRecoveryContextRow(
+      tx,
+      conversationId,
+      expectedOwner,
+    );
+    return current?.shopId === expectedOwner.shopId &&
+      current.recoveryId === expectedOwner.recoveryId
+      ? current
+      : null;
   }
   const initial = await readRecoveryContext(tx, conversationId);
   if (!initial) return null;
-  const shop = await first<{ id: string }>(tx,
-    `SELECT "id" FROM "commerce"."Shop" WHERE "id"=$1 FOR UPDATE`, initial.shopId);
+  const shop = await first<{ id: string }>(
+    tx,
+    `SELECT "id" FROM "commerce"."Shop" WHERE "id"=$1 FOR UPDATE`,
+    initial.shopId,
+  );
   if (!shop) return null;
-  const locked = await first<{ id: string }>(tx,
-    `SELECT "id" FROM "whatsapp"."Conversation" WHERE "id"=$1 FOR UPDATE`, conversationId);
+  const locked = await first<{ id: string }>(
+    tx,
+    `SELECT "id" FROM "whatsapp"."Conversation" WHERE "id"=$1 FOR UPDATE`,
+    conversationId,
+  );
   if (!locked) return null;
   const current = await readRecoveryContext(tx, conversationId);
-  return current?.shopId === initial.shopId && current.recoveryId === initial.recoveryId ? current : null;
+  return current?.shopId === initial.shopId &&
+    current.recoveryId === initial.recoveryId
+    ? current
+    : null;
 }
 
 export type Decision = { kind: "allowed" } | { kind: "denied"; reason: string };
 export const allowed = (): Decision => ({ kind: "allowed" });
-export const denied = (reason: string): Decision => ({ kind: "denied", reason });
+export const denied = (reason: string): Decision => ({
+  kind: "denied",
+  reason,
+});
 
 /** Evidence for RECOVERY-only WhatsApp window/follow-up admission. A conversation
  * timestamp is a cache, not proof of a provider-verified customer message.
@@ -111,9 +163,16 @@ export type RecoveryWindowEvidence = {
 
 export async function readRecoveryWindowEvidence(
   tx: SqlTransaction,
-  input: { recoveryId: string; conversationId: string; now: Date; lockInitial?: boolean },
+  input: {
+    recoveryId: string;
+    conversationId: string;
+    now: Date;
+    lockInitial?: boolean;
+  },
 ): Promise<RecoveryWindowEvidence | null> {
-  return first<RecoveryWindowEvidence>(tx, `
+  return first<RecoveryWindowEvidence>(
+    tx,
+    `
     SELECT shop."platform"::text AS "platform", initial."id" AS "initialAttemptId", initial."recipient",
       initial."sentAt" AS "initialSentAt", initial."followUpDueAt",
       verified."createdAt" AS "verifiedInboundAt"
@@ -141,6 +200,9 @@ export async function readRecoveryWindowEvidence(
         WHERE failed."id"=initial."outboundMessageId" AND failed."status"='FAILED'
       ))
     ORDER BY initial."sentAt" DESC NULLS LAST, initial.sequence DESC LIMIT 1
-    ${input.lockInitial ? 'FOR UPDATE OF initial' : ''}`,
-    input.recoveryId, input.conversationId, input.now);
+    ${input.lockInitial ? "FOR UPDATE OF initial" : ""}`,
+    input.recoveryId,
+    input.conversationId,
+    input.now,
+  );
 }

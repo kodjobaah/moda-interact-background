@@ -76,13 +76,13 @@ responses, and English is never recorded as a new detected conversation language
 
 ### Gateway handoff — messaging worker only
 
-| Variable | Allowed values / default | Credential scope |
-| --- | --- | --- |
-| `WHATSAPP_TRANSCRIPTION_PROVIDER` | `groq` or `openai`; omitted/blank means `groq` | Explicit selection; invalid values fail closed |
-| `GROQ_TRANSCRIPTION_MODEL` | Provider model ID, default `whisper-large-v3-turbo` | Existing Groq deployment preserved |
-| `GROQ_API_KEY` | Required when Groq selected | Existing messaging-worker secret |
-| `OPENAI_TRANSCRIPTION_MODEL` | Provider model ID, default `gpt-4o-mini-transcribe` **only when OpenAI selected** | No automatic provider/model fallback |
-| `WHATSAPP_OPENAI_API_KEY` | Required when OpenAI selected | Separate messaging-worker secret; translation-worker `OPENAI_API_KEY` is not consulted |
+| Variable                          | Allowed values / default                                                          | Credential scope                                                                       |
+| --------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `WHATSAPP_TRANSCRIPTION_PROVIDER` | `groq` or `openai`; omitted/blank means `groq`                                    | Explicit selection; invalid values fail closed                                         |
+| `GROQ_TRANSCRIPTION_MODEL`        | Provider model ID, default `whisper-large-v3-turbo`                               | Existing Groq deployment preserved                                                     |
+| `GROQ_API_KEY`                    | Required when Groq selected                                                       | Existing messaging-worker secret                                                       |
+| `OPENAI_TRANSCRIPTION_MODEL`      | Provider model ID, default `gpt-4o-mini-transcribe` **only when OpenAI selected** | No automatic provider/model fallback                                                   |
+| `WHATSAPP_OPENAI_API_KEY`         | Required when OpenAI selected                                                     | Separate messaging-worker secret; translation-worker `OPENAI_API_KEY` is not consulted |
 
 Model IDs must be 1–128 letters/digits/dots/underscores/hyphens, starting with a
 letter/digit. Availability is provider-validated; an invalid/unsupported model
@@ -124,11 +124,11 @@ with the already installed ffmpeg (`sine=frequency=440:duration=0.5`, libopus, 1
 checks duration and `.ogg` filename. It is a synthetic tone, **not speech**, has no
 personal data and was not sent to a provider. No conversion dependency is added.
 
-| Quality fixture | Speech / container / MIME / duration | Provider/model | Outcome |
-| --- | --- | --- | --- |
-| Planned FR-VOICE-01 | Consented French WhatsApp voice note; Ogg/Opus; audio/ogg; duration to record, <=120s | OpenAI / gpt-4o-mini-transcribe | Not run: no paid/provider rehearsal authorized; language retention and material errors unmeasured |
-| Planned EN-VOICE-01 | Consented English WhatsApp voice note; Ogg/Opus; audio/ogg; duration to record, <=120s | OpenAI / gpt-4o-mini-transcribe | Not run: same limitation |
-| Planned GROQ-VOICE-01/02 | Same consented French/English notes | Groq / configured model | Not run: production-provider codec/quality compatibility unmeasured |
+| Quality fixture          | Speech / container / MIME / duration                                                   | Provider/model                  | Outcome                                                                                           |
+| ------------------------ | -------------------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Planned FR-VOICE-01      | Consented French WhatsApp voice note; Ogg/Opus; audio/ogg; duration to record, <=120s  | OpenAI / gpt-4o-mini-transcribe | Not run: no paid/provider rehearsal authorized; language retention and material errors unmeasured |
+| Planned EN-VOICE-01      | Consented English WhatsApp voice note; Ogg/Opus; audio/ogg; duration to record, <=120s | OpenAI / gpt-4o-mini-transcribe | Not run: same limitation                                                                          |
+| Planned GROQ-VOICE-01/02 | Same consented French/English notes                                                    | Groq / configured model         | Not run: production-provider codec/quality compatibility unmeasured                               |
 
 For an explicitly authorized rehearsal, record fixture ID/consent, actual container,
 codec/MIME/duration, provider/model/date, conversion (none unless incompatibility is

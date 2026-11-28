@@ -1,4 +1,7 @@
-import { MerchantSupportMessageKind, MerchantSupportMessageState } from "@prisma/client";
+import {
+  MerchantSupportMessageKind,
+  MerchantSupportMessageState,
+} from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import prisma from "../lib/db.js";
 import {
@@ -7,7 +10,10 @@ import {
   recoveryDeliveryNoticeSourceKey,
 } from "./recovery-delivery-notification-content.js";
 
-type SupportDatabase = Pick<PrismaClient, "$transaction" | "merchantSupportMessage">;
+type SupportDatabase = Pick<
+  PrismaClient,
+  "$transaction" | "merchantSupportMessage"
+>;
 export type SupportNoticeOutcome = "created" | "duplicate";
 
 /** Independent support transaction: cannot roll back earlier credit/reachability commits. */
@@ -18,10 +24,15 @@ export class RecoveryDeliverySupportMessageService {
   ) {}
 
   async write(input: {
-    shopId: string; recoveryId: string; messageId: string; body: string;
+    shopId: string;
+    recoveryId: string;
+    messageId: string;
+    body: string;
   }): Promise<SupportNoticeOutcome> {
     const sourceKey = recoveryDeliveryNoticeSourceKey(
-      input.shopId, input.recoveryId, input.messageId,
+      input.shopId,
+      input.recoveryId,
+      input.messageId,
     );
     try {
       await this.database.$transaction(async (tx) => {
@@ -53,10 +64,15 @@ export class RecoveryDeliverySupportMessageService {
     } catch (error) {
       // Only a confirmed existing message is a successful duplicate. A competing
       // thread creation or unrelated unique constraint must remain retryable.
-      if (typeof error === "object" && error !== null && "code" in error &&
-        error.code === "P2002") {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "P2002"
+      ) {
         const existing = await this.database.merchantSupportMessage.findUnique({
-          where: { sourceKey }, select: { id: true },
+          where: { sourceKey },
+          select: { id: true },
         });
         if (existing) return "duplicate";
       }
@@ -65,4 +81,5 @@ export class RecoveryDeliverySupportMessageService {
   }
 }
 
-export const recoveryDeliverySupportMessageService = new RecoveryDeliverySupportMessageService();
+export const recoveryDeliverySupportMessageService =
+  new RecoveryDeliverySupportMessageService();

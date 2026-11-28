@@ -17,7 +17,10 @@ import {
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 500;
 
-type ReconciliationDatabase = Pick<PrismaClient, "merchantKnowledgeSourceRevision">;
+type ReconciliationDatabase = Pick<
+  PrismaClient,
+  "merchantKnowledgeSourceRevision"
+>;
 type ReconciliationQueue = Pick<Queue, "add">;
 type SourceEligibilityResolver = Pick<
   MerchantKnowledgeEntitlementService,
@@ -38,23 +41,30 @@ export class MerchantKnowledgeReconciliationService {
     skippedDormant: number;
   }> {
     const pageSize = input?.pageSize ?? DEFAULT_PAGE_SIZE;
-    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
-      throw new RangeError(`pageSize must be an integer from 1 to ${MAX_PAGE_SIZE}`);
+    if (
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > MAX_PAGE_SIZE
+    ) {
+      throw new RangeError(
+        `pageSize must be an integer from 1 to ${MAX_PAGE_SIZE}`,
+      );
     }
 
-    const revisions = await this.database.merchantKnowledgeSourceRevision.findMany({
-      where: { status: "PENDING" },
-      orderBy: [{ requestedAt: "asc" }, { id: "asc" }],
-      take: pageSize,
-      select: {
-        id: true,
-        generation: true,
-        requestedAt: true,
-        source: {
-          select: { id: true, shopId: true, currentGeneration: true },
+    const revisions =
+      await this.database.merchantKnowledgeSourceRevision.findMany({
+        where: { status: "PENDING" },
+        orderBy: [{ requestedAt: "asc" }, { id: "asc" }],
+        take: pageSize,
+        select: {
+          id: true,
+          generation: true,
+          requestedAt: true,
+          source: {
+            select: { id: true, shopId: true, currentGeneration: true },
+          },
         },
-      },
-    });
+      });
 
     let enqueued = 0;
     let skippedStale = 0;

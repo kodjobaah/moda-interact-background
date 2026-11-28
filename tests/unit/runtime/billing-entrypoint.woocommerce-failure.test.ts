@@ -20,12 +20,22 @@ vi.mock("@modainteract/moda-interact-shared/logging", () => ({
 vi.mock("../../../src/runtime/deployment-environment.js", () => ({
   resolveDeploymentEnvironmentName: () => "test",
 }));
-vi.mock("../../../src/runtime/observability.js", () => ({ closeWorkerObservability: vi.fn() }));
-vi.mock("../../../src/runtime/dynamic-leased-scheduler.js", () => ({ startDynamicLeasedScheduler: vi.fn() }));
-vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
-  backgroundRuntimeConfigService: { start: vi.fn(), current: vi.fn(), close: vi.fn() },
+vi.mock("../../../src/runtime/observability.js", () => ({
+  closeWorkerObservability: vi.fn(),
 }));
-vi.mock("../../../src/runtime/background-runtime-lease.js", () => ({ backgroundRuntimeLeaseService: {} }));
+vi.mock("../../../src/runtime/dynamic-leased-scheduler.js", () => ({
+  startDynamicLeasedScheduler: vi.fn(),
+}));
+vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
+  backgroundRuntimeConfigService: {
+    start: vi.fn(),
+    current: vi.fn(),
+    close: vi.fn(),
+  },
+}));
+vi.mock("../../../src/runtime/background-runtime-lease.js", () => ({
+  backgroundRuntimeLeaseService: {},
+}));
 vi.mock("../../../src/runtime/readiness.js", () => ({
   startReadyWorkerProcess: vi.fn(() => Promise.resolve()),
 }));
@@ -36,15 +46,30 @@ vi.mock("../../../src/observability/queue-performance.js", () => ({
 vi.mock("../../../src/runtime/queue-concurrency-controller.js", () => ({
   startQueueConcurrencyController: vi.fn(),
 }));
-vi.mock("../../../src/services/woocommerce-billing/subscription-receipt-reconciliation.service.js", () => ({
-  wooSubscriptionReceiptReconciliationService: { reconcileBatch: mocks.reconcileBatch },
-}));
-vi.mock("../../../src/services/woocommerce-billing/charge-receipt-reconciliation.service.js", () => ({
-  wooChargeReceiptReconciliationService: { reconcileBatch: mocks.reconcileChargeBatch },
-}));
-vi.mock("../../../src/services/woocommerce-billing/charge-refund-reconciliation.service.js", () => ({
-  wooChargeRefundReceiptReconciliationService: { reconcileBatch: mocks.reconcileChargeRefundBatch },
-}));
+vi.mock(
+  "../../../src/services/woocommerce-billing/subscription-receipt-reconciliation.service.js",
+  () => ({
+    wooSubscriptionReceiptReconciliationService: {
+      reconcileBatch: mocks.reconcileBatch,
+    },
+  }),
+);
+vi.mock(
+  "../../../src/services/woocommerce-billing/charge-receipt-reconciliation.service.js",
+  () => ({
+    wooChargeReceiptReconciliationService: {
+      reconcileBatch: mocks.reconcileChargeBatch,
+    },
+  }),
+);
+vi.mock(
+  "../../../src/services/woocommerce-billing/charge-refund-reconciliation.service.js",
+  () => ({
+    wooChargeRefundReceiptReconciliationService: {
+      reconcileBatch: mocks.reconcileChargeRefundBatch,
+    },
+  }),
+);
 
 import {
   reconcileWooPaidEntitlementsAndContinue,
@@ -55,8 +80,18 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.events.length = 0;
-    mocks.reconcileChargeBatch.mockResolvedValue({ claimed: 0, processed: 0, activated: 0, canceled: 0, retryable: 0 });
-    mocks.reconcileChargeRefundBatch.mockResolvedValue({ claimed: 0, processed: 0, retryable: 0 });
+    mocks.reconcileChargeBatch.mockResolvedValue({
+      claimed: 0,
+      processed: 0,
+      activated: 0,
+      canceled: 0,
+      retryable: 0,
+    });
+    mocks.reconcileChargeRefundBatch.mockResolvedValue({
+      claimed: 0,
+      processed: 0,
+      retryable: 0,
+    });
   });
 
   it("logs a rejected Woo batch and still invokes one global scan without a Woo success signal", async () => {
@@ -73,16 +108,24 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     });
     mocks.reconcileBatch.mockRejectedValueOnce(failure);
 
-    await expect(reconcileWooReceiptsAndGlobalBillingScan(runtimeConfig, leaseHandle, globalScan))
-      .resolves.toEqual({ subscriptionsScanned: 3 });
+    await expect(
+      reconcileWooReceiptsAndGlobalBillingScan(
+        runtimeConfig,
+        leaseHandle,
+        globalScan,
+      ),
+    ).resolves.toEqual({ subscriptionsScanned: 3 });
 
-    expect(mocks.logger.error).toHaveBeenCalledWith("billing.woocommerce.subscription_receipts.failed", {
-      leaseGeneration: 12,
-      configVersion: 7,
-      errorName: "Woo".repeat(30).slice(0, 64),
-      errorMessage: "w".repeat(300),
-      error: failure,
-    });
+    expect(mocks.logger.error).toHaveBeenCalledWith(
+      "billing.woocommerce.subscription_receipts.failed",
+      {
+        leaseGeneration: 12,
+        configVersion: 7,
+        errorName: "Woo".repeat(30).slice(0, 64),
+        errorMessage: "w".repeat(300),
+        error: failure,
+      },
+    );
     expect(mocks.logger.info).not.toHaveBeenCalledWith(
       "billing.woocommerce.subscription_receipts.completed",
       expect.anything(),
@@ -105,7 +148,13 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     } as never;
     const leaseHandle = { generation: 13 };
     const wooResult = { claimed: 2, processed: 2, failed: 0 };
-    const chargeResult = { claimed: 1, processed: 1, activated: 1, canceled: 0, retryable: 0 };
+    const chargeResult = {
+      claimed: 1,
+      processed: 1,
+      activated: 1,
+      canceled: 0,
+      retryable: 0,
+    };
     const refundResult = { claimed: 2, processed: 2, retryable: 0 };
     const globalScan = vi.fn(async () => {
       mocks.events.push("global-scan");
@@ -121,22 +170,36 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
       return refundResult;
     });
 
-    await expect(reconcileWooReceiptsAndGlobalBillingScan(runtimeConfig, leaseHandle, globalScan))
-      .resolves.toEqual({ subscriptionsScanned: 4 });
+    await expect(
+      reconcileWooReceiptsAndGlobalBillingScan(
+        runtimeConfig,
+        leaseHandle,
+        globalScan,
+      ),
+    ).resolves.toEqual({ subscriptionsScanned: 4 });
 
-    expect(mocks.logger.info).toHaveBeenCalledWith("billing.woocommerce.subscription_receipts.completed", {
-      leaseGeneration: 13,
-      ...wooResult,
-    });
+    expect(mocks.logger.info).toHaveBeenCalledWith(
+      "billing.woocommerce.subscription_receipts.completed",
+      {
+        leaseGeneration: 13,
+        ...wooResult,
+      },
+    );
     expect(mocks.logger.error).not.toHaveBeenCalled();
-    expect(mocks.logger.info).toHaveBeenCalledWith("billing.woocommerce.charge_receipts.completed", {
-      leaseGeneration: 13,
-      ...chargeResult,
-    });
-    expect(mocks.logger.info).toHaveBeenCalledWith("billing.woocommerce.charge_refund_receipts.completed", {
-      leaseGeneration: 13,
-      ...refundResult,
-    });
+    expect(mocks.logger.info).toHaveBeenCalledWith(
+      "billing.woocommerce.charge_receipts.completed",
+      {
+        leaseGeneration: 13,
+        ...chargeResult,
+      },
+    );
+    expect(mocks.logger.info).toHaveBeenCalledWith(
+      "billing.woocommerce.charge_refund_receipts.completed",
+      {
+        leaseGeneration: 13,
+        ...refundResult,
+      },
+    );
     expect(globalScan).toHaveBeenCalledOnce();
     expect(mocks.events).toEqual([
       "billing.woocommerce.subscription_receipts.completed",
@@ -158,29 +221,44 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
       mocks.events.push("global-scan");
       return { subscriptionsScanned: 5 };
     });
-    mocks.reconcileBatch.mockResolvedValueOnce({ claimed: 0, processed: 0, failed: 0 });
+    mocks.reconcileBatch.mockResolvedValueOnce({
+      claimed: 0,
+      processed: 0,
+      failed: 0,
+    });
     const chargeFailure = new Error("database unavailable");
     const refundFailure = new Error("refund database unavailable");
     mocks.reconcileChargeBatch.mockRejectedValueOnce(chargeFailure);
     mocks.reconcileChargeRefundBatch.mockRejectedValueOnce(refundFailure);
 
-    await expect(reconcileWooReceiptsAndGlobalBillingScan(runtimeConfig, leaseHandle, globalScan))
-      .resolves.toEqual({ subscriptionsScanned: 5 });
+    await expect(
+      reconcileWooReceiptsAndGlobalBillingScan(
+        runtimeConfig,
+        leaseHandle,
+        globalScan,
+      ),
+    ).resolves.toEqual({ subscriptionsScanned: 5 });
 
-    expect(mocks.logger.error).toHaveBeenCalledWith("billing.woocommerce.charge_receipts.failed", {
-      leaseGeneration: 14,
-      configVersion: 9,
-      outcome: "failed",
-      errorMessage: "database unavailable",
-      error: chargeFailure,
-    });
-    expect(mocks.logger.error).toHaveBeenCalledWith("billing.woocommerce.charge_refund_receipts.failed", {
-      leaseGeneration: 14,
-      configVersion: 9,
-      outcome: "failed",
-      errorMessage: "refund database unavailable",
-      error: refundFailure,
-    });
+    expect(mocks.logger.error).toHaveBeenCalledWith(
+      "billing.woocommerce.charge_receipts.failed",
+      {
+        leaseGeneration: 14,
+        configVersion: 9,
+        outcome: "failed",
+        errorMessage: "database unavailable",
+        error: chargeFailure,
+      },
+    );
+    expect(mocks.logger.error).toHaveBeenCalledWith(
+      "billing.woocommerce.charge_refund_receipts.failed",
+      {
+        leaseGeneration: 14,
+        configVersion: 9,
+        outcome: "failed",
+        errorMessage: "refund database unavailable",
+        error: refundFailure,
+      },
+    );
     expect(mocks.logger.info).not.toHaveBeenCalledWith(
       "billing.woocommerce.charge_receipts.completed",
       expect.anything(),
@@ -201,24 +279,34 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     failure.name = "Entitlement".repeat(10);
     const reconcileEntitlements = vi.fn().mockRejectedValueOnce(failure);
     const laterPhases = vi.fn(async () => {
-      mocks.events.push("promotion-expiry", "refund-correction", "reconstruction", "cycle-completed");
+      mocks.events.push(
+        "promotion-expiry",
+        "refund-correction",
+        "reconstruction",
+        "cycle-completed",
+      );
       return "completed";
     });
 
-    await expect(reconcileWooPaidEntitlementsAndContinue(
-      runtimeConfig,
-      leaseHandle,
-      reconcileEntitlements,
-      laterPhases,
-    )).resolves.toBe("completed");
+    await expect(
+      reconcileWooPaidEntitlementsAndContinue(
+        runtimeConfig,
+        leaseHandle,
+        reconcileEntitlements,
+        laterPhases,
+      ),
+    ).resolves.toBe("completed");
 
-    expect(mocks.logger.error).toHaveBeenCalledWith("billing.woocommerce.paid_entitlement.reconciliation_failed", {
-      leaseGeneration: 14,
-      configVersion: 9,
-      errorName: "Entitlement".repeat(10).slice(0, 64),
-      errorMessage: "e".repeat(300),
-      error: failure,
-    });
+    expect(mocks.logger.error).toHaveBeenCalledWith(
+      "billing.woocommerce.paid_entitlement.reconciliation_failed",
+      {
+        leaseGeneration: 14,
+        configVersion: 9,
+        errorName: "Entitlement".repeat(10).slice(0, 64),
+        errorMessage: "e".repeat(300),
+        error: failure,
+      },
+    );
     expect(mocks.logger.info).not.toHaveBeenCalledWith(
       "billing.woocommerce.paid_entitlement.reconciliation_completed",
       expect.anything(),
@@ -239,19 +327,23 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     const result = { selected: 2, reconciled: 2, failed: 0 };
     const continueBillingCycle = vi.fn(async () => "completed");
 
-    await expect(reconcileWooPaidEntitlementsAndContinue(
-      runtimeConfig,
-      leaseHandle,
-      async () => result,
-      continueBillingCycle,
-    )).resolves.toBe("completed");
+    await expect(
+      reconcileWooPaidEntitlementsAndContinue(
+        runtimeConfig,
+        leaseHandle,
+        async () => result,
+        continueBillingCycle,
+      ),
+    ).resolves.toBe("completed");
 
     expect(mocks.logger.info).toHaveBeenCalledWith(
       "billing.woocommerce.paid_entitlement.reconciliation_completed",
       { leaseGeneration: 15, ...result },
     );
     expect(mocks.logger.error).not.toHaveBeenCalled();
-    expect(mocks.events).toEqual(["billing.woocommerce.paid_entitlement.reconciliation_completed"]);
+    expect(mocks.events).toEqual([
+      "billing.woocommerce.paid_entitlement.reconciliation_completed",
+    ]);
     expect(continueBillingCycle).toHaveBeenCalledOnce();
   });
 });

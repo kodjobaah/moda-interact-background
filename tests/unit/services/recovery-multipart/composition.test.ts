@@ -1,170 +1,1429 @@
-import {profiles,templateProfile} from './composite-profile.fixture.js';
-import { afterEach,describe,it,expect,vi } from 'vitest';
-import { CommerceProductSchema,exampleFinal } from '@modainteract/moda-interact-shared/commerce';
-import { verifyCommerceProductFacts,type PreparedWrapper,type WrapperSlot } from '@modainteract/moda-interact-shared/commerce/presentation';
-import { ConversationWrapperService } from '../../../../src/services/conversation-wrappers/service.js';
-import { composeAiOutbound } from '../../../../src/services/conversation-wrappers/compose-ai-outbound.js';
-import { HumanWrapperPreparationService } from '../../../../src/services/recovery-conversation/human-wrapper-preparation.service.js';
-import { digest,stableJson } from '../../../../src/services/conversation-wrappers/projection.js';
-import { requireFrozenMultipart,humanMultipartMessageId } from '../../../../src/services/recovery-multipart/frozen.js';
-import { prepareFrozenCommonReply } from '../../../../src/services/recovery-multipart/preparation.js';
-import { verifiedReadyConversationBrandImage } from '../../../../src/services/shop-brand-media-runtime/resolver.js';
-const checkout='https://shop.example/checkouts/current';
-const prepared:PreparedWrapper={schemaVersion:1,family:'MODA_CONVERSATION_WRAPPER',responseSlot:'response.body',header:[{kind:'text',value:'Custom hello '},{kind:'variable',name:'shop.name'},{kind:'text',value:'\nCustom site '},{kind:'variable',name:'shop.websiteUrl'}],body:[{kind:'responseSlot',name:'response.body'}],footer:[],conditionals:[{when:'checkout.available',tokens:[{kind:'text',value:'\nCustom basket footer\n'},{kind:'variable',name:'checkout.url'}]}]};
-function harness(profile?:typeof profiles[number]){
- const sourcePrepared=profile?{...prepared,...templateProfile(profile)}:prepared;
- const slot:WrapperSlot={audience:'SHARED',definitionId:'definition',editVersion:7,definition:{id:'definition',kind:'MODA_CONVERSATION_WRAPPER',audience:'SHARED',status:'PUBLISHED',sourceLanguageTag:'en',astSchemaVersion:1,sourceHash:digest('source'),publishedAt:new Date(),retiredAt:null,createdByAdminId:'admin',locales:[{id:'locale',languageTag:'en',providerLanguageCode:null,status:'SOURCE_SAVED',localeAst:{schemaVersion:1,prepared:sourcePrepared},contentHash:digest(stableJson(sourcePrepared)),reviewedAt:null,reviewedByAdminId:null}]}};
- const context={conversationId:'conversation',shopId:'shop',conversationLanguageTag:'en',merchantLanguageTag:'en',checkoutAvailable:true,variables:{'shop.name':'Saved Shop','shop.websiteUrl':'https://shop.example','checkout.url':checkout},recoveryShopHeader:{schemaVersion:1 as const,shopId:'shop',name:'Saved Shop',websiteUrl:'https://shop.example'}};
- const logoResolver=vi.fn(async()=>null);const repository={loadContext:vi.fn(async()=>context),loadSlots:vi.fn(async()=>[slot])};
- const image={schemaVersion:1 as const,shopId:'shop',productId:'selected',variantId:null,publicUrl:'https://media.example/product.jpg',objectKey:`conversation-products/v1/${'a'.repeat(64)}/${'b'.repeat(64)}/${'c'.repeat(64)}.jpg`,contentSha256:'c'.repeat(64),contentType:'image/jpeg' as const,byteLength:100,width:1125 as const,height:600 as const};
- const mediaDependencies={readShopBrandPublicMediaConfiguration:vi.fn(async()=>({publicOrigin:'https://media.example',bucketName:'media-bucket'})),readR2Configuration:vi.fn(async()=>({endpoint:'https://fixture.r2.cloudflarestorage.com',accessKeyId:'fixture',secretAccessKey:'fixture'})),prepareConversationProductImage:vi.fn(async()=>({kind:'READY' as const,image,stage:'READY' as const,durationMs:1}))};
- const service=new ConversationWrapperService({repository,logoResolver,mediaDependencies:mediaDependencies as never});
- return {slot,context,service,repository,logoResolver,mediaDependencies,image};
-}
-function presentation(replyText:string,imageUrl:string|null='https://merchant.example/image.jpg'){
- const pair={productId:'selected',variantId:null};const product=CommerceProductSchema.parse({...pair,title:'Verified Product',observedAt:new Date().toISOString(),imageUrl,url:null,available:true,unitPrice:null,currency:null,productType:null,vendor:null});const facts=verifyCommerceProductFacts([pair],[product]);if(facts.kind!=='verified')throw Error('fixture');
- return {envelope:{...exampleFinal,answerKind:'ANSWER' as const,referralReason:null,replyText,details:{productDetailSelections:[pair]}},verified:{schemaVersion:1 as const,brandName:'Saved Shop',locale:'en' as const,disposition:'PRODUCT_DETAILS' as const,storeUrl:'https://shop.example',products:[],productFacts:facts.productFacts,optionFacts:[],requiresShipping:null,policyUrl:null,includeNoVerifiedOffer:false},verifiedProducts:{shopId:'shop',platform:'SHOPIFY' as const,products:[product]},deadlineAt:Date.now()+15000};
-}
-describe('one saved common recovery source production composition',()=>{
- it.each(['AI','HUMAN'] as const)('uses custom source for %s with exact authored body and footer on every part',async source=>{const f=harness(),answer='  Keep my URL https://other.example/x\nAnd trailing bytes.  ';const result=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source,responseBody:answer});expect(result.kind).toBe('rendered');if(result.kind!=='rendered')throw Error('fixture');expect(result.commonLayout?.boundaries.body).toBe(answer);expect(result.body).toBe(result.commonLayout!.boundaries.header+answer+result.commonLayout!.boundaries.footer);expect(result.body).toContain('Custom hello Saved Shop');expect(result.body).not.toContain('──────────');expect(result.multipartPlan?.parts.map(p=>p.role)).toEqual(['HEADER','ANSWER']);for(const p of result.multipartPlan!.parts)expect(p.plan.body.endsWith(checkout)).toBe(true);if(source==='HUMAN'){const service=new HumanWrapperPreparationService(f.service);expect(await service.prepare({id:'message',conversationId:'conversation',kind:'HUMAN_TEXT',textBody:answer,mediaReceipt:{sourceKind:'HUMAN_COMMAND',sourceId:'message',shopId:'shop',conversationId:'conversation',inboundVersion:1,controlRevision:1,firstPair:null}})).toMatchObject({kind:'prepared',application:{commonLayout:result.commonLayout}});}});
- it.each([false,true])('keeps verified first product separate; long caption %s uses exact third answer',async long=>{const f=harness(),answer=long?'A complete answer. '.repeat(80):'Grounded product answer.';const result=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:answer,commercePresentation:presentation(answer)});expect(result.kind).toBe('rendered');if(result.kind!=='rendered')throw Error('fixture');expect(result.multipartPlan!.parts.map(p=>p.role)).toEqual(long?['HEADER','PRODUCT','ANSWER']:['HEADER','PRODUCT']);expect(result.multipartPlan!.parts[1]!.plan).toMatchObject({kind:'IMAGE',image:f.image});expect(result.multipartPlan!.parts.at(-1)!.plan.body).toBe(result.commonLayout!.boundaries.body+result.commonLayout!.boundaries.footer);expect(f.mediaDependencies.prepareConversationProductImage).toHaveBeenCalledOnce();});
- it('missing first product image keeps complete answer and does not substitute another product',async()=>{const f=harness();const result=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:'No photo answer',commercePresentation:presentation('No photo answer',null)});expect(result).toMatchObject({kind:'rendered',multipartPlan:{parts:[{role:'HEADER',plan:{kind:'TEXT'}},{role:'ANSWER',plan:{kind:'TEXT'}}]}});expect(f.mediaDependencies.prepareConversationProductImage).not.toHaveBeenCalled();});
- it('actual AI adapter validates common provenance and replay never re-resolves source/media',async()=>{const f=harness(),input={conversationId:'conversation',messageId:'message',generatedResponse:'Original'};const first=await composeAiOutbound(f.service,input);expect(first).toMatchObject({kind:'ready',commonLayout:{schemaVersion:2}});const result=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:'Original'});if(result.kind!=='rendered')throw Error('fixture');f.repository.loadContext.mockRejectedValue(Error('no new reads'));expect(await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:'Original',previousApplication:result})).toMatchObject({...result,replayed:true});});
- it('corrupted active common never falls through an AI-specific legacy override',async()=>{const f=harness();f.slot.definition.locales[0]!.contentHash='0'.repeat(64);const override={...f.slot,audience:'AI',definition:{...f.slot.definition,audience:'AI'}} as WrapperSlot;f.repository.loadSlots.mockResolvedValue([f.slot,override]);expect(await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:'Answer'})).toEqual({kind:'rejected',reason:'PREPARED_INVALID'});});
- it('freezes only exact full-body/current receipt and rejects tampered authored component',async()=>{const f=harness();const r=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:'Exact answer'});if(r.kind!=='rendered'||!r.commonLayout||!r.multipartPlan)throw Error('fixture');const source=prepareFrozenCommonReply({common:r.commonLayout,preparation:{plan:r.multipartPlan,policyRef:null,receipt:{sourceKind:'MESSAGE',sourceId:'message',shopId:'shop',conversationId:'conversation',inboundVersion:1,controlRevision:2,firstPair:null}},messageId:'message',recoveryId:'recovery',recipient:'447400123456',sender:{providerAccountId:'account',providerPhoneNumberId:'phone'},command:null,now:new Date()});expect(requireFrozenMultipart(source)).toEqual(source);expect(()=>prepareFrozenCommonReply({...source,common:r.commonLayout,preparation:{plan:{...r.multipartPlan,parts:[r.multipartPlan.parts[0]!,{role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:r.commonLayout.boundaries.footer}}]},policyRef:null,receipt:source.receipt},recipient:source.recipient,now:new Date()})).toThrow();});
-});
-
-describe('reader-first consolidated common replies',()=>{
- afterEach(()=>vi.unstubAllEnvs());
- function brand(){return {image:verifiedReadyConversationBrandImage({shopId:'shop',domain:'shop.example',role:'LOGO',publicOrigin:new URL('https://brands.example/'),whatsAppMedia:{schemaVersion:1,roles:{LOGO:{source:{url:'https://source.example/logo.png',reference:null,generation:3,fingerprint:`sha256:${'b'.repeat(64)}`,observedAt:'2026-11-12T09:00:00Z'},work:{status:'READY',attempts:1,retryAfter:null,leaseOwner:null,leaseUntil:null,failureCode:null,lastCheckedAt:'2026-11-12T09:02:00Z'},ready:{sourceGeneration:3,sourceFingerprint:`sha256:${'b'.repeat(64)}`,objectKey:`shop-brands/shop.example/logo/sha256-${'a'.repeat(64)}.jpg`,contentType:'image/jpeg',width:1125,height:600,sizeBytes:42000,contentSha256:'a'.repeat(64),verifiedAt:'2026-11-12T09:02:00Z'}}}}})!,policyRef:{environment:'test',key:'shopBrand.publicMedia',id:'policy',version:1,publicOrigin:'https://brands.example'}};}
- async function render(source:'AI'|'HUMAN',answer:string,logo=true,product=false){const f=harness();if(logo)f.logoResolver.mockResolvedValue(brand() as never);const result=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source,responseBody:answer,...(product?{commercePresentation:presentation(answer)}:{})});if(result.kind!=='rendered')throw Error('fixture');return {f,result};}
- it.each(['AI','HUMAN'] as const)('consolidates %s complete branded caption and separate product footer',async source=>{vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED','true');for(const product of source==='AI'?[false,true]:[false]){const {result}=await render(source,'Exact authored answer',true,product);expect(result.multipartPlan!.parts.map(p=>p.role)).toEqual(product?['HEADER','PRODUCT']:['HEADER']);expect(result.multipartPlan!.parts[0]!.plan).toMatchObject({kind:'BRAND_IMAGE',body:result.body});if(product)expect(result.multipartPlan!.parts[1]!.plan).toMatchObject({kind:'IMAGE',body:result.commonLayout!.boundaries.footer});const messageId=source==='HUMAN'?humanMultipartMessageId('command'):'message';vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED','false');const frozen=prepareFrozenCommonReply({common:result.commonLayout!,preparation:{plan:result.multipartPlan!,policyRef:result.brandMediaPolicy??null,receipt:{sourceKind:source==='HUMAN'?'HUMAN_COMMAND':'MESSAGE',sourceId:source==='HUMAN'?'command':'message',shopId:'shop',conversationId:'conversation',inboundVersion:1,controlRevision:2,firstPair:product?{productId:'selected',variantId:null}:null}},messageId,recoveryId:'recovery',recipient:'447400123456',sender:{providerAccountId:'account',providerPhoneNumberId:'phone'},command:source==='HUMAN'?{id:'command',leaseToken:'lease'}:null,now:new Date()});expect(requireFrozenMultipart(frozen)).toEqual(frozen);vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED','true');}});
- it.each([1024,1025,4096])('preserves %i Unicode codepoints without truncation',async length=>{vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED','true');const empty=await render('HUMAN','A');const overhead=Array.from(empty.result.body).length-1;const answer=(length===4096?'A':'😀').repeat(length-overhead);const {result}=await render('HUMAN',answer);expect(Array.from(result.body)).toHaveLength(length);expect(result.commonLayout!.boundaries.body).toBe(answer);expect(result.multipartPlan!.parts).toHaveLength(1);expect(result.multipartPlan!.parts[0]!.plan).toMatchObject({kind:length<=1024?'BRAND_IMAGE':'TEXT',body:result.body});});
- it.each([undefined,'false','TRUE','1',' true '])('keeps exact legacy plan bytes for flag %s',async value=>{vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED','false');const legacy=(await render('AI','Same',true,true)).result.multipartPlan;vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED',value);expect((await render('AI','Same',true,true)).result.multipartPlan).toEqual(legacy);});
- it('retains complete branded answer when selected product has no verified image',async()=>{vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED','true');const f=harness();f.logoResolver.mockResolvedValue(brand() as never);const r=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:'Answer',commercePresentation:presentation('Answer',null)});expect(r).toMatchObject({kind:'rendered',multipartPlan:{parts:[{role:'HEADER',plan:{kind:'BRAND_IMAGE'}}]}});expect(f.mediaDependencies.prepareConversationProductImage).not.toHaveBeenCalled();});
- it('refuses a foreign logo without substituting the product as brand',async()=>{vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED','true');const f=harness(),foreign=brand();foreign.image={...foreign.image,origin:{...foreign.image.origin,shopId:'foreign'}};f.logoResolver.mockResolvedValue(foreign as never);const r=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:'Answer',commercePresentation:presentation('Answer')});expect(r).toMatchObject({kind:'rendered',multipartPlan:{parts:[{role:'HEADER',plan:{kind:'TEXT'}},{role:'PRODUCT',plan:{kind:'IMAGE'}}]}});});
- it.each([false,true])('uses complete text without a logo, product %s',async product=>{vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED','true');const {result}=await render('AI','Complete answer',false,product);expect(result.multipartPlan!.parts.map(p=>p.role)).toEqual(product?['HEADER','PRODUCT']:['ANSWER']);expect(result.multipartPlan!.parts[0]!.plan).toEqual({schemaVersion:1,kind:'TEXT',body:result.body});});
-});
-
-describe('single-bubble composite opt-in',()=>{
- afterEach(()=>vi.unstubAllEnvs());
- function fixture(){
-  const f=harness(profiles[0]);
-  const logo=verifiedReadyConversationBrandImage({shopId:'shop',domain:'shop.example',role:'LOGO',publicOrigin:new URL('https://media.example/'),whatsAppMedia:{schemaVersion:1,roles:{LOGO:{source:{url:'https://source.example/logo.png',generation:3,fingerprint:`sha256:${'b'.repeat(64)}`},work:{status:'READY'},ready:{sourceGeneration:3,sourceFingerprint:`sha256:${'b'.repeat(64)}`,objectKey:`shop-brands/shop.example/logo/sha256-${'a'.repeat(64)}.jpg`,contentType:'image/jpeg',width:1125,height:600,sizeBytes:42000,contentSha256:'a'.repeat(64),verifiedAt:'2026-11-12T09:02:00Z'}}}}})!;
-  f.logoResolver.mockResolvedValue({image:logo,policyRef:{environment:'test',key:'shopBrand.publicMedia',id:'policy',version:1,publicOrigin:'https://media.example'}} as never);
-  const prepare=vi.fn(async(input:import('@modainteract/moda-interact-shared/commerce/presentation/node').RecoveryCompositePreparationInputV2)=>{
-   const tenantSha256=digest(input.provenance.shopId),renderIdentitySha256=(await import('@modainteract/moda-interact-shared/commerce/presentation')).digestRecoveryCompositeRenderIdentityV2(input.provenance,digest),contentSha256='d'.repeat(64),objectKey=`conversation-composites/v2/${tenantSha256}/${renderIdentitySha256}/${contentSha256}.jpg`;
-   return {kind:'READY' as const,image:{schemaVersion:2 as const,provenance:input.provenance,tenantSha256,renderIdentitySha256,publicOrigin:input.publicOrigin,publicUrl:`${input.publicOrigin}/${objectKey}`,objectKey,contentSha256,contentType:'image/jpeg' as const,byteLength:200,width:1125 as const,height:input.product?900 as const:300 as const},stage:'READY' as const,durationMs:1,textBounds:{width:100,height:50}};
+import { profiles, templateProfile } from "./composite-profile.fixture.js";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import {
+  CommerceProductSchema,
+  exampleFinal,
+} from "@modainteract/moda-interact-shared/commerce";
+import {
+  verifyCommerceProductFacts,
+  type PreparedWrapper,
+  type WrapperSlot,
+} from "@modainteract/moda-interact-shared/commerce/presentation";
+import { ConversationWrapperService } from "../../../../src/services/conversation-wrappers/service.js";
+import { composeAiOutbound } from "../../../../src/services/conversation-wrappers/compose-ai-outbound.js";
+import { HumanWrapperPreparationService } from "../../../../src/services/recovery-conversation/human-wrapper-preparation.service.js";
+import {
+  digest,
+  stableJson,
+} from "../../../../src/services/conversation-wrappers/projection.js";
+import {
+  requireFrozenMultipart,
+  humanMultipartMessageId,
+} from "../../../../src/services/recovery-multipart/frozen.js";
+import { prepareFrozenCommonReply } from "../../../../src/services/recovery-multipart/preparation.js";
+import { verifiedReadyConversationBrandImage } from "../../../../src/services/shop-brand-media-runtime/resolver.js";
+const checkout = "https://shop.example/checkouts/current";
+const prepared: PreparedWrapper = {
+  schemaVersion: 1,
+  family: "MODA_CONVERSATION_WRAPPER",
+  responseSlot: "response.body",
+  header: [
+    { kind: "text", value: "Custom hello " },
+    { kind: "variable", name: "shop.name" },
+    { kind: "text", value: "\nCustom site " },
+    { kind: "variable", name: "shop.websiteUrl" },
+  ],
+  body: [{ kind: "responseSlot", name: "response.body" }],
+  footer: [],
+  conditionals: [
+    {
+      when: "checkout.available",
+      tokens: [
+        { kind: "text", value: "\nCustom basket footer\n" },
+        { kind: "variable", name: "checkout.url" },
+      ],
+    },
+  ],
+};
+function harness(profile?: (typeof profiles)[number]) {
+  const sourcePrepared = profile
+    ? { ...prepared, ...templateProfile(profile) }
+    : prepared;
+  const slot: WrapperSlot = {
+    audience: "SHARED",
+    definitionId: "definition",
+    editVersion: 7,
+    definition: {
+      id: "definition",
+      kind: "MODA_CONVERSATION_WRAPPER",
+      audience: "SHARED",
+      status: "PUBLISHED",
+      sourceLanguageTag: "en",
+      astSchemaVersion: 1,
+      sourceHash: digest("source"),
+      publishedAt: new Date(),
+      retiredAt: null,
+      createdByAdminId: "admin",
+      locales: [
+        {
+          id: "locale",
+          languageTag: "en",
+          providerLanguageCode: null,
+          status: "SOURCE_SAVED",
+          localeAst: { schemaVersion: 1, prepared: sourcePrepared },
+          contentHash: digest(stableJson(sourcePrepared)),
+          reviewedAt: null,
+          reviewedByAdminId: null,
+        },
+      ],
+    },
+  };
+  const context = {
+    conversationId: "conversation",
+    shopId: "shop",
+    conversationLanguageTag: "en",
+    merchantLanguageTag: "en",
+    checkoutAvailable: true,
+    variables: {
+      "shop.name": "Saved Shop",
+      "shop.websiteUrl": "https://shop.example",
+      "checkout.url": checkout,
+    },
+    recoveryShopHeader: {
+      schemaVersion: 1 as const,
+      shopId: "shop",
+      name: "Saved Shop",
+      websiteUrl: "https://shop.example",
+    },
+  };
+  const logoResolver = vi.fn(async () => null);
+  const repository = {
+    loadContext: vi.fn(async () => context),
+    loadSlots: vi.fn(async () => [slot]),
+  };
+  const image = {
+    schemaVersion: 1 as const,
+    shopId: "shop",
+    productId: "selected",
+    variantId: null,
+    publicUrl: "https://media.example/product.jpg",
+    objectKey: `conversation-products/v1/${"a".repeat(64)}/${"b".repeat(64)}/${"c".repeat(64)}.jpg`,
+    contentSha256: "c".repeat(64),
+    contentType: "image/jpeg" as const,
+    byteLength: 100,
+    width: 1125 as const,
+    height: 600 as const,
+  };
+  const mediaDependencies = {
+    readShopBrandPublicMediaConfiguration: vi.fn(async () => ({
+      publicOrigin: "https://media.example",
+      bucketName: "media-bucket",
+    })),
+    readR2Configuration: vi.fn(async () => ({
+      endpoint: "https://fixture.r2.cloudflarestorage.com",
+      accessKeyId: "fixture",
+      secretAccessKey: "fixture",
+    })),
+    prepareConversationProductImage: vi.fn(async () => ({
+      kind: "READY" as const,
+      image,
+      stage: "READY" as const,
+      durationMs: 1,
+    })),
+  };
+  const service = new ConversationWrapperService({
+    repository,
+    logoResolver,
+    mediaDependencies: mediaDependencies as never,
   });
-  const service=new ConversationWrapperService({repository:f.repository,logoResolver:f.logoResolver,compositeDependencies:{prepare,settings:f.mediaDependencies.readShopBrandPublicMediaConfiguration,credentials:f.mediaDependencies.readR2Configuration,product:async input=>{const image={...f.image,publicUrl:`https://media.example/${f.image.objectKey}`};return {plan:{schemaVersion:1 as const,kind:'IMAGE' as const,body:input.body,image},mediaStage:'READY',durationMs:1};}}});
-  return {...f,service,prepare};
- }
- async function render(f:ReturnType<typeof fixture>,source:'AI'|'HUMAN',product=false,answer='Exact authored answer'){
-  const result=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:source==='HUMAN'?'command':'message',source,responseBody:answer,mediaDeadlineAt:Date.now()+15000,...(product?{commercePresentation:presentation(answer)}:{})});if(result.kind!=='rendered')throw Error('fixture');return result;
- }
- it.each(['AI','HUMAN'] as const)('uses saved website-caption frame in %s composite without copying website into bitmap',async source=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();
-  const locale=f.slot.definition.locales[0]!,saved={...prepared,...templateProfile(profiles[0])};
-  saved.header=[{kind:'text',value:'Shop: '},{kind:'variable',name:'shop.name'},{kind:'text',value:'\n──────────'}];
-  saved.conditionals=[{when:'checkout.available',tokens:[{kind:'text',value:'Website: '},{kind:'variable',name:'shop.websiteUrl'},{kind:'text',value:'\nCheckout:\n'},{kind:'variable',name:'checkout.url'}]}];
-  locale.localeAst={schemaVersion:1,prepared:saved};locale.contentHash=digest(stableJson(saved));
-  const result=await render(f,source,source==='AI'),part=result.multipartPlan!.parts[0]!.plan;
-  expect(part.kind).toBe('COMPOSITE_IMAGE');expect(result.multipartPlan!.parts).toHaveLength(1);
-  expect(part.body).toBe(result.commonLayout!.boundaries.body+result.commonLayout!.boundaries.footer);
-  expect(part.body.split('https://shop.example').length-1).toBe(2); // website and distinct checkout URL, never rewritten
-  expect(part.body).toContain('Website: https://shop.example\nCheckout:\n'+checkout);
-  expect(part.body.endsWith(checkout)).toBe(true);
-  expect(f.prepare.mock.calls[0]![0].provenance.headerText).toBe('Shop: Saved Shop\n──────────\n');
-  expect(f.prepare.mock.calls[0]![0].provenance.headerText).not.toContain('https://');
-  const sourceId=source==='HUMAN'?'command':'message';
-  const frozen=prepareFrozenCommonReply({common:result.commonLayout!,preparation:{plan:result.multipartPlan!,compositeReceipt:result.compositeReceipt!,policyRef:result.brandMediaPolicy!,receipt:{sourceKind:source==='HUMAN'?'HUMAN_COMMAND':'MESSAGE',sourceId,shopId:'shop',conversationId:'conversation',inboundVersion:1,controlRevision:2,firstPair:source==='AI'?{productId:'selected',variantId:null}:null}},messageId:source==='HUMAN'?humanMultipartMessageId(sourceId):sourceId,recoveryId:'recovery',recipient:'447400123456',sender:{providerAccountId:'account',providerPhoneNumberId:'phone'},command:source==='HUMAN'?{id:sourceId,leaseToken:'lease'}:null,now:new Date()});
-  expect(requireFrozenMultipart(frozen)).toEqual(frozen);
- });
- it('compacts a sub1024 single reply against the actual saved website and long checkout footer',async()=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),url='https://shop.example/checkouts/'+ 'x'.repeat(170);f.context.variables['checkout.url']=url;
-  const saved={...prepared,...templateProfile(profiles[0]),header:[{kind:'text' as const,value:'Shop: '},{kind:'variable' as const,name:'shop.name' as const}],conditionals:[{when:'checkout.available' as const,tokens:[{kind:'text' as const,value:'Website: '},{kind:'variable' as const,name:'shop.websiteUrl' as const},{kind:'text' as const,value:'\nReply STOP to opt out.\nCheckout:\n'},{kind:'variable' as const,name:'checkout.url' as const}]}]};
-  const locale=f.slot.definition.locales[0]!;locale.localeAst={schemaVersion:1,prepared:saved};locale.contentHash=digest(stableJson(saved));
-  const reply='Verified optional longer description. '.repeat(7),p=presentation(reply),product=CommerceProductSchema.parse({...p.verifiedProducts.products[0],title:'The Videographer Snowboard',unitPrice:'885.95',currency:'USD',description:{status:'AVAILABLE',text:reply},stock:{status:'KNOWN',quantity:50,scope:'PRODUCT'}});const facts=verifyCommerceProductFacts([{productId:product.productId,variantId:product.variantId}],[product]);if(facts.kind!=='verified')throw Error('facts');const full={...p,verified:{...p.verified,productFacts:facts.productFacts},verifiedProducts:{...p.verifiedProducts,products:[product]}};
-  expect(Array.from(reply+'Website: https://shop.example\nReply STOP to opt out.\nCheckout:\n'+url).length).toBeGreaterThan(400);expect(Array.from(reply+url).length).toBeLessThan(1024);
-  const result=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:reply,mediaDeadlineAt:Date.now()+15000,commercePresentation:full});if(result.kind!=='rendered')throw Error('render');
-  const caption=result.multipartPlan!.parts[0]!.plan.body;expect(result.multipartPlan!.parts[0]!.plan.kind).toBe('COMPOSITE_IMAGE');expect(Array.from(caption).length).toBeLessThanOrEqual(400);expect(caption).toContain('The Videographer Snowboard —');expect(caption).toContain('Stock: 50');expect(caption).not.toContain('optional longer');expect(caption.endsWith(url)).toBe(true);expect(caption.split(url)).toHaveLength(2);expect(result.commonLayout!.boundaries.footer).toContain('Reply STOP to opt out.');expect(result.compositeReceipt!.verifiedProducts!.products).toEqual([product]);expect(result.presentedPairs).toEqual([{productId:'selected',variantId:null}]);
-  expect(result.responseDigest).toBe(digest(stableJson({envelope:full.envelope,verified:full.verified,productPairs:[],verifiedProducts:full.verifiedProducts})));
- });
- it.each([null,false])('preserves the complete rich DETAIL shipping answer rather than briefly rewriting it (%s)',async requiresShipping=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),reply='Shipping costs could not be verified. Preserve this required qualification. '+ 'Complete grounded answer. '.repeat(14),p=presentation(reply);
-  const rich={...p,envelope:{...p.envelope,details:{...p.envelope.details,responseDisposition:'SHIPPING_INFORMATION_UNVERIFIED',shippingInformationSelection:{productId:null,variantId:null}}},verified:{...p.verified,requiresShipping}};
-  const r=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:reply,mediaDeadlineAt:Date.now()+15000,commercePresentation:rich});if(r.kind!=='rendered')throw Error('fixture');expect(r.commonLayout!.boundaries.body).toBe(reply);expect(r.commonLayout!.boundaries.footer.endsWith(checkout)).toBe(true);expect(r.body).toContain('Preserve this required qualification.');expect(r.presentedPairs).toEqual([{productId:'selected',variantId:null}]);
- });
- it('compacts a fifteen-item AI lead using only retained verified products and freezes replay exactly',async()=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();
-  const longLead=Array.from({length:15},(_,i)=>`Unverified catalogue item ${i}: ${'model prose '.repeat(6)}`).join('\n');
-  const p=presentation(longLead);const first=p.verifiedProducts.products[0]!;
-  const products=[first,...[1,2].map(i=>({...first,productId:`selected-${i}`,title:`Product ${i} ${'description '.repeat(20)}`}))];
-  const pairs=products.map(({productId,variantId})=>({productId,variantId}));const facts=verifyCommerceProductFacts(pairs,products);if(facts.kind!=='verified')throw Error('facts');
-  const full={...p,verified:{...p.verified,productFacts:facts.productFacts},verifiedProducts:{...p.verifiedProducts,products},envelope:{...p.envelope,details:{productDetailSelections:pairs}}};
-  const input={conversationId:'conversation',messageIdentity:'message',source:'AI' as const,responseBody:longLead,mediaDeadlineAt:Date.now()+15000,commercePresentation:full};
-  const r=await f.service.renderConversationResponse(input);if(r.kind!=='rendered')throw Error('fixture');
-  expect(r.multipartPlan!.parts).toHaveLength(1);expect(r.multipartPlan!.parts[0]!.plan.kind).toBe('COMPOSITE_IMAGE');
-  expect(r.commonLayout!.boundaries.body).not.toContain('Unverified catalogue');
-  expect(Array.from(r.multipartPlan!.parts[0]!.plan.body).length).toBeLessThanOrEqual(1024);
-  expect(r.presentedPairs!.length).toBeGreaterThan(0);expect(r.presentedPairs).toEqual(pairs.slice(0,r.presentedPairs!.length));
-  expect(r.compositeReceipt!.verifiedProducts!.products).toEqual(products.slice(0,r.presentedPairs!.length));
-  expect(r.responseDigest).toBe(digest(stableJson({envelope:full.envelope,verified:full.verified,productPairs:[],verifiedProducts:full.verifiedProducts})));
-  expect(r.commonLayout!.boundaries.footer).toContain(checkout);
-  const replay=await f.service.renderConversationResponse({...input,previousApplication:r});expect(replay).toEqual({...r,replayed:true});expect(f.prepare).toHaveBeenCalledTimes(1);
- });
- it.each(['AI','HUMAN'] as const)('%s has one branded bubble with exact caption and canonical logical history',async source=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();for(const product of source==='AI'?[false,true]:[false]){
-   const result=await render(f,source,product),part=result.multipartPlan!.parts[0]!.plan;
-   expect(result.multipartPlan!.parts).toHaveLength(1);expect(result.multipartPlan!.parts[0]!.role).toBe('HEADER');expect(part).toMatchObject({kind:'COMPOSITE_IMAGE',logicalBody:result.body,body:result.commonLayout!.boundaries.body+result.commonLayout!.boundaries.footer,image:{height:product?900:300}});
-   expect(result.compositeReceipt!.logo.origin.role).toBe('LOGO');
-   const sourceId=source==='HUMAN'?'command':'message',messageId=source==='HUMAN'?humanMultipartMessageId(sourceId):sourceId;
-   const frozen=prepareFrozenCommonReply({common:result.commonLayout!,preparation:{plan:result.multipartPlan!,compositeReceipt:result.compositeReceipt!,policyRef:result.brandMediaPolicy!,receipt:{sourceKind:source==='HUMAN'?'HUMAN_COMMAND':'MESSAGE',sourceId,shopId:'shop',conversationId:'conversation',inboundVersion:1,controlRevision:2,firstPair:product?{productId:'selected',variantId:null}:null}},messageId,recoveryId:'recovery',recipient:'447400123456',sender:{providerAccountId:'account',providerPhoneNumberId:'phone'},command:source==='HUMAN'?{id:'command',leaseToken:'lease'}:null,now:new Date()});
-   vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','false');expect(requireFrozenMultipart(frozen)).toEqual(frozen);vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');
-   for(const mutate of [(v:typeof frozen)=>{if(v.recoveryShopHeader.schemaVersion!==2)throw Error('common');v.recoveryShopHeader.commonRef.prepared.compositeProfile!.fontSize++;},(v:typeof frozen)=>{v.plan.parts[0]!.plan.body+='altered';},(v:typeof frozen)=>{v.compositeReceipt!.output.contentSha256='e'.repeat(64);},(v:typeof frozen)=>{v.compositeReceipt!.logo.origin.shopId='foreign';},(v:typeof frozen)=>{v.receipt.firstPair={productId:'foreign',variantId:null};if(!product)v.compositeReceipt!.product=f.image;}]){const bad=structuredClone(frozen);mutate(bad);expect(()=>requireFrozenMultipart(bad)).toThrow();}
-  }
- });
- it.each([undefined,'false','TRUE','1',' true '])('preserves old exact plan and application bytes while flag %s',async value=>{const f=fixture();vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','false');const a=await render(f,'AI');vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED',value);const b=await render(f,'AI');expect(b.multipartPlan).toEqual(a.multipartPlan);expect(b.applicationKey).toEqual(a.applicationKey);expect(f.prepare).not.toHaveBeenCalled();});
- it.each(['AI','HUMAN'] as const)('never compacts nonproduct %s prose to force a caption',async source=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),answer='😀'.repeat(1100);
-  const result=await render(f,source,false,answer);expect(result.commonLayout!.boundaries.body).toBe(answer);
-  expect(result.multipartPlan!.parts[0]!.plan).toEqual({schemaVersion:1,kind:'TEXT',body:result.body});expect(f.prepare).not.toHaveBeenCalled();
- });
- it('uses one fullTEXT with complete footer on overflow, absent logo and expired lease',async()=>{vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');for(const reason of ['overflow','logo','expired']){const f=fixture();if(reason==='logo')f.logoResolver.mockResolvedValue(null);const r=reason==='expired'?await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'command',source:'HUMAN',responseBody:'Full answer',mediaDeadlineAt:Date.now()-1}):await render(f,'HUMAN',false,reason==='overflow'?'😀'.repeat(1030):'Full answer');if(r.kind!=='rendered')throw Error('fixture');expect(r.multipartPlan!.parts).toEqual([{role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:r.body}}]);expect(r.commonLayout!.boundaries.body).toBe(reason==='overflow'?'😀'.repeat(1030):'Full answer');expect(f.prepare).not.toHaveBeenCalled();}});
- it('preserves full canonical TEXT when a valid current profile has typed HEADER_OVERFLOW',async()=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();f.prepare.mockResolvedValue({kind:'OMITTED',reason:'HEADER_OVERFLOW',stage:'TRANSFORM',durationMs:1} as never);const r=await render(f,'HUMAN');expect(r.commonLayout!.commonRef.prepared.compositeProfile).toBeDefined();expect(r.multipartPlan!.parts).toEqual([{role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:r.body}}]);expect(r.body).toBe(r.commonLayout!.boundaries.header+r.commonLayout!.boundaries.body+r.commonLayout!.boundaries.footer);expect(f.prepare).toHaveBeenCalledOnce();
- });
- it('refuses new composite composition when the selected saved template has no profile',async()=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=harness();const r=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'command',source:'HUMAN',responseBody:'Exact authored answer',mediaDeadlineAt:Date.now()+15000});expect(r).toEqual({kind:'rejected',reason:'PREPARED_INVALID'});expect(f.logoResolver).not.toHaveBeenCalled();
- });
- it('reuses immutable preparation after flag/runtime changes without any media work',async()=>{vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),p=presentation('Exact authored answer');const first=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:'Exact authored answer',mediaDeadlineAt:Date.now()+15000,commercePresentation:p});if(first.kind!=='rendered')throw Error('fixture');vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','false');const r=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:'Exact authored answer',commercePresentation:p,previousApplication:first});expect(r).toEqual({...first,replayed:true});expect(f.prepare).toHaveBeenCalledTimes(1);});
- it('keeps checkout-footer application policy in Background while Shared binds alternate supplied parts safely',async()=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),r=await render(f,'HUMAN'),part=r.multipartPlan!.parts[0]!.plan;if(part.kind!=='COMPOSITE_IMAGE'||part.image.schemaVersion!==2)throw Error('V2 fixture');
-  const {compositeTrustedContextV2}=await import('../../../../src/services/recovery-multipart/composite.js');const trusted=compositeTrustedContextV2(r.compositeReceipt,r.commonLayout!,r.brandMediaPolicy!,null)!;
-  const alternateFooter='\nMachine-safe alternate footer',alternate={...trusted,body:trusted.answerText+alternateFooter,footerText:alternateFooter,logicalBody:trusted.provenance.headerText+trusted.answerText+alternateFooter};
-  const shared=await import('@modainteract/moda-interact-shared/commerce/presentation');const plan=shared.buildRecoveryCompositeMultipartDeliveryPlanV2({plan:shared.buildRecoveryCompositeImagePlanV2({image:part.image,trusted:alternate},digest),trusted:alternate},digest);
-  expect(plan.parts[0]!.plan.body).toBe(trusted.answerText+alternateFooter);
-  const {exactCommonDecomposition}=await import('../../../../src/services/recovery-multipart/common-decomposition.js');expect(exactCommonDecomposition(plan,{...r.commonLayout!,boundaries:{...r.commonLayout!.boundaries,footer:alternateFooter}})).toBe(false);
- });
- it('refuses obsolete fixed-composite receipt instead of decoding a second composite format',async()=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),r=await render(f,'HUMAN');const {readCompositeReceipt}=await import('../../../../src/services/recovery-multipart/composite.js');expect(readCompositeReceipt({schemaVersion:1,logo:r.compositeReceipt!.logo,product:null,verifiedProducts:null,factsSha256:digest('null'),fontAssetSha256:'9'.repeat(64),output:{contentSha256:'d'.repeat(64),byteLength:200}})).toBeNull();
- });
- it('rejects self-consistent HUMAN output+receipt replacement retaining the original immutable application key',async()=>{
-  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),r=await render(f,'HUMAN');
-  const {readFrozenHumanBody,currentHumanWrapperMatches}=await import('../../../../src/services/recovery-conversation/human-prepared-command.service.js');
-  const {compositeTrustedContextV2}=await import('../../../../src/services/recovery-multipart/composite.js');
-  const {buildRecoveryCompositeImagePlanV2,buildRecoveryCompositeMultipartDeliveryPlanV2}=await import('@modainteract/moda-interact-shared/commerce/presentation');
-  const receipt={sourceKind:'HUMAN_COMMAND' as const,sourceId:'command',shopId:'shop',conversationId:'conversation',inboundVersion:1,controlRevision:2,firstPair:null};
-  const evidence={schemaVersion:1,outcome:'RENDERED',audience:'SHARED',wrapperDefinitionId:r.wrapperDefinitionId,localeId:r.localeId,slotEditVersion:r.slotEditVersion,applicationKey:r.applicationKey,contentHash:r.contentHash,bodySha256:digest(r.body),recoveryCheckoutUrl:checkout,recoveryShopHeader:r.commonLayout,multipartPreparation:{plan:r.multipartPlan!,policyRef:r.brandMediaPolicy!,receipt,compositeReceipt:r.compositeReceipt!}};
-  const row={kind:'HUMAN_TEXT',conversationId:'conversation',textBody:'Exact authored answer',preparedTextBody:r.body,preparedWrapperEvidence:evidence,preparedAt:new Date()};expect(readFrozenHumanBody(row,row.textBody,'command','shop').kind).toBe('frozen');
-  const changedSelection=structuredClone(evidence);if(changedSelection.multipartPreparation.compositeReceipt.schemaVersion!==2)throw Error('V2 fixture');changedSelection.multipartPreparation.compositeReceipt.templateReferenceHash='f'.repeat(64);expect(readFrozenHumanBody({...row,preparedWrapperEvidence:changedSelection},row.textBody,'command','shop')).toEqual({kind:'refused',reason:'prepared_invalid'});
-  const changed=structuredClone(evidence),image=structuredClone(r.multipartPlan!.parts[0]!.plan);if(image.kind!=='COMPOSITE_IMAGE')throw Error('fixture');
-  image.image.contentSha256='f'.repeat(64);image.image.objectKey=image.image.objectKey.replace(/[^/]+\.jpg$/,'f'.repeat(64)+'.jpg');image.image.publicUrl=image.image.publicOrigin+'/'+image.image.objectKey;changed.multipartPreparation.compositeReceipt.output.contentSha256=image.image.contentSha256;
-  const trusted=compositeTrustedContextV2(changed.multipartPreparation.compositeReceipt,r.commonLayout!,r.brandMediaPolicy!,null)!;
-  changed.multipartPreparation.plan=buildRecoveryCompositeMultipartDeliveryPlanV2({plan:buildRecoveryCompositeImagePlanV2({image:image.image,trusted},digest),trusted},digest);
-  // Structurally/provenance-consistent, but never the original HUMAN application.
-  expect(readFrozenHumanBody({...row,preparedWrapperEvidence:changed},row.textBody,'command','shop')).toEqual({kind:'refused',reason:'prepared_invalid'});
-  const tx={$queryRawUnsafe:vi.fn()};expect(await currentHumanWrapperMatches(tx as never,r.body,changed,new Date(),{commandId:'command',conversationId:'conversation',textBody:row.textBody,shopId:'shop'})).toBe(false);expect(tx.$queryRawUnsafe).not.toHaveBeenCalled();
- });
+  return {
+    slot,
+    context,
+    service,
+    repository,
+    logoResolver,
+    mediaDependencies,
+    image,
+  };
+}
+function presentation(
+  replyText: string,
+  imageUrl: string | null = "https://merchant.example/image.jpg",
+) {
+  const pair = { productId: "selected", variantId: null };
+  const product = CommerceProductSchema.parse({
+    ...pair,
+    title: "Verified Product",
+    observedAt: new Date().toISOString(),
+    imageUrl,
+    url: null,
+    available: true,
+    unitPrice: null,
+    currency: null,
+    productType: null,
+    vendor: null,
+  });
+  const facts = verifyCommerceProductFacts([pair], [product]);
+  if (facts.kind !== "verified") throw Error("fixture");
+  return {
+    envelope: {
+      ...exampleFinal,
+      answerKind: "ANSWER" as const,
+      referralReason: null,
+      replyText,
+      details: { productDetailSelections: [pair] },
+    },
+    verified: {
+      schemaVersion: 1 as const,
+      brandName: "Saved Shop",
+      locale: "en" as const,
+      disposition: "PRODUCT_DETAILS" as const,
+      storeUrl: "https://shop.example",
+      products: [],
+      productFacts: facts.productFacts,
+      optionFacts: [],
+      requiresShipping: null,
+      policyUrl: null,
+      includeNoVerifiedOffer: false,
+    },
+    verifiedProducts: {
+      shopId: "shop",
+      platform: "SHOPIFY" as const,
+      products: [product],
+    },
+    deadlineAt: Date.now() + 15000,
+  };
+}
+describe("one saved common recovery source production composition", () => {
+  it.each(["AI", "HUMAN"] as const)(
+    "uses custom source for %s with exact authored body and footer on every part",
+    async (source) => {
+      const f = harness(),
+        answer = "  Keep my URL https://other.example/x\nAnd trailing bytes.  ";
+      const result = await f.service.renderConversationResponse({
+        conversationId: "conversation",
+        messageIdentity: "message",
+        source,
+        responseBody: answer,
+      });
+      expect(result.kind).toBe("rendered");
+      if (result.kind !== "rendered") throw Error("fixture");
+      expect(result.commonLayout?.boundaries.body).toBe(answer);
+      expect(result.body).toBe(
+        result.commonLayout!.boundaries.header +
+          answer +
+          result.commonLayout!.boundaries.footer,
+      );
+      expect(result.body).toContain("Custom hello Saved Shop");
+      expect(result.body).not.toContain("──────────");
+      expect(result.multipartPlan?.parts.map((p) => p.role)).toEqual([
+        "HEADER",
+        "ANSWER",
+      ]);
+      for (const p of result.multipartPlan!.parts)
+        expect(p.plan.body.endsWith(checkout)).toBe(true);
+      if (source === "HUMAN") {
+        const service = new HumanWrapperPreparationService(f.service);
+        expect(
+          await service.prepare({
+            id: "message",
+            conversationId: "conversation",
+            kind: "HUMAN_TEXT",
+            textBody: answer,
+            mediaReceipt: {
+              sourceKind: "HUMAN_COMMAND",
+              sourceId: "message",
+              shopId: "shop",
+              conversationId: "conversation",
+              inboundVersion: 1,
+              controlRevision: 1,
+              firstPair: null,
+            },
+          }),
+        ).toMatchObject({
+          kind: "prepared",
+          application: { commonLayout: result.commonLayout },
+        });
+      }
+    },
+  );
+  it.each([false, true])(
+    "keeps verified first product separate; long caption %s uses exact third answer",
+    async (long) => {
+      const f = harness(),
+        answer = long
+          ? "A complete answer. ".repeat(80)
+          : "Grounded product answer.";
+      const result = await f.service.renderConversationResponse({
+        conversationId: "conversation",
+        messageIdentity: "message",
+        source: "AI",
+        responseBody: answer,
+        commercePresentation: presentation(answer),
+      });
+      expect(result.kind).toBe("rendered");
+      if (result.kind !== "rendered") throw Error("fixture");
+      expect(result.multipartPlan!.parts.map((p) => p.role)).toEqual(
+        long ? ["HEADER", "PRODUCT", "ANSWER"] : ["HEADER", "PRODUCT"],
+      );
+      expect(result.multipartPlan!.parts[1]!.plan).toMatchObject({
+        kind: "IMAGE",
+        image: f.image,
+      });
+      expect(result.multipartPlan!.parts.at(-1)!.plan.body).toBe(
+        result.commonLayout!.boundaries.body +
+          result.commonLayout!.boundaries.footer,
+      );
+      expect(
+        f.mediaDependencies.prepareConversationProductImage,
+      ).toHaveBeenCalledOnce();
+    },
+  );
+  it("missing first product image keeps complete answer and does not substitute another product", async () => {
+    const f = harness();
+    const result = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source: "AI",
+      responseBody: "No photo answer",
+      commercePresentation: presentation("No photo answer", null),
+    });
+    expect(result).toMatchObject({
+      kind: "rendered",
+      multipartPlan: {
+        parts: [
+          { role: "HEADER", plan: { kind: "TEXT" } },
+          { role: "ANSWER", plan: { kind: "TEXT" } },
+        ],
+      },
+    });
+    expect(
+      f.mediaDependencies.prepareConversationProductImage,
+    ).not.toHaveBeenCalled();
+  });
+  it("actual AI adapter validates common provenance and replay never re-resolves source/media", async () => {
+    const f = harness(),
+      input = {
+        conversationId: "conversation",
+        messageId: "message",
+        generatedResponse: "Original",
+      };
+    const first = await composeAiOutbound(f.service, input);
+    expect(first).toMatchObject({
+      kind: "ready",
+      commonLayout: { schemaVersion: 2 },
+    });
+    const result = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source: "AI",
+      responseBody: "Original",
+    });
+    if (result.kind !== "rendered") throw Error("fixture");
+    f.repository.loadContext.mockRejectedValue(Error("no new reads"));
+    expect(
+      await f.service.renderConversationResponse({
+        conversationId: "conversation",
+        messageIdentity: "message",
+        source: "AI",
+        responseBody: "Original",
+        previousApplication: result,
+      }),
+    ).toMatchObject({ ...result, replayed: true });
+  });
+  it("corrupted active common never falls through an AI-specific legacy override", async () => {
+    const f = harness();
+    f.slot.definition.locales[0]!.contentHash = "0".repeat(64);
+    const override = {
+      ...f.slot,
+      audience: "AI",
+      definition: { ...f.slot.definition, audience: "AI" },
+    } as WrapperSlot;
+    f.repository.loadSlots.mockResolvedValue([f.slot, override]);
+    expect(
+      await f.service.renderConversationResponse({
+        conversationId: "conversation",
+        messageIdentity: "message",
+        source: "AI",
+        responseBody: "Answer",
+      }),
+    ).toEqual({ kind: "rejected", reason: "PREPARED_INVALID" });
+  });
+  it("freezes only exact full-body/current receipt and rejects tampered authored component", async () => {
+    const f = harness();
+    const r = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source: "AI",
+      responseBody: "Exact answer",
+    });
+    if (r.kind !== "rendered" || !r.commonLayout || !r.multipartPlan)
+      throw Error("fixture");
+    const source = prepareFrozenCommonReply({
+      common: r.commonLayout,
+      preparation: {
+        plan: r.multipartPlan,
+        policyRef: null,
+        receipt: {
+          sourceKind: "MESSAGE",
+          sourceId: "message",
+          shopId: "shop",
+          conversationId: "conversation",
+          inboundVersion: 1,
+          controlRevision: 2,
+          firstPair: null,
+        },
+      },
+      messageId: "message",
+      recoveryId: "recovery",
+      recipient: "447400123456",
+      sender: { providerAccountId: "account", providerPhoneNumberId: "phone" },
+      command: null,
+      now: new Date(),
+    });
+    expect(requireFrozenMultipart(source)).toEqual(source);
+    expect(() =>
+      prepareFrozenCommonReply({
+        ...source,
+        common: r.commonLayout,
+        preparation: {
+          plan: {
+            ...r.multipartPlan,
+            parts: [
+              r.multipartPlan.parts[0]!,
+              {
+                role: "ANSWER",
+                plan: {
+                  schemaVersion: 1,
+                  kind: "TEXT",
+                  body: r.commonLayout.boundaries.footer,
+                },
+              },
+            ],
+          },
+          policyRef: null,
+          receipt: source.receipt,
+        },
+        recipient: source.recipient,
+        now: new Date(),
+      }),
+    ).toThrow();
+  });
+});
 
+describe("reader-first consolidated common replies", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  function brand() {
+    return {
+      image: verifiedReadyConversationBrandImage({
+        shopId: "shop",
+        domain: "shop.example",
+        role: "LOGO",
+        publicOrigin: new URL("https://brands.example/"),
+        whatsAppMedia: {
+          schemaVersion: 1,
+          roles: {
+            LOGO: {
+              source: {
+                url: "https://source.example/logo.png",
+                reference: null,
+                generation: 3,
+                fingerprint: `sha256:${"b".repeat(64)}`,
+                observedAt: "2026-11-12T09:00:00Z",
+              },
+              work: {
+                status: "READY",
+                attempts: 1,
+                retryAfter: null,
+                leaseOwner: null,
+                leaseUntil: null,
+                failureCode: null,
+                lastCheckedAt: "2026-11-12T09:02:00Z",
+              },
+              ready: {
+                sourceGeneration: 3,
+                sourceFingerprint: `sha256:${"b".repeat(64)}`,
+                objectKey: `shop-brands/shop.example/logo/sha256-${"a".repeat(64)}.jpg`,
+                contentType: "image/jpeg",
+                width: 1125,
+                height: 600,
+                sizeBytes: 42000,
+                contentSha256: "a".repeat(64),
+                verifiedAt: "2026-11-12T09:02:00Z",
+              },
+            },
+          },
+        },
+      })!,
+      policyRef: {
+        environment: "test",
+        key: "shopBrand.publicMedia",
+        id: "policy",
+        version: 1,
+        publicOrigin: "https://brands.example",
+      },
+    };
+  }
+  async function render(
+    source: "AI" | "HUMAN",
+    answer: string,
+    logo = true,
+    product = false,
+  ) {
+    const f = harness();
+    if (logo) f.logoResolver.mockResolvedValue(brand() as never);
+    const result = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source,
+      responseBody: answer,
+      ...(product ? { commercePresentation: presentation(answer) } : {}),
+    });
+    if (result.kind !== "rendered") throw Error("fixture");
+    return { f, result };
+  }
+  it.each(["AI", "HUMAN"] as const)(
+    "consolidates %s complete branded caption and separate product footer",
+    async (source) => {
+      vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", "true");
+      for (const product of source === "AI" ? [false, true] : [false]) {
+        const { result } = await render(
+          source,
+          "Exact authored answer",
+          true,
+          product,
+        );
+        expect(result.multipartPlan!.parts.map((p) => p.role)).toEqual(
+          product ? ["HEADER", "PRODUCT"] : ["HEADER"],
+        );
+        expect(result.multipartPlan!.parts[0]!.plan).toMatchObject({
+          kind: "BRAND_IMAGE",
+          body: result.body,
+        });
+        if (product)
+          expect(result.multipartPlan!.parts[1]!.plan).toMatchObject({
+            kind: "IMAGE",
+            body: result.commonLayout!.boundaries.footer,
+          });
+        const messageId =
+          source === "HUMAN" ? humanMultipartMessageId("command") : "message";
+        vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", "false");
+        const frozen = prepareFrozenCommonReply({
+          common: result.commonLayout!,
+          preparation: {
+            plan: result.multipartPlan!,
+            policyRef: result.brandMediaPolicy ?? null,
+            receipt: {
+              sourceKind: source === "HUMAN" ? "HUMAN_COMMAND" : "MESSAGE",
+              sourceId: source === "HUMAN" ? "command" : "message",
+              shopId: "shop",
+              conversationId: "conversation",
+              inboundVersion: 1,
+              controlRevision: 2,
+              firstPair: product
+                ? { productId: "selected", variantId: null }
+                : null,
+            },
+          },
+          messageId,
+          recoveryId: "recovery",
+          recipient: "447400123456",
+          sender: {
+            providerAccountId: "account",
+            providerPhoneNumberId: "phone",
+          },
+          command:
+            source === "HUMAN" ? { id: "command", leaseToken: "lease" } : null,
+          now: new Date(),
+        });
+        expect(requireFrozenMultipart(frozen)).toEqual(frozen);
+        vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", "true");
+      }
+    },
+  );
+  it.each([1024, 1025, 4096])(
+    "preserves %i Unicode codepoints without truncation",
+    async (length) => {
+      vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", "true");
+      const empty = await render("HUMAN", "A");
+      const overhead = Array.from(empty.result.body).length - 1;
+      const answer = (length === 4096 ? "A" : "😀").repeat(length - overhead);
+      const { result } = await render("HUMAN", answer);
+      expect(Array.from(result.body)).toHaveLength(length);
+      expect(result.commonLayout!.boundaries.body).toBe(answer);
+      expect(result.multipartPlan!.parts).toHaveLength(1);
+      expect(result.multipartPlan!.parts[0]!.plan).toMatchObject({
+        kind: length <= 1024 ? "BRAND_IMAGE" : "TEXT",
+        body: result.body,
+      });
+    },
+  );
+  it.each([undefined, "false", "TRUE", "1", " true "])(
+    "keeps exact legacy plan bytes for flag %s",
+    async (value) => {
+      vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", "false");
+      const legacy = (await render("AI", "Same", true, true)).result
+        .multipartPlan;
+      vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", value);
+      expect(
+        (await render("AI", "Same", true, true)).result.multipartPlan,
+      ).toEqual(legacy);
+    },
+  );
+  it("retains complete branded answer when selected product has no verified image", async () => {
+    vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", "true");
+    const f = harness();
+    f.logoResolver.mockResolvedValue(brand() as never);
+    const r = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source: "AI",
+      responseBody: "Answer",
+      commercePresentation: presentation("Answer", null),
+    });
+    expect(r).toMatchObject({
+      kind: "rendered",
+      multipartPlan: {
+        parts: [{ role: "HEADER", plan: { kind: "BRAND_IMAGE" } }],
+      },
+    });
+    expect(
+      f.mediaDependencies.prepareConversationProductImage,
+    ).not.toHaveBeenCalled();
+  });
+  it("refuses a foreign logo without substituting the product as brand", async () => {
+    vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", "true");
+    const f = harness(),
+      foreign = brand();
+    foreign.image = {
+      ...foreign.image,
+      origin: { ...foreign.image.origin, shopId: "foreign" },
+    };
+    f.logoResolver.mockResolvedValue(foreign as never);
+    const r = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source: "AI",
+      responseBody: "Answer",
+      commercePresentation: presentation("Answer"),
+    });
+    expect(r).toMatchObject({
+      kind: "rendered",
+      multipartPlan: {
+        parts: [
+          { role: "HEADER", plan: { kind: "TEXT" } },
+          { role: "PRODUCT", plan: { kind: "IMAGE" } },
+        ],
+      },
+    });
+  });
+  it.each([false, true])(
+    "uses complete text without a logo, product %s",
+    async (product) => {
+      vi.stubEnv("RECOVERY_BRANDED_MAIN_REPLY_ENABLED", "true");
+      const { result } = await render("AI", "Complete answer", false, product);
+      expect(result.multipartPlan!.parts.map((p) => p.role)).toEqual(
+        product ? ["HEADER", "PRODUCT"] : ["ANSWER"],
+      );
+      expect(result.multipartPlan!.parts[0]!.plan).toEqual({
+        schemaVersion: 1,
+        kind: "TEXT",
+        body: result.body,
+      });
+    },
+  );
+});
+
+describe("single-bubble composite opt-in", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  function fixture() {
+    const f = harness(profiles[0]);
+    const logo = verifiedReadyConversationBrandImage({
+      shopId: "shop",
+      domain: "shop.example",
+      role: "LOGO",
+      publicOrigin: new URL("https://media.example/"),
+      whatsAppMedia: {
+        schemaVersion: 1,
+        roles: {
+          LOGO: {
+            source: {
+              url: "https://source.example/logo.png",
+              generation: 3,
+              fingerprint: `sha256:${"b".repeat(64)}`,
+            },
+            work: { status: "READY" },
+            ready: {
+              sourceGeneration: 3,
+              sourceFingerprint: `sha256:${"b".repeat(64)}`,
+              objectKey: `shop-brands/shop.example/logo/sha256-${"a".repeat(64)}.jpg`,
+              contentType: "image/jpeg",
+              width: 1125,
+              height: 600,
+              sizeBytes: 42000,
+              contentSha256: "a".repeat(64),
+              verifiedAt: "2026-11-12T09:02:00Z",
+            },
+          },
+        },
+      },
+    })!;
+    f.logoResolver.mockResolvedValue({
+      image: logo,
+      policyRef: {
+        environment: "test",
+        key: "shopBrand.publicMedia",
+        id: "policy",
+        version: 1,
+        publicOrigin: "https://media.example",
+      },
+    } as never);
+    const prepare = vi.fn(
+      async (
+        input: import("@modainteract/moda-interact-shared/commerce/presentation/node").RecoveryCompositePreparationInputV2,
+      ) => {
+        const tenantSha256 = digest(input.provenance.shopId),
+          renderIdentitySha256 = (
+            await import("@modainteract/moda-interact-shared/commerce/presentation")
+          ).digestRecoveryCompositeRenderIdentityV2(input.provenance, digest),
+          contentSha256 = "d".repeat(64),
+          objectKey = `conversation-composites/v2/${tenantSha256}/${renderIdentitySha256}/${contentSha256}.jpg`;
+        return {
+          kind: "READY" as const,
+          image: {
+            schemaVersion: 2 as const,
+            provenance: input.provenance,
+            tenantSha256,
+            renderIdentitySha256,
+            publicOrigin: input.publicOrigin,
+            publicUrl: `${input.publicOrigin}/${objectKey}`,
+            objectKey,
+            contentSha256,
+            contentType: "image/jpeg" as const,
+            byteLength: 200,
+            width: 1125 as const,
+            height: input.product ? (900 as const) : (300 as const),
+          },
+          stage: "READY" as const,
+          durationMs: 1,
+          textBounds: { width: 100, height: 50 },
+        };
+      },
+    );
+    const service = new ConversationWrapperService({
+      repository: f.repository,
+      logoResolver: f.logoResolver,
+      compositeDependencies: {
+        prepare,
+        settings: f.mediaDependencies.readShopBrandPublicMediaConfiguration,
+        credentials: f.mediaDependencies.readR2Configuration,
+        product: async (input) => {
+          const image = {
+            ...f.image,
+            publicUrl: `https://media.example/${f.image.objectKey}`,
+          };
+          return {
+            plan: {
+              schemaVersion: 1 as const,
+              kind: "IMAGE" as const,
+              body: input.body,
+              image,
+            },
+            mediaStage: "READY",
+            durationMs: 1,
+          };
+        },
+      },
+    });
+    return { ...f, service, prepare };
+  }
+  async function render(
+    f: ReturnType<typeof fixture>,
+    source: "AI" | "HUMAN",
+    product = false,
+    answer = "Exact authored answer",
+  ) {
+    const result = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: source === "HUMAN" ? "command" : "message",
+      source,
+      responseBody: answer,
+      mediaDeadlineAt: Date.now() + 15000,
+      ...(product ? { commercePresentation: presentation(answer) } : {}),
+    });
+    if (result.kind !== "rendered") throw Error("fixture");
+    return result;
+  }
+  it.each(["AI", "HUMAN"] as const)(
+    "uses saved website-caption frame in %s composite without copying website into bitmap",
+    async (source) => {
+      vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+      const f = fixture();
+      const locale = f.slot.definition.locales[0]!,
+        saved = { ...prepared, ...templateProfile(profiles[0]) };
+      saved.header = [
+        { kind: "text", value: "Shop: " },
+        { kind: "variable", name: "shop.name" },
+        { kind: "text", value: "\n──────────" },
+      ];
+      saved.conditionals = [
+        {
+          when: "checkout.available",
+          tokens: [
+            { kind: "text", value: "Website: " },
+            { kind: "variable", name: "shop.websiteUrl" },
+            { kind: "text", value: "\nCheckout:\n" },
+            { kind: "variable", name: "checkout.url" },
+          ],
+        },
+      ];
+      locale.localeAst = { schemaVersion: 1, prepared: saved };
+      locale.contentHash = digest(stableJson(saved));
+      const result = await render(f, source, source === "AI"),
+        part = result.multipartPlan!.parts[0]!.plan;
+      expect(part.kind).toBe("COMPOSITE_IMAGE");
+      expect(result.multipartPlan!.parts).toHaveLength(1);
+      expect(part.body).toBe(
+        result.commonLayout!.boundaries.body +
+          result.commonLayout!.boundaries.footer,
+      );
+      expect(part.body.split("https://shop.example").length - 1).toBe(2); // website and distinct checkout URL, never rewritten
+      expect(part.body).toContain(
+        "Website: https://shop.example\nCheckout:\n" + checkout,
+      );
+      expect(part.body.endsWith(checkout)).toBe(true);
+      expect(f.prepare.mock.calls[0]![0].provenance.headerText).toBe(
+        "Shop: Saved Shop\n──────────\n",
+      );
+      expect(f.prepare.mock.calls[0]![0].provenance.headerText).not.toContain(
+        "https://",
+      );
+      const sourceId = source === "HUMAN" ? "command" : "message";
+      const frozen = prepareFrozenCommonReply({
+        common: result.commonLayout!,
+        preparation: {
+          plan: result.multipartPlan!,
+          compositeReceipt: result.compositeReceipt!,
+          policyRef: result.brandMediaPolicy!,
+          receipt: {
+            sourceKind: source === "HUMAN" ? "HUMAN_COMMAND" : "MESSAGE",
+            sourceId,
+            shopId: "shop",
+            conversationId: "conversation",
+            inboundVersion: 1,
+            controlRevision: 2,
+            firstPair:
+              source === "AI"
+                ? { productId: "selected", variantId: null }
+                : null,
+          },
+        },
+        messageId:
+          source === "HUMAN" ? humanMultipartMessageId(sourceId) : sourceId,
+        recoveryId: "recovery",
+        recipient: "447400123456",
+        sender: {
+          providerAccountId: "account",
+          providerPhoneNumberId: "phone",
+        },
+        command:
+          source === "HUMAN" ? { id: sourceId, leaseToken: "lease" } : null,
+        now: new Date(),
+      });
+      expect(requireFrozenMultipart(frozen)).toEqual(frozen);
+    },
+  );
+  it("compacts a sub1024 single reply against the actual saved website and long checkout footer", async () => {
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+    const f = fixture(),
+      url = "https://shop.example/checkouts/" + "x".repeat(170);
+    f.context.variables["checkout.url"] = url;
+    const saved = {
+      ...prepared,
+      ...templateProfile(profiles[0]),
+      header: [
+        { kind: "text" as const, value: "Shop: " },
+        { kind: "variable" as const, name: "shop.name" as const },
+      ],
+      conditionals: [
+        {
+          when: "checkout.available" as const,
+          tokens: [
+            { kind: "text" as const, value: "Website: " },
+            { kind: "variable" as const, name: "shop.websiteUrl" as const },
+            {
+              kind: "text" as const,
+              value: "\nReply STOP to opt out.\nCheckout:\n",
+            },
+            { kind: "variable" as const, name: "checkout.url" as const },
+          ],
+        },
+      ],
+    };
+    const locale = f.slot.definition.locales[0]!;
+    locale.localeAst = { schemaVersion: 1, prepared: saved };
+    locale.contentHash = digest(stableJson(saved));
+    const reply = "Verified optional longer description. ".repeat(7),
+      p = presentation(reply),
+      product = CommerceProductSchema.parse({
+        ...p.verifiedProducts.products[0],
+        title: "The Videographer Snowboard",
+        unitPrice: "885.95",
+        currency: "USD",
+        description: { status: "AVAILABLE", text: reply },
+        stock: { status: "KNOWN", quantity: 50, scope: "PRODUCT" },
+      });
+    const facts = verifyCommerceProductFacts(
+      [{ productId: product.productId, variantId: product.variantId }],
+      [product],
+    );
+    if (facts.kind !== "verified") throw Error("facts");
+    const full = {
+      ...p,
+      verified: { ...p.verified, productFacts: facts.productFacts },
+      verifiedProducts: { ...p.verifiedProducts, products: [product] },
+    };
+    expect(
+      Array.from(
+        reply +
+          "Website: https://shop.example\nReply STOP to opt out.\nCheckout:\n" +
+          url,
+      ).length,
+    ).toBeGreaterThan(400);
+    expect(Array.from(reply + url).length).toBeLessThan(1024);
+    const result = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source: "AI",
+      responseBody: reply,
+      mediaDeadlineAt: Date.now() + 15000,
+      commercePresentation: full,
+    });
+    if (result.kind !== "rendered") throw Error("render");
+    const caption = result.multipartPlan!.parts[0]!.plan.body;
+    expect(result.multipartPlan!.parts[0]!.plan.kind).toBe("COMPOSITE_IMAGE");
+    expect(Array.from(caption).length).toBeLessThanOrEqual(400);
+    expect(caption).toContain("The Videographer Snowboard —");
+    expect(caption).toContain("Stock: 50");
+    expect(caption).not.toContain("optional longer");
+    expect(caption.endsWith(url)).toBe(true);
+    expect(caption.split(url)).toHaveLength(2);
+    expect(result.commonLayout!.boundaries.footer).toContain(
+      "Reply STOP to opt out.",
+    );
+    expect(result.compositeReceipt!.verifiedProducts!.products).toEqual([
+      product,
+    ]);
+    expect(result.presentedPairs).toEqual([
+      { productId: "selected", variantId: null },
+    ]);
+    expect(result.responseDigest).toBe(
+      digest(
+        stableJson({
+          envelope: full.envelope,
+          verified: full.verified,
+          productPairs: [],
+          verifiedProducts: full.verifiedProducts,
+        }),
+      ),
+    );
+  });
+  it.each([null, false])(
+    "preserves the complete rich DETAIL shipping answer rather than briefly rewriting it (%s)",
+    async (requiresShipping) => {
+      vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+      const f = fixture(),
+        reply =
+          "Shipping costs could not be verified. Preserve this required qualification. " +
+          "Complete grounded answer. ".repeat(14),
+        p = presentation(reply);
+      const rich = {
+        ...p,
+        envelope: {
+          ...p.envelope,
+          details: {
+            ...p.envelope.details,
+            responseDisposition: "SHIPPING_INFORMATION_UNVERIFIED",
+            shippingInformationSelection: { productId: null, variantId: null },
+          },
+        },
+        verified: { ...p.verified, requiresShipping },
+      };
+      const r = await f.service.renderConversationResponse({
+        conversationId: "conversation",
+        messageIdentity: "message",
+        source: "AI",
+        responseBody: reply,
+        mediaDeadlineAt: Date.now() + 15000,
+        commercePresentation: rich,
+      });
+      if (r.kind !== "rendered") throw Error("fixture");
+      expect(r.commonLayout!.boundaries.body).toBe(reply);
+      expect(r.commonLayout!.boundaries.footer.endsWith(checkout)).toBe(true);
+      expect(r.body).toContain("Preserve this required qualification.");
+      expect(r.presentedPairs).toEqual([
+        { productId: "selected", variantId: null },
+      ]);
+    },
+  );
+  it("compacts a fifteen-item AI lead using only retained verified products and freezes replay exactly", async () => {
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+    const f = fixture();
+    const longLead = Array.from(
+      { length: 15 },
+      (_, i) => `Unverified catalogue item ${i}: ${"model prose ".repeat(6)}`,
+    ).join("\n");
+    const p = presentation(longLead);
+    const first = p.verifiedProducts.products[0]!;
+    const products = [
+      first,
+      ...[1, 2].map((i) => ({
+        ...first,
+        productId: `selected-${i}`,
+        title: `Product ${i} ${"description ".repeat(20)}`,
+      })),
+    ];
+    const pairs = products.map(({ productId, variantId }) => ({
+      productId,
+      variantId,
+    }));
+    const facts = verifyCommerceProductFacts(pairs, products);
+    if (facts.kind !== "verified") throw Error("facts");
+    const full = {
+      ...p,
+      verified: { ...p.verified, productFacts: facts.productFacts },
+      verifiedProducts: { ...p.verifiedProducts, products },
+      envelope: { ...p.envelope, details: { productDetailSelections: pairs } },
+    };
+    const input = {
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source: "AI" as const,
+      responseBody: longLead,
+      mediaDeadlineAt: Date.now() + 15000,
+      commercePresentation: full,
+    };
+    const r = await f.service.renderConversationResponse(input);
+    if (r.kind !== "rendered") throw Error("fixture");
+    expect(r.multipartPlan!.parts).toHaveLength(1);
+    expect(r.multipartPlan!.parts[0]!.plan.kind).toBe("COMPOSITE_IMAGE");
+    expect(r.commonLayout!.boundaries.body).not.toContain(
+      "Unverified catalogue",
+    );
+    expect(
+      Array.from(r.multipartPlan!.parts[0]!.plan.body).length,
+    ).toBeLessThanOrEqual(1024);
+    expect(r.presentedPairs!.length).toBeGreaterThan(0);
+    expect(r.presentedPairs).toEqual(pairs.slice(0, r.presentedPairs!.length));
+    expect(r.compositeReceipt!.verifiedProducts!.products).toEqual(
+      products.slice(0, r.presentedPairs!.length),
+    );
+    expect(r.responseDigest).toBe(
+      digest(
+        stableJson({
+          envelope: full.envelope,
+          verified: full.verified,
+          productPairs: [],
+          verifiedProducts: full.verifiedProducts,
+        }),
+      ),
+    );
+    expect(r.commonLayout!.boundaries.footer).toContain(checkout);
+    const replay = await f.service.renderConversationResponse({
+      ...input,
+      previousApplication: r,
+    });
+    expect(replay).toEqual({ ...r, replayed: true });
+    expect(f.prepare).toHaveBeenCalledTimes(1);
+  });
+  it.each(["AI", "HUMAN"] as const)(
+    "%s has one branded bubble with exact caption and canonical logical history",
+    async (source) => {
+      vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+      const f = fixture();
+      for (const product of source === "AI" ? [false, true] : [false]) {
+        const result = await render(f, source, product),
+          part = result.multipartPlan!.parts[0]!.plan;
+        expect(result.multipartPlan!.parts).toHaveLength(1);
+        expect(result.multipartPlan!.parts[0]!.role).toBe("HEADER");
+        expect(part).toMatchObject({
+          kind: "COMPOSITE_IMAGE",
+          logicalBody: result.body,
+          body:
+            result.commonLayout!.boundaries.body +
+            result.commonLayout!.boundaries.footer,
+          image: { height: product ? 900 : 300 },
+        });
+        expect(result.compositeReceipt!.logo.origin.role).toBe("LOGO");
+        const sourceId = source === "HUMAN" ? "command" : "message",
+          messageId =
+            source === "HUMAN" ? humanMultipartMessageId(sourceId) : sourceId;
+        const frozen = prepareFrozenCommonReply({
+          common: result.commonLayout!,
+          preparation: {
+            plan: result.multipartPlan!,
+            compositeReceipt: result.compositeReceipt!,
+            policyRef: result.brandMediaPolicy!,
+            receipt: {
+              sourceKind: source === "HUMAN" ? "HUMAN_COMMAND" : "MESSAGE",
+              sourceId,
+              shopId: "shop",
+              conversationId: "conversation",
+              inboundVersion: 1,
+              controlRevision: 2,
+              firstPair: product
+                ? { productId: "selected", variantId: null }
+                : null,
+            },
+          },
+          messageId,
+          recoveryId: "recovery",
+          recipient: "447400123456",
+          sender: {
+            providerAccountId: "account",
+            providerPhoneNumberId: "phone",
+          },
+          command:
+            source === "HUMAN" ? { id: "command", leaseToken: "lease" } : null,
+          now: new Date(),
+        });
+        vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "false");
+        expect(requireFrozenMultipart(frozen)).toEqual(frozen);
+        vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+        for (const mutate of [
+          (v: typeof frozen) => {
+            if (v.recoveryShopHeader.schemaVersion !== 2) throw Error("common");
+            v.recoveryShopHeader.commonRef.prepared.compositeProfile!
+              .fontSize++;
+          },
+          (v: typeof frozen) => {
+            v.plan.parts[0]!.plan.body += "altered";
+          },
+          (v: typeof frozen) => {
+            v.compositeReceipt!.output.contentSha256 = "e".repeat(64);
+          },
+          (v: typeof frozen) => {
+            v.compositeReceipt!.logo.origin.shopId = "foreign";
+          },
+          (v: typeof frozen) => {
+            v.receipt.firstPair = { productId: "foreign", variantId: null };
+            if (!product) v.compositeReceipt!.product = f.image;
+          },
+        ]) {
+          const bad = structuredClone(frozen);
+          mutate(bad);
+          expect(() => requireFrozenMultipart(bad)).toThrow();
+        }
+      }
+    },
+  );
+  it.each([undefined, "false", "TRUE", "1", " true "])(
+    "preserves old exact plan and application bytes while flag %s",
+    async (value) => {
+      const f = fixture();
+      vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "false");
+      const a = await render(f, "AI");
+      vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", value);
+      const b = await render(f, "AI");
+      expect(b.multipartPlan).toEqual(a.multipartPlan);
+      expect(b.applicationKey).toEqual(a.applicationKey);
+      expect(f.prepare).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["AI", "HUMAN"] as const)(
+    "never compacts nonproduct %s prose to force a caption",
+    async (source) => {
+      vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+      const f = fixture(),
+        answer = "😀".repeat(1100);
+      const result = await render(f, source, false, answer);
+      expect(result.commonLayout!.boundaries.body).toBe(answer);
+      expect(result.multipartPlan!.parts[0]!.plan).toEqual({
+        schemaVersion: 1,
+        kind: "TEXT",
+        body: result.body,
+      });
+      expect(f.prepare).not.toHaveBeenCalled();
+    },
+  );
+  it("uses one fullTEXT with complete footer on overflow, absent logo and expired lease", async () => {
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+    for (const reason of ["overflow", "logo", "expired"]) {
+      const f = fixture();
+      if (reason === "logo") f.logoResolver.mockResolvedValue(null);
+      const r =
+        reason === "expired"
+          ? await f.service.renderConversationResponse({
+              conversationId: "conversation",
+              messageIdentity: "command",
+              source: "HUMAN",
+              responseBody: "Full answer",
+              mediaDeadlineAt: Date.now() - 1,
+            })
+          : await render(
+              f,
+              "HUMAN",
+              false,
+              reason === "overflow" ? "😀".repeat(1030) : "Full answer",
+            );
+      if (r.kind !== "rendered") throw Error("fixture");
+      expect(r.multipartPlan!.parts).toEqual([
+        {
+          role: "ANSWER",
+          plan: { schemaVersion: 1, kind: "TEXT", body: r.body },
+        },
+      ]);
+      expect(r.commonLayout!.boundaries.body).toBe(
+        reason === "overflow" ? "😀".repeat(1030) : "Full answer",
+      );
+      expect(f.prepare).not.toHaveBeenCalled();
+    }
+  });
+  it("preserves full canonical TEXT when a valid current profile has typed HEADER_OVERFLOW", async () => {
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+    const f = fixture();
+    f.prepare.mockResolvedValue({
+      kind: "OMITTED",
+      reason: "HEADER_OVERFLOW",
+      stage: "TRANSFORM",
+      durationMs: 1,
+    } as never);
+    const r = await render(f, "HUMAN");
+    expect(r.commonLayout!.commonRef.prepared.compositeProfile).toBeDefined();
+    expect(r.multipartPlan!.parts).toEqual([
+      {
+        role: "ANSWER",
+        plan: { schemaVersion: 1, kind: "TEXT", body: r.body },
+      },
+    ]);
+    expect(r.body).toBe(
+      r.commonLayout!.boundaries.header +
+        r.commonLayout!.boundaries.body +
+        r.commonLayout!.boundaries.footer,
+    );
+    expect(f.prepare).toHaveBeenCalledOnce();
+  });
+  it("refuses new composite composition when the selected saved template has no profile", async () => {
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+    const f = harness();
+    const r = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "command",
+      source: "HUMAN",
+      responseBody: "Exact authored answer",
+      mediaDeadlineAt: Date.now() + 15000,
+    });
+    expect(r).toEqual({ kind: "rejected", reason: "PREPARED_INVALID" });
+    expect(f.logoResolver).not.toHaveBeenCalled();
+  });
+  it("reuses immutable preparation after flag/runtime changes without any media work", async () => {
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+    const f = fixture(),
+      p = presentation("Exact authored answer");
+    const first = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source: "AI",
+      responseBody: "Exact authored answer",
+      mediaDeadlineAt: Date.now() + 15000,
+      commercePresentation: p,
+    });
+    if (first.kind !== "rendered") throw Error("fixture");
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "false");
+    const r = await f.service.renderConversationResponse({
+      conversationId: "conversation",
+      messageIdentity: "message",
+      source: "AI",
+      responseBody: "Exact authored answer",
+      commercePresentation: p,
+      previousApplication: first,
+    });
+    expect(r).toEqual({ ...first, replayed: true });
+    expect(f.prepare).toHaveBeenCalledTimes(1);
+  });
+  it("keeps checkout-footer application policy in Background while Shared binds alternate supplied parts safely", async () => {
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+    const f = fixture(),
+      r = await render(f, "HUMAN"),
+      part = r.multipartPlan!.parts[0]!.plan;
+    if (part.kind !== "COMPOSITE_IMAGE" || part.image.schemaVersion !== 2)
+      throw Error("V2 fixture");
+    const { compositeTrustedContextV2 } =
+      await import("../../../../src/services/recovery-multipart/composite.js");
+    const trusted = compositeTrustedContextV2(
+      r.compositeReceipt,
+      r.commonLayout!,
+      r.brandMediaPolicy!,
+      null,
+    )!;
+    const alternateFooter = "\nMachine-safe alternate footer",
+      alternate = {
+        ...trusted,
+        body: trusted.answerText + alternateFooter,
+        footerText: alternateFooter,
+        logicalBody:
+          trusted.provenance.headerText + trusted.answerText + alternateFooter,
+      };
+    const shared =
+      await import("@modainteract/moda-interact-shared/commerce/presentation");
+    const plan = shared.buildRecoveryCompositeMultipartDeliveryPlanV2(
+      {
+        plan: shared.buildRecoveryCompositeImagePlanV2(
+          { image: part.image, trusted: alternate },
+          digest,
+        ),
+        trusted: alternate,
+      },
+      digest,
+    );
+    expect(plan.parts[0]!.plan.body).toBe(trusted.answerText + alternateFooter);
+    const { exactCommonDecomposition } =
+      await import("../../../../src/services/recovery-multipart/common-decomposition.js");
+    expect(
+      exactCommonDecomposition(plan, {
+        ...r.commonLayout!,
+        boundaries: { ...r.commonLayout!.boundaries, footer: alternateFooter },
+      }),
+    ).toBe(false);
+  });
+  it("refuses obsolete fixed-composite receipt instead of decoding a second composite format", async () => {
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+    const f = fixture(),
+      r = await render(f, "HUMAN");
+    const { readCompositeReceipt } =
+      await import("../../../../src/services/recovery-multipart/composite.js");
+    expect(
+      readCompositeReceipt({
+        schemaVersion: 1,
+        logo: r.compositeReceipt!.logo,
+        product: null,
+        verifiedProducts: null,
+        factsSha256: digest("null"),
+        fontAssetSha256: "9".repeat(64),
+        output: { contentSha256: "d".repeat(64), byteLength: 200 },
+      }),
+    ).toBeNull();
+  });
+  it("rejects self-consistent HUMAN output+receipt replacement retaining the original immutable application key", async () => {
+    vi.stubEnv("RECOVERY_COMPOSITE_REPLY_ENABLED", "true");
+    const f = fixture(),
+      r = await render(f, "HUMAN");
+    const { readFrozenHumanBody, currentHumanWrapperMatches } =
+      await import("../../../../src/services/recovery-conversation/human-prepared-command.service.js");
+    const { compositeTrustedContextV2 } =
+      await import("../../../../src/services/recovery-multipart/composite.js");
+    const {
+      buildRecoveryCompositeImagePlanV2,
+      buildRecoveryCompositeMultipartDeliveryPlanV2,
+    } =
+      await import("@modainteract/moda-interact-shared/commerce/presentation");
+    const receipt = {
+      sourceKind: "HUMAN_COMMAND" as const,
+      sourceId: "command",
+      shopId: "shop",
+      conversationId: "conversation",
+      inboundVersion: 1,
+      controlRevision: 2,
+      firstPair: null,
+    };
+    const evidence = {
+      schemaVersion: 1,
+      outcome: "RENDERED",
+      audience: "SHARED",
+      wrapperDefinitionId: r.wrapperDefinitionId,
+      localeId: r.localeId,
+      slotEditVersion: r.slotEditVersion,
+      applicationKey: r.applicationKey,
+      contentHash: r.contentHash,
+      bodySha256: digest(r.body),
+      recoveryCheckoutUrl: checkout,
+      recoveryShopHeader: r.commonLayout,
+      multipartPreparation: {
+        plan: r.multipartPlan!,
+        policyRef: r.brandMediaPolicy!,
+        receipt,
+        compositeReceipt: r.compositeReceipt!,
+      },
+    };
+    const row = {
+      kind: "HUMAN_TEXT",
+      conversationId: "conversation",
+      textBody: "Exact authored answer",
+      preparedTextBody: r.body,
+      preparedWrapperEvidence: evidence,
+      preparedAt: new Date(),
+    };
+    expect(readFrozenHumanBody(row, row.textBody, "command", "shop").kind).toBe(
+      "frozen",
+    );
+    const changedSelection = structuredClone(evidence);
+    if (
+      changedSelection.multipartPreparation.compositeReceipt.schemaVersion !== 2
+    )
+      throw Error("V2 fixture");
+    changedSelection.multipartPreparation.compositeReceipt.templateReferenceHash =
+      "f".repeat(64);
+    expect(
+      readFrozenHumanBody(
+        { ...row, preparedWrapperEvidence: changedSelection },
+        row.textBody,
+        "command",
+        "shop",
+      ),
+    ).toEqual({ kind: "refused", reason: "prepared_invalid" });
+    const changed = structuredClone(evidence),
+      image = structuredClone(r.multipartPlan!.parts[0]!.plan);
+    if (image.kind !== "COMPOSITE_IMAGE") throw Error("fixture");
+    image.image.contentSha256 = "f".repeat(64);
+    image.image.objectKey = image.image.objectKey.replace(
+      /[^/]+\.jpg$/,
+      "f".repeat(64) + ".jpg",
+    );
+    image.image.publicUrl =
+      image.image.publicOrigin + "/" + image.image.objectKey;
+    changed.multipartPreparation.compositeReceipt.output.contentSha256 =
+      image.image.contentSha256;
+    const trusted = compositeTrustedContextV2(
+      changed.multipartPreparation.compositeReceipt,
+      r.commonLayout!,
+      r.brandMediaPolicy!,
+      null,
+    )!;
+    changed.multipartPreparation.plan =
+      buildRecoveryCompositeMultipartDeliveryPlanV2(
+        {
+          plan: buildRecoveryCompositeImagePlanV2(
+            { image: image.image, trusted },
+            digest,
+          ),
+          trusted,
+        },
+        digest,
+      );
+    // Structurally/provenance-consistent, but never the original HUMAN application.
+    expect(
+      readFrozenHumanBody(
+        { ...row, preparedWrapperEvidence: changed },
+        row.textBody,
+        "command",
+        "shop",
+      ),
+    ).toEqual({ kind: "refused", reason: "prepared_invalid" });
+    const tx = { $queryRawUnsafe: vi.fn() };
+    expect(
+      await currentHumanWrapperMatches(
+        tx as never,
+        r.body,
+        changed,
+        new Date(),
+        {
+          commandId: "command",
+          conversationId: "conversation",
+          textBody: row.textBody,
+          shopId: "shop",
+        },
+      ),
+    ).toBe(false);
+    expect(tx.$queryRawUnsafe).not.toHaveBeenCalled();
+  });
 });

@@ -12,14 +12,24 @@ export function readWooChargeEnvelope(
   providerContractId: string | null,
   topic: string,
 ): WooChargeEnvelopeResult {
-  if (!isRecord(normalizedPayload) || !isRecord(normalizedPayload.charge) || !providerContractId) {
+  if (
+    !isRecord(normalizedPayload) ||
+    !isRecord(normalizedPayload.charge) ||
+    !providerContractId
+  ) {
     return { errorCode: "CHARGE_PROVIDER_STATUS_CONFLICT" };
   }
   const charge = normalizedPayload.charge;
-  const expectedStatus = topic === "saas_billing_contract.activated" ? "active" : "canceled";
-  if (typeof charge.id !== "string" || charge.id.trim().length === 0
-    || charge.id !== providerContractId || typeof charge.status !== "string"
-    || charge.status.trim().length === 0 || charge.status !== expectedStatus) {
+  const expectedStatus =
+    topic === "saas_billing_contract.activated" ? "active" : "canceled";
+  if (
+    typeof charge.id !== "string" ||
+    charge.id.trim().length === 0 ||
+    charge.id !== providerContractId ||
+    typeof charge.status !== "string" ||
+    charge.status.trim().length === 0 ||
+    charge.status !== expectedStatus
+  ) {
     return { errorCode: "CHARGE_PROVIDER_STATUS_CONFLICT" };
   }
   return { charge };

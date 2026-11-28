@@ -30,10 +30,7 @@ export type InboundAbuseAdmission =
     };
 
 export type InboundAbuseConversationType =
-  | "RECOVERY"
-  | "PRODUCT_DISCOVERY"
-  | "PRODUCT_SUPPORT"
-  | "POST_PURCHASE";
+  "RECOVERY" | "PRODUCT_DISCOVERY" | "PRODUCT_SUPPORT" | "POST_PURCHASE";
 
 type Scope = {
   key: string;
@@ -43,7 +40,7 @@ type Scope = {
 };
 
 type AdmissionReason = Extract<
-  Extract<InboundAbuseAdmission, { kind: "denied" }>['reason'],
+  Extract<InboundAbuseAdmission, { kind: "denied" }>["reason"],
   string
 >;
 
@@ -72,10 +69,18 @@ function currentAbuseRuntimeConfig(
   reader: RuntimeConfigReader,
 ): Pick<
   BackgroundRuntimeConfigSnapshot,
-  "rawSenderLimitPerMinute" | "rawGlobalLimitPerMinute" | "turnSenderLimitPerMinute"
-  | "turnSenderLimitPerTenMinutes" | "turnConversationLimitPerMinute" | "turnConversationLimitPerTenMinutes"
-  | "turnShopLimitPerMinute" | "turnGlobalLimitPerMinute" | "discoverySenderLimitPerMinute"
-  | "discoverySenderLimitPerTenMinutes" | "discoveryConversationLimitPerMinute" | "discoveryConversationLimitPerTenMinutes"
+  | "rawSenderLimitPerMinute"
+  | "rawGlobalLimitPerMinute"
+  | "turnSenderLimitPerMinute"
+  | "turnSenderLimitPerTenMinutes"
+  | "turnConversationLimitPerMinute"
+  | "turnConversationLimitPerTenMinutes"
+  | "turnShopLimitPerMinute"
+  | "turnGlobalLimitPerMinute"
+  | "discoverySenderLimitPerMinute"
+  | "discoverySenderLimitPerTenMinutes"
+  | "discoveryConversationLimitPerMinute"
+  | "discoveryConversationLimitPerTenMinutes"
 > {
   return reader.current();
 }
@@ -252,12 +257,7 @@ export class InboundWhatsAppAbuseAdmissionService {
       this.recordAdmission(stage, "denied", reason, telemetry);
       return { kind: "denied", stage, reason };
     } catch {
-      this.recordAdmission(
-        stage,
-        "denied",
-        "LIMITER_UNAVAILABLE",
-        telemetry,
-      );
+      this.recordAdmission(stage, "denied", "LIMITER_UNAVAILABLE", telemetry);
       return { kind: "denied", stage, reason: "LIMITER_UNAVAILABLE" };
     }
   }

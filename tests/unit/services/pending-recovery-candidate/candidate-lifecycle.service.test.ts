@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { PendingRecoveryCandidate } from "../../../../src/domain/pending-recovery-candidate.js";
-import {
-  PendingRecoveryCandidateLifecycleService,
-} from "../../../../src/services/pending-recovery-candidate/candidate-lifecycle.service.js";
+import { PendingRecoveryCandidateLifecycleService } from "../../../../src/services/pending-recovery-candidate/candidate-lifecycle.service.js";
 
-function candidate(overrides: Partial<PendingRecoveryCandidate> = {}): PendingRecoveryCandidate {
+function candidate(
+  overrides: Partial<PendingRecoveryCandidate> = {},
+): PendingRecoveryCandidate {
   return {
     shopId: "shop-1",
     shopDomain: "shop.example",
@@ -19,18 +19,33 @@ function candidate(overrides: Partial<PendingRecoveryCandidate> = {}): PendingRe
 }
 
 function createHarness() {
-  const jobs = new Map<string, {
-    data: PendingRecoveryCandidate;
-    state: string;
-    remove: ReturnType<typeof vi.fn>;
-  }>();
+  const jobs = new Map<
+    string,
+    {
+      data: PendingRecoveryCandidate;
+      state: string;
+      remove: ReturnType<typeof vi.fn>;
+    }
+  >();
   const checkoutIds = new Map<string, string>();
   const cartIds = new Map<string, string>();
   const removeIndex = vi.fn(async () => undefined);
-  const withCheckoutLock = vi.fn(async (_shopId: string, _checkoutToken: string, callback: () => Promise<unknown>) => callback());
+  const withCheckoutLock = vi.fn(
+    async (
+      _shopId: string,
+      _checkoutToken: string,
+      callback: () => Promise<unknown>,
+    ) => callback(),
+  );
   const indexStore = {
-    findByCheckout: vi.fn(async ({ checkoutToken }: { shopId: string; checkoutToken: string }) => checkoutIds.get(checkoutToken) ?? null),
-    findByCart: vi.fn(async ({ cartToken }: { shopId: string; cartToken: string }) => cartIds.get(cartToken) ?? null),
+    findByCheckout: vi.fn(
+      async ({ checkoutToken }: { shopId: string; checkoutToken: string }) =>
+        checkoutIds.get(checkoutToken) ?? null,
+    ),
+    findByCart: vi.fn(
+      async ({ cartToken }: { shopId: string; cartToken: string }) =>
+        cartIds.get(cartToken) ?? null,
+    ),
     remove: removeIndex,
   };
   const queue = {
@@ -74,11 +89,13 @@ describe("PendingRecoveryCandidateLifecycleService", () => {
       remove: vi.fn(async () => undefined),
     });
 
-    await expect(harness.service.resolve({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-      cartToken: "cart-1",
-    })).resolves.toEqual({ jobId: "job-checkout", candidate: checkoutCandidate });
+    await expect(
+      harness.service.resolve({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+        cartToken: "cart-1",
+      }),
+    ).resolves.toEqual({ jobId: "job-checkout", candidate: checkoutCandidate });
     expect(harness.indexStore.findByCart).not.toHaveBeenCalled();
   });
 
@@ -92,11 +109,13 @@ describe("PendingRecoveryCandidateLifecycleService", () => {
       remove: vi.fn(async () => undefined),
     });
 
-    await expect(harness.service.resolve({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-      cartToken: "cart-1",
-    })).resolves.toEqual({ jobId: "job-cart", candidate: cartCandidate });
+    await expect(
+      harness.service.resolve({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+        cartToken: "cart-1",
+      }),
+    ).resolves.toEqual({ jobId: "job-cart", candidate: cartCandidate });
   });
 
   it("does not switch to cart correlation when the checkout index points at a missing job", async () => {
@@ -109,11 +128,13 @@ describe("PendingRecoveryCandidateLifecycleService", () => {
       remove: vi.fn(async () => undefined),
     });
 
-    await expect(harness.service.resolve({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-      cartToken: "cart-1",
-    })).resolves.toBeNull();
+    await expect(
+      harness.service.resolve({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+        cartToken: "cart-1",
+      }),
+    ).resolves.toBeNull();
     expect(harness.indexStore.findByCart).not.toHaveBeenCalled();
   });
 
@@ -121,9 +142,15 @@ describe("PendingRecoveryCandidateLifecycleService", () => {
     const harness = createHarness();
     const stored = candidate();
     const removeJob = vi.fn(async () => undefined);
-    harness.jobs.set("job-1", { data: stored, state: "delayed", remove: removeJob });
+    harness.jobs.set("job-1", {
+      data: stored,
+      state: "delayed",
+      remove: removeJob,
+    });
 
-    await expect(harness.service.cancel({ jobId: "job-1", candidate: stored })).resolves.toEqual({ removed: true });
+    await expect(
+      harness.service.cancel({ jobId: "job-1", candidate: stored }),
+    ).resolves.toEqual({ removed: true });
     expect(removeJob).toHaveBeenCalledTimes(1);
     expect(harness.removeIndex).toHaveBeenCalledWith(stored, "job-1");
   });
@@ -132,32 +159,46 @@ describe("PendingRecoveryCandidateLifecycleService", () => {
     const harness = createHarness();
     harness.checkoutIds.set("checkout-1", "missing-job");
 
-    await expect(harness.service.cancelByCheckout({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-    })).resolves.toEqual({ removed: true });
-    expect(harness.removeIndex).toHaveBeenCalledWith({
-      shopId: "shop-1",
-      checkoutToken: "checkout-1",
-      cartToken: null,
-    }, "missing-job");
+    await expect(
+      harness.service.cancelByCheckout({
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+      }),
+    ).resolves.toEqual({ removed: true });
+    expect(harness.removeIndex).toHaveBeenCalledWith(
+      {
+        shopId: "shop-1",
+        checkoutToken: "checkout-1",
+        cartToken: null,
+      },
+      "missing-job",
+    );
   });
 
-  it.each(["delayed", "waiting"])("re-resolves under the checkout lock before cancelling a %s cart candidate", async (state) => {
-    const harness = createHarness();
-    const stored = candidate();
-    const removeJob = vi.fn(async () => undefined);
-    harness.cartIds.set("cart-1", "job-1");
-    harness.jobs.set("job-1", { data: stored, state, remove: removeJob });
+  it.each(["delayed", "waiting"])(
+    "re-resolves under the checkout lock before cancelling a %s cart candidate",
+    async (state) => {
+      const harness = createHarness();
+      const stored = candidate();
+      const removeJob = vi.fn(async () => undefined);
+      harness.cartIds.set("cart-1", "job-1");
+      harness.jobs.set("job-1", { data: stored, state, remove: removeJob });
 
-    await expect(harness.service.cancelByCart({
-      shopId: "shop-1",
-      cartToken: "cart-1",
-    })).resolves.toEqual({ outcome: "cancelled", jobId: "job-1" });
-    expect(harness.withCheckoutLock).toHaveBeenCalledWith("shop-1", "checkout-1", expect.any(Function));
-    expect(harness.indexStore.findByCart).toHaveBeenCalledTimes(2);
-    expect(removeJob).toHaveBeenCalledTimes(1);
-  });
+      await expect(
+        harness.service.cancelByCart({
+          shopId: "shop-1",
+          cartToken: "cart-1",
+        }),
+      ).resolves.toEqual({ outcome: "cancelled", jobId: "job-1" });
+      expect(harness.withCheckoutLock).toHaveBeenCalledWith(
+        "shop-1",
+        "checkout-1",
+        expect.any(Function),
+      );
+      expect(harness.indexStore.findByCart).toHaveBeenCalledTimes(2);
+      expect(removeJob).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("does not cancel a cart candidate whose queue state is no longer cancellable", async () => {
     const harness = createHarness();
@@ -168,10 +209,16 @@ describe("PendingRecoveryCandidateLifecycleService", () => {
       remove: vi.fn(async () => undefined),
     });
 
-    await expect(harness.service.cancelByCart({
-      shopId: "shop-1",
-      cartToken: "cart-1",
-    })).resolves.toEqual({ outcome: "not-reschedulable", state: "active", jobId: "job-1" });
+    await expect(
+      harness.service.cancelByCart({
+        shopId: "shop-1",
+        cartToken: "cart-1",
+      }),
+    ).resolves.toEqual({
+      outcome: "not-reschedulable",
+      state: "active",
+      jobId: "job-1",
+    });
     expect(harness.removeIndex).not.toHaveBeenCalled();
   });
 });

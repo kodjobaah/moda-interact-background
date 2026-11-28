@@ -5,7 +5,10 @@ import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { PrismaClient } from "@prisma/client";
-import { resolveLiveBudget, assertLiveBudgetFitsLease } from "../src/commerce/live-budget.js";
+import {
+  resolveLiveBudget,
+  assertLiveBudgetFitsLease,
+} from "../src/commerce/live-budget.js";
 
 const container = `moda-arch038-bg001-${randomUUID()}`;
 const dbName = "arch038_live_budget_fixture";
@@ -13,40 +16,99 @@ let running = false;
 let client: PrismaClient | undefined;
 function docker(args: string[], input?: string): string {
   return execFileSync("docker", args, {
-    input, encoding: "utf8", maxBuffer: 32 * 1024 * 1024,
+    input,
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
     stdio: ["pipe", "pipe", "pipe"],
   }).trim();
 }
 function sql(statement: string): void {
-  docker(["exec", "-i", container, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1",
-    "-U", "postgres", "-d", dbName], statement);
+  docker(
+    [
+      "exec",
+      "-i",
+      container,
+      "psql",
+      "-X",
+      "-q",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-U",
+      "postgres",
+      "-d",
+      dbName,
+    ],
+    statement,
+  );
 }
 async function run(): Promise<void> {
-  docker(["run", "-d", "--name", container,
-    "-p", "127.0.0.1::5432", "-e", "POSTGRES_PASSWORD=arch038-test",
-    "-e", `POSTGRES_DB=${dbName}`, "pgvector/pgvector:pg17"]);
+  docker([
+    "run",
+    "-d",
+    "--name",
+    container,
+    "-p",
+    "127.0.0.1::5432",
+    "-e",
+    "POSTGRES_PASSWORD=arch038-test",
+    "-e",
+    `POSTGRES_DB=${dbName}`,
+    "pgvector/pgvector:pg17",
+  ]);
   running = true;
   let ready = false;
   for (let i = 0; i < 90; i++) {
     try {
-      docker(["exec", container, "pg_isready", "-q", "-h", "127.0.0.1",
-        "-U", "postgres", "-d", dbName]);
-      ready = true; break;
-    } catch { await delay(1000); }
+      docker([
+        "exec",
+        container,
+        "pg_isready",
+        "-q",
+        "-h",
+        "127.0.0.1",
+        "-U",
+        "postgres",
+        "-d",
+        dbName,
+      ]);
+      ready = true;
+      break;
+    } catch {
+      await delay(1000);
+    }
   }
   assert.ok(ready, "Postgres final TCP server did not start");
-  const dirs = readdirSync(new URL("../database/prisma/migrations/", import.meta.url))
-    .filter(name => /^\d{14}_.+/.test(name)).sort();
-  assert.ok(dirs.some(name => name.includes("arch038_unified_model_policies")),
-    "Advance the database submodule to accepted ARCH-038-DATABASE-001 before running this test");
+  const dirs = readdirSync(
+    new URL("../database/prisma/migrations/", import.meta.url),
+  )
+    .filter((name) => /^\d{14}_.+/.test(name))
+    .sort();
+  assert.ok(
+    dirs.some((name) => name.includes("arch038_unified_model_policies")),
+    "Advance the database submodule to accepted ARCH-038-DATABASE-001 before running this test",
+  );
   for (const name of dirs) {
-    sql(readFileSync(new URL(`../database/prisma/migrations/${name}/migration.sql`, import.meta.url), "utf8"));
+    sql(
+      readFileSync(
+        new URL(
+          `../database/prisma/migrations/${name}/migration.sql`,
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
   }
   const port = docker(["port", container, "5432/tcp"])
-    .split("\n").find(line => line.startsWith("127.0.0.1:"))?.split(":").at(-1);
-  assert.ok(port && /^\d+$/.test(port), "Disposable Docker PostgreSQL TCP port was not published");
-  client = new PrismaClient({ datasourceUrl:
-    `postgresql://postgres:arch038-test@127.0.0.1:${port}/${dbName}?schema=public`,
+    .split("\n")
+    .find((line) => line.startsWith("127.0.0.1:"))
+    ?.split(":")
+    .at(-1);
+  assert.ok(
+    port && /^\d+$/.test(port),
+    "Disposable Docker PostgreSQL TCP port was not published",
+  );
+  client = new PrismaClient({
+    datasourceUrl: `postgresql://postgres:arch038-test@127.0.0.1:${port}/${dbName}?schema=public`,
   });
   await client.$connect();
 
@@ -80,8 +142,12 @@ async function run(): Promise<void> {
     VALUES ('arch038-live-shop-policy','DEVELOPMENT','LIVE','SHOP','arch038-live-shop',
       '{"outputTokens":1800}'::jsonb,'arch038-test-admin');`);
   const common = {
-    db: client, environment: "DEVELOPMENT" as const, shopId: "arch038-live-shop",
-    conversationId: "arch038-conv", recoveryId: "arch038-recovery", inboundVersion: 1,
+    db: client,
+    environment: "DEVELOPMENT" as const,
+    shopId: "arch038-live-shop",
+    conversationId: "arch038-conv",
+    recoveryId: "arch038-recovery",
+    inboundVersion: 1,
   };
   const budget = await resolveLiveBudget(common);
   assert.equal(budget.deadlineMs, 90000);
@@ -93,15 +159,29 @@ async function run(): Promise<void> {
   sql(`UPDATE "commerce"."CommerceModelPolicy" SET "budget"='{"outputTokens":2100}',
     "editVersion"=2,"updatedByAdminId"='arch038-test-admin' WHERE "id"='arch038-live-shop-policy';`);
   const later = await resolveLiveBudget(common);
-  assert.equal(later.outputTokens, 2100,
-    "a later invocation must read the updated LIVE policy, even with the same inbound identity");
-  assert.equal(budget.outputTokens, 1800,
-    "an in-flight invocation retains its locally resolved budget");
-  assert.equal((await resolveLiveBudget({...common,shopId:"arch038-foreign-shop"})).outputTokens,800);
+  assert.equal(
+    later.outputTokens,
+    2100,
+    "a later invocation must read the updated LIVE policy, even with the same inbound identity",
+  );
+  assert.equal(
+    budget.outputTokens,
+    1800,
+    "an in-flight invocation retains its locally resolved budget",
+  );
+  assert.equal(
+    (await resolveLiveBudget({ ...common, shopId: "arch038-foreign-shop" }))
+      .outputTokens,
+    800,
+  );
   console.log("PASS ARCH-038 LIVE budget disposable PostgreSQL");
 }
-try { await run(); }
-finally {
+try {
+  await run();
+} finally {
   await client?.$disconnect();
-  if (running) { docker(["rm", "-f", "-v", container]); console.log(`CLEANUP ${container}`); }
+  if (running) {
+    docker(["rm", "-f", "-v", container]);
+    console.log(`CLEANUP ${container}`);
+  }
 }

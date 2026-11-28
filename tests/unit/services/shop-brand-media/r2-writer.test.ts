@@ -1,21 +1,37 @@
 import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
-import { putGuardedImmutableR2Object, createShopBrandR2Writer, SHOP_BRAND_CACHE_CONTROL,
-  sanitizeR2ProviderMessage, type BrandR2Transport } from "../../../../src/services/shop-brand-media/r2-writer.js";
+import {
+  putGuardedImmutableR2Object,
+  createShopBrandR2Writer,
+  SHOP_BRAND_CACHE_CONTROL,
+  sanitizeR2ProviderMessage,
+  type BrandR2Transport,
+} from "../../../../src/services/shop-brand-media/r2-writer.js";
 import { loadShopBrandR2Credentials } from "../../../../src/services/shop-brand-media/r2-config.js";
 import type { VerifiedBrandImage } from "../../../../src/services/shop-brand-media/contracts.js";
 import { normalizeShopBrandDomain } from "../../../../src/services/shop-brand-media/contracts.js";
 
 const bucket = "moda-interact-shop-brands";
 const image = async (): Promise<VerifiedBrandImage> => {
-  const bytes = await sharp({ create: { width: 1125, height: 600, channels: 3,
-    background: "white" } }).jpeg().toBuffer();
-  return { bytes, contentType: "image/jpeg", width: 1125, height: 600,
-    sizeBytes: bytes.length, contentSha256: createHash("sha256").update(bytes).digest("hex") };
+  const bytes = await sharp({
+    create: { width: 1125, height: 600, channels: 3, background: "white" },
+  })
+    .jpeg()
+    .toBuffer();
+  return {
+    bytes,
+    contentType: "image/jpeg",
+    width: 1125,
+    height: 600,
+    sizeBytes: bytes.length,
+    contentSha256: createHash("sha256").update(bytes).digest("hex"),
+  };
 };
-const notFound = () => Object.assign(new Error("not found"), { $metadata: { httpStatusCode: 404 } });
-const conflict = () => Object.assign(new Error("collision"), { $metadata: { httpStatusCode: 412 } });
+const notFound = () =>
+  Object.assign(new Error("not found"), { $metadata: { httpStatusCode: 404 } });
+const conflict = () =>
+  Object.assign(new Error("collision"), { $metadata: { httpStatusCode: 412 } });
 
 describe("ARCH-049 dedicated immutable R2 writer", () => {
   it("puts with conditional immutability, verifies HEAD metadata and idempotently reuses", async () => {
@@ -24,20 +40,32 @@ describe("ARCH-049 dedicated immutable R2 writer", () => {
     let persisted = false;
     const head = vi.fn(async () => {
       if (!persisted) throw notFound();
-      return { ContentType: fixture.contentType, ContentLength: fixture.sizeBytes,
-        Metadata: { sha256: fixture.contentSha256 }, CacheControl: SHOP_BRAND_CACHE_CONTROL };
+      return {
+        ContentType: fixture.contentType,
+        ContentLength: fixture.sizeBytes,
+        Metadata: { sha256: fixture.contentSha256 },
+        CacheControl: SHOP_BRAND_CACHE_CONTROL,
+      };
     });
-    const put = vi.fn(async () => { persisted = true; });
+    const put = vi.fn(async () => {
+      persisted = true;
+    });
     const writer = createShopBrandR2Writer({ head, put });
     await writer.putVerified({ bucket, objectKey, image: fixture });
     await writer.putVerified({ bucket, objectKey, image: fixture });
     expect(put).toHaveBeenCalledTimes(1);
-    expect(put).toHaveBeenCalledWith(expect.objectContaining({
-      Bucket: bucket, Key: objectKey, Body: fixture.bytes,
-      ContentType: "image/jpeg", ContentLength: fixture.sizeBytes,
-      CacheControl: "public, max-age=31536000, immutable",
-      IfNoneMatch: "*", Metadata: { sha256: fixture.contentSha256 },
-    }));
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Bucket: bucket,
+        Key: objectKey,
+        Body: fixture.bytes,
+        ContentType: "image/jpeg",
+        ContentLength: fixture.sizeBytes,
+        CacheControl: "public, max-age=31536000, immutable",
+        IfNoneMatch: "*",
+        Metadata: { sha256: fixture.contentSha256 },
+      }),
+    );
     expect(head).toHaveBeenCalledTimes(3);
   });
 
@@ -48,24 +76,46 @@ describe("ARCH-049 dedicated immutable R2 writer", () => {
     const transport: BrandR2Transport = {
       head: vi.fn(async () => {
         if (!exists) throw notFound();
-        return { ContentType: fixture.contentType, ContentLength: fixture.sizeBytes,
-          Metadata: { sha256: fixture.contentSha256 }, CacheControl: SHOP_BRAND_CACHE_CONTROL };
+        return {
+          ContentType: fixture.contentType,
+          ContentLength: fixture.sizeBytes,
+          Metadata: { sha256: fixture.contentSha256 },
+          CacheControl: SHOP_BRAND_CACHE_CONTROL,
+        };
       }),
-      put: vi.fn(async () => { exists = true; throw conflict(); }),
+      put: vi.fn(async () => {
+        exists = true;
+        throw conflict();
+      }),
     };
-    await expect(createShopBrandR2Writer(transport).putVerified({ bucket, objectKey, image: fixture }))
-      .resolves.toBeUndefined();
+    await expect(
+      createShopBrandR2Writer(transport).putVerified({
+        bucket,
+        objectKey,
+        image: fixture,
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("fails closed for an existing object with different metadata", async () => {
     const fixture = await image();
     const objectKey = `shop-brands/${normalizeShopBrandDomain("store.example.org")}/logo/sha256-${fixture.contentSha256}.jpg`;
-    const transport: BrandR2Transport = { head: async () => ({
-      ContentType: "image/jpeg", ContentLength: fixture.sizeBytes, Metadata: { sha256: "wrong" },
-      CacheControl: SHOP_BRAND_CACHE_CONTROL,
-    }), put: vi.fn() };
-    await expect(createShopBrandR2Writer(transport).putVerified({ bucket, objectKey, image: fixture }))
-      .rejects.toMatchObject({ code: "R2_OBJECT_MISMATCH" });
+    const transport: BrandR2Transport = {
+      head: async () => ({
+        ContentType: "image/jpeg",
+        ContentLength: fixture.sizeBytes,
+        Metadata: { sha256: "wrong" },
+        CacheControl: SHOP_BRAND_CACHE_CONTROL,
+      }),
+      put: vi.fn(),
+    };
+    await expect(
+      createShopBrandR2Writer(transport).putVerified({
+        bucket,
+        objectKey,
+        image: fixture,
+      }),
+    ).rejects.toMatchObject({ code: "R2_OBJECT_MISMATCH" });
     expect(transport.put).not.toHaveBeenCalled();
   });
 
@@ -73,91 +123,183 @@ describe("ARCH-049 dedicated immutable R2 writer", () => {
     const fixture = await image();
     const transport: BrandR2Transport = { head: vi.fn(), put: vi.fn() };
     const writer = createShopBrandR2Writer(transport);
-    for (const objectKey of ["shop-brands/../logo/image.jpg",
-      `shop-brands/other/logo/sha256-${fixture.contentSha256}.png`]) {
-      await expect(writer.putVerified({ bucket, objectKey, image: fixture }))
-        .rejects.toMatchObject({ code: "OUTPUT_VERIFICATION_FAILED" });
+    for (const objectKey of [
+      "shop-brands/../logo/image.jpg",
+      `shop-brands/other/logo/sha256-${fixture.contentSha256}.png`,
+    ]) {
+      await expect(
+        writer.putVerified({ bucket, objectKey, image: fixture }),
+      ).rejects.toMatchObject({ code: "OUTPUT_VERIFICATION_FAILED" });
     }
-    await expect(writer.putVerified({ bucket,
-      objectKey: `shop-brands/${normalizeShopBrandDomain("store.example.org")}/logo/sha256-${fixture.contentSha256}.jpg`,
-      image: { ...fixture, contentSha256: "0".repeat(64) } }))
-      .rejects.toMatchObject({ code: "OUTPUT_VERIFICATION_FAILED" });
+    await expect(
+      writer.putVerified({
+        bucket,
+        objectKey: `shop-brands/${normalizeShopBrandDomain("store.example.org")}/logo/sha256-${fixture.contentSha256}.jpg`,
+        image: { ...fixture, contentSha256: "0".repeat(64) },
+      }),
+    ).rejects.toMatchObject({ code: "OUTPUT_VERIFICATION_FAILED" });
     expect(transport.head).not.toHaveBeenCalled();
   });
 
   it("distinguishes R2 transient availability from permanent write denial", async () => {
     const fixture = await image();
     const objectKey = `shop-brands/${normalizeShopBrandDomain("store.example.org")}/logo/sha256-${fixture.contentSha256}.jpg`;
-    for (const [httpStatusCode, retryable] of [[503, true], [409, true], [403, false]] as const) {
+    for (const [httpStatusCode, retryable] of [
+      [503, true],
+      [409, true],
+      [403, false],
+    ] as const) {
       const writer = createShopBrandR2Writer({
-        head: async () => { throw { $metadata: { httpStatusCode } }; }, put: vi.fn(),
+        head: async () => {
+          throw { $metadata: { httpStatusCode } };
+        },
+        put: vi.fn(),
       });
-      await expect(writer.putVerified({ bucket, objectKey, image: fixture }))
-        .rejects.toMatchObject({ code: "R2_UNAVAILABLE", retryable });
+      await expect(
+        writer.putVerified({ bucket, objectKey, image: fixture }),
+      ).rejects.toMatchObject({ code: "R2_UNAVAILABLE", retryable });
     }
   });
 
   it("requires validated database credentials and a strict Cloudflare R2 HTTPS origin", () => {
-    expect(() => loadShopBrandR2Credentials({})).toThrowError(/R2_CONFIGURATION_INVALID/);
-    const safe = { endpoint: "https://account123.r2.cloudflarestorage.com", bucket: "private-knowledge",
-      accessKeyId: "platform-key", secretAccessKey: "platform-secret" };
-    expect(loadShopBrandR2Credentials(safe)).toEqual({ endpoint: safe.endpoint,
-      accessKeyId: safe.accessKeyId, secretAccessKey: safe.secretAccessKey });
-    for (const endpoint of ["http://account123.r2.cloudflarestorage.com", "https://localhost",
+    expect(() => loadShopBrandR2Credentials({})).toThrowError(
+      /R2_CONFIGURATION_INVALID/,
+    );
+    const safe = {
+      endpoint: "https://account123.r2.cloudflarestorage.com",
+      bucket: "private-knowledge",
+      accessKeyId: "platform-key",
+      secretAccessKey: "platform-secret",
+    };
+    expect(loadShopBrandR2Credentials(safe)).toEqual({
+      endpoint: safe.endpoint,
+      accessKeyId: safe.accessKeyId,
+      secretAccessKey: safe.secretAccessKey,
+    });
+    for (const endpoint of [
+      "http://account123.r2.cloudflarestorage.com",
+      "https://localhost",
       "https://user:pass@account123.r2.cloudflarestorage.com",
       "https://account123.r2.cloudflarestorage.com/private",
-      "https://account123.r2.cloudflarestorage.com?secret=yes"]) {
-      expect(() => loadShopBrandR2Credentials({ ...safe, endpoint }))
-        .toThrowError(/R2_CONFIGURATION_INVALID/);
+      "https://account123.r2.cloudflarestorage.com?secret=yes",
+    ]) {
+      expect(() =>
+        loadShopBrandR2Credentials({ ...safe, endpoint }),
+      ).toThrowError(/R2_CONFIGURATION_INVALID/);
     }
-    expect(() => loadShopBrandR2Credentials({ ...safe, accessKeyId: undefined }))
-      .toThrowError(/R2_CONFIGURATION_INVALID/);
-    expect(() => loadShopBrandR2Credentials({
-      ...safe, secretAccessKey: `secret${String.fromCharCode(1)}suffix`,
-    })).toThrowError(/R2_CONFIGURATION_INVALID/);
+    expect(() =>
+      loadShopBrandR2Credentials({ ...safe, accessKeyId: undefined }),
+    ).toThrowError(/R2_CONFIGURATION_INVALID/);
+    expect(() =>
+      loadShopBrandR2Credentials({
+        ...safe,
+        secretAccessKey: `secret${String.fromCharCode(1)}suffix`,
+      }),
+    ).toThrowError(/R2_CONFIGURATION_INVALID/);
   });
 
   it("loads validated database credentials while leaving the public bucket policy independent", () => {
-    expect(() => loadShopBrandR2Credentials({})).toThrowError(/R2_CONFIGURATION_INVALID/);
-    const safe = { endpoint: "https://account123.r2.cloudflarestorage.com", bucket: "private-knowledge",
-      accessKeyId: "platform-key", secretAccessKey: "platform-secret" };
-    expect(loadShopBrandR2Credentials(safe)).toEqual({ endpoint: safe.endpoint,
-      accessKeyId: safe.accessKeyId, secretAccessKey: safe.secretAccessKey });
-    for (const endpoint of ["http://account123.r2.cloudflarestorage.com", "https://localhost",
+    expect(() => loadShopBrandR2Credentials({})).toThrowError(
+      /R2_CONFIGURATION_INVALID/,
+    );
+    const safe = {
+      endpoint: "https://account123.r2.cloudflarestorage.com",
+      bucket: "private-knowledge",
+      accessKeyId: "platform-key",
+      secretAccessKey: "platform-secret",
+    };
+    expect(loadShopBrandR2Credentials(safe)).toEqual({
+      endpoint: safe.endpoint,
+      accessKeyId: safe.accessKeyId,
+      secretAccessKey: safe.secretAccessKey,
+    });
+    for (const endpoint of [
+      "http://account123.r2.cloudflarestorage.com",
+      "https://localhost",
       "https://user:pass@account123.r2.cloudflarestorage.com",
       "https://account123.r2.cloudflarestorage.com/private",
-      "https://account123.r2.cloudflarestorage.com?secret=yes"]) {
-      expect(() => loadShopBrandR2Credentials({ ...safe, endpoint }))
-        .toThrowError(/R2_CONFIGURATION_INVALID/);
+      "https://account123.r2.cloudflarestorage.com?secret=yes",
+    ]) {
+      expect(() =>
+        loadShopBrandR2Credentials({ ...safe, endpoint }),
+      ).toThrowError(/R2_CONFIGURATION_INVALID/);
     }
-    expect(() => loadShopBrandR2Credentials({ ...safe, accessKeyId: undefined }))
-      .toThrowError(/R2_CONFIGURATION_INVALID/);
-    expect(() => loadShopBrandR2Credentials({
-      ...safe, secretAccessKey: `secret${String.fromCharCode(1)}suffix`,
-    })).toThrowError(/R2_CONFIGURATION_INVALID/);
+    expect(() =>
+      loadShopBrandR2Credentials({ ...safe, accessKeyId: undefined }),
+    ).toThrowError(/R2_CONFIGURATION_INVALID/);
+    expect(() =>
+      loadShopBrandR2Credentials({
+        ...safe,
+        secretAccessKey: `secret${String.fromCharCode(1)}suffix`,
+      }),
+    ).toThrowError(/R2_CONFIGURATION_INVALID/);
   });
 
   it("redacts R2 credentials and authorization values from bounded provider messages", () => {
-    const credentials = { endpoint: "https://account123.r2.cloudflarestorage.com",
-      accessKeyId: "platform-key", secretAccessKey: "platform-secret" };
-    const message = new Error("Access denied for platform-key; secret=platform-secret Authorization: Bearer top-secret");
-    expect(sanitizeR2ProviderMessage(message, credentials))
-      .toBe("Access denied for [REDACTED]; secret=[REDACTED] Authorization: [REDACTED]");
-    expect(sanitizeR2ProviderMessage(new Error("request ?X-Amz-Signature=signed-value&token=query-secret"), credentials))
-      .toBe("request ?X-Amz-Signature=[REDACTED]&token=[REDACTED]");
-    expect(sanitizeR2ProviderMessage(new Error("x".repeat(500)), credentials)).toHaveLength(300);
-    expect(sanitizeR2ProviderMessage({ name: "AccessDenied" }, credentials)).toBeUndefined();
+    const credentials = {
+      endpoint: "https://account123.r2.cloudflarestorage.com",
+      accessKeyId: "platform-key",
+      secretAccessKey: "platform-secret",
+    };
+    const message = new Error(
+      "Access denied for platform-key; secret=platform-secret Authorization: Bearer top-secret",
+    );
+    expect(sanitizeR2ProviderMessage(message, credentials)).toBe(
+      "Access denied for [REDACTED]; secret=[REDACTED] Authorization: [REDACTED]",
+    );
+    expect(
+      sanitizeR2ProviderMessage(
+        new Error("request ?X-Amz-Signature=signed-value&token=query-secret"),
+        credentials,
+      ),
+    ).toBe("request ?X-Amz-Signature=[REDACTED]&token=[REDACTED]");
+    expect(
+      sanitizeR2ProviderMessage(new Error("x".repeat(500)), credentials),
+    ).toHaveLength(300);
+    expect(
+      sanitizeR2ProviderMessage({ name: "AccessDenied" }, credentials),
+    ).toBeUndefined();
   });
 });
 
-describe('platform-owned expected dimensions',()=>{
- it('defaults to brand canvas and permits bounded explicit sample dimensions',async()=>{
- const fixture=await image();fixture.width=505;fixture.height=757;
- const head=vi.fn(async()=>({ContentType:fixture.contentType,ContentLength:fixture.sizeBytes,CacheControl:SHOP_BRAND_CACHE_CONTROL,Metadata:{sha256:fixture.contentSha256}}));
- const input={transportOrFactory:{head,put:vi.fn()},bucket,objectKey:'platform-fixed',image:fixture,acceptsKey:(key:string)=>key==='platform-fixed'};
- await expect(putGuardedImmutableR2Object(input)).rejects.toMatchObject({code:'OUTPUT_VERIFICATION_FAILED'});
- await expect(putGuardedImmutableR2Object({...input,expectedDimensions:{width:505,height:757}})).resolves.toBeUndefined();
- for(const dimensions of [{width:0,height:757},{width:1.5,height:757},{width:40000001,height:1}])await expect(putGuardedImmutableR2Object({...input,expectedDimensions:dimensions})).rejects.toMatchObject({code:'OUTPUT_VERIFICATION_FAILED'});
- expect(head).toHaveBeenCalledOnce();
- });
+describe("platform-owned expected dimensions", () => {
+  it("defaults to brand canvas and permits bounded explicit sample dimensions", async () => {
+    const fixture = await image();
+    fixture.width = 505;
+    fixture.height = 757;
+    const head = vi.fn(async () => ({
+      ContentType: fixture.contentType,
+      ContentLength: fixture.sizeBytes,
+      CacheControl: SHOP_BRAND_CACHE_CONTROL,
+      Metadata: { sha256: fixture.contentSha256 },
+    }));
+    const input = {
+      transportOrFactory: { head, put: vi.fn() },
+      bucket,
+      objectKey: "platform-fixed",
+      image: fixture,
+      acceptsKey: (key: string) => key === "platform-fixed",
+    };
+    await expect(putGuardedImmutableR2Object(input)).rejects.toMatchObject({
+      code: "OUTPUT_VERIFICATION_FAILED",
+    });
+    await expect(
+      putGuardedImmutableR2Object({
+        ...input,
+        expectedDimensions: { width: 505, height: 757 },
+      }),
+    ).resolves.toBeUndefined();
+    for (const dimensions of [
+      { width: 0, height: 757 },
+      { width: 1.5, height: 757 },
+      { width: 40000001, height: 1 },
+    ])
+      await expect(
+        putGuardedImmutableR2Object({
+          ...input,
+          expectedDimensions: dimensions,
+        }),
+      ).rejects.toMatchObject({ code: "OUTPUT_VERIFICATION_FAILED" });
+    expect(head).toHaveBeenCalledOnce();
+  });
 });

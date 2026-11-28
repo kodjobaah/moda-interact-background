@@ -8,7 +8,9 @@ const configuration = {
   schemaVersion: 1,
   maxKnowledgeSources: 2,
   maxContentUnitsPerSource: 10,
-  allowedSourceTypes: [{ purposeKey: "COMPANY_INFORMATION", dataFormatKey: "WEB_PAGE" }],
+  allowedSourceTypes: [
+    { purposeKey: "COMPANY_INFORMATION", dataFormatKey: "WEB_PAGE" },
+  ],
 };
 
 function createHarness(options?: {
@@ -27,7 +29,8 @@ function createHarness(options?: {
   const activeRevision = {
     id: "active-1",
     generation: 2,
-    contentUnits: options && "contentUnits" in options ? options.contentUnits : 14,
+    contentUnits:
+      options && "contentUnits" in options ? options.contentUnits : 14,
     requestedUrl: "https://merchant.example/policies",
     uploadedAssetId: null,
   };
@@ -38,13 +41,15 @@ function createHarness(options?: {
         status: "ACTIVE",
         planId: "plan-1",
         plan: {
-          features: [{
-            configuration,
-            feature: {
-              activationMode: "MERCHANT_OPT_IN",
-              shopPreferences: [{ enabled: true }],
+          features: [
+            {
+              configuration,
+              feature: {
+                activationMode: "MERCHANT_OPT_IN",
+                shopPreferences: [{ enabled: true }],
+              },
             },
-          }],
+          ],
         },
       }),
     },
@@ -61,14 +66,27 @@ function createHarness(options?: {
       updateMany: sourceUpdateMany,
     },
     merchantKnowledgeSourceRevision: {
-      findFirst: vi.fn().mockImplementation(async ({ where }) =>
-        where.status === "ACTIVE" ? activeRevision : options?.newerWork ?? null),
+      findFirst: vi
+        .fn()
+        .mockImplementation(async ({ where }) =>
+          where.status === "ACTIVE"
+            ? activeRevision
+            : (options?.newerWork ?? null),
+        ),
       create: revisionCreate,
     },
   };
-  const subscriptionFindMany = vi.fn().mockResolvedValue([{ shopId: "shop-1" }]);
-  const sourceFindMany = vi.fn().mockResolvedValue((options?.sourceIds ?? ["source-1"]).map((id) => ({ id })));
-  const transaction = vi.fn(async (callback: (transactionClient: unknown) => unknown) => callback(tx));
+  const subscriptionFindMany = vi
+    .fn()
+    .mockResolvedValue([{ shopId: "shop-1" }]);
+  const sourceFindMany = vi
+    .fn()
+    .mockResolvedValue(
+      (options?.sourceIds ?? ["source-1"]).map((id) => ({ id })),
+    );
+  const transaction = vi.fn(
+    async (callback: (transactionClient: unknown) => unknown) => callback(tx),
+  );
   const add = options?.queueError
     ? vi.fn().mockRejectedValue(options.queueError)
     : vi.fn().mockResolvedValue(undefined);
@@ -116,19 +134,21 @@ describe("MerchantKnowledgeEntitlementReconciliationService", () => {
       sourceCountDormant: 0,
       enqueueFailures: 0,
     });
-    expect(harness.subscriptionFindMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        shop: {
-          is: {
-            featurePreferences: {
-              some: expect.objectContaining({ enabled: true }),
+    expect(harness.subscriptionFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          shop: {
+            is: {
+              featurePreferences: {
+                some: expect.objectContaining({ enabled: true }),
+              },
             },
           },
-        },
+        }),
+        orderBy: { shopId: "asc" },
+        take: 100,
       }),
-      orderBy: { shopId: "asc" },
-      take: 100,
-    }));
+    );
     expect(harness.tx.$queryRaw).toHaveBeenCalledOnce();
     expect(harness.sourceUpdateMany).toHaveBeenCalledWith({
       where: { id: "source-1", currentGeneration: 2 },
@@ -152,16 +172,19 @@ describe("MerchantKnowledgeEntitlementReconciliationService", () => {
     });
   });
 
-  it.each([10, 7, null])("does nothing when content units are equal to, below, or unavailable against the limit (%s)", async (contentUnits) => {
-    harness = createHarness({ contentUnits });
-    await expect(harness.service.reconcileOnce()).resolves.toMatchObject({
-      contentLimitRevisionsCreated: 0,
-      enqueueFailures: 0,
-    });
-    expect(harness.sourceUpdateMany).not.toHaveBeenCalled();
-    expect(harness.revisionCreate).not.toHaveBeenCalled();
-    expect(harness.add).not.toHaveBeenCalled();
-  });
+  it.each([10, 7, null])(
+    "does nothing when content units are equal to, below, or unavailable against the limit (%s)",
+    async (contentUnits) => {
+      harness = createHarness({ contentUnits });
+      await expect(harness.service.reconcileOnce()).resolves.toMatchObject({
+        contentLimitRevisionsCreated: 0,
+        enqueueFailures: 0,
+      });
+      expect(harness.sourceUpdateMany).not.toHaveBeenCalled();
+      expect(harness.revisionCreate).not.toHaveBeenCalled();
+      expect(harness.add).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not create a duplicate when newer PENDING or PROCESSING work exists", async () => {
     for (const status of ["PENDING", "PROCESSING"] as const) {
@@ -185,7 +208,8 @@ describe("MerchantKnowledgeEntitlementReconciliationService", () => {
   });
 
   it("advances bounded shop scans with a keyset cursor and resets after the final page", async () => {
-    const subscriptionFindMany = vi.fn()
+    const subscriptionFindMany = vi
+      .fn()
       .mockResolvedValueOnce([{ shopId: "shop-a" }])
       .mockResolvedValueOnce([{ shopId: "shop-b" }])
       .mockResolvedValueOnce([]);
@@ -200,19 +224,28 @@ describe("MerchantKnowledgeEntitlementReconciliationService", () => {
     });
     await service.reconcileOnce({ shopPageSize: 1 });
     await service.reconcileOnce({ shopPageSize: 1 });
-    expect(subscriptionFindMany.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
-      where: expect.objectContaining({ shopId: { gt: "shop-a" } }),
-    }));
+    expect(subscriptionFindMany.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        where: expect.objectContaining({ shopId: { gt: "shop-a" } }),
+      }),
+    );
     await service.reconcileOnce({ shopPageSize: 1 });
     subscriptionFindMany.mockResolvedValueOnce([{ shopId: "shop-a" }]);
     await service.reconcileOnce({ shopPageSize: 1 });
-    expect(subscriptionFindMany.mock.calls[3]?.[0]).toEqual(expect.objectContaining({
-      where: expect.not.objectContaining({ shopId: expect.anything() }),
-    }));
+    expect(subscriptionFindMany.mock.calls[3]?.[0]).toEqual(
+      expect.objectContaining({
+        where: expect.not.objectContaining({ shopId: expect.anything() }),
+      }),
+    );
   });
 
-  it.each([0, -1, 501, 1.5])("rejects invalid shop page size %s", async (shopPageSize) => {
-    await expect(harness.service.reconcileOnce({ shopPageSize })).rejects.toThrow(RangeError);
-    expect(harness.subscriptionFindMany).not.toHaveBeenCalled();
-  });
+  it.each([0, -1, 501, 1.5])(
+    "rejects invalid shop page size %s",
+    async (shopPageSize) => {
+      await expect(
+        harness.service.reconcileOnce({ shopPageSize }),
+      ).rejects.toThrow(RangeError);
+      expect(harness.subscriptionFindMany).not.toHaveBeenCalled();
+    },
+  );
 });

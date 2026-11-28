@@ -33,8 +33,14 @@ type CandidateLifecycleQueue = {
 };
 
 type CandidateLifecycleIndexStore = {
-  findByCheckout(input: { shopId: string; checkoutToken: string }): Promise<string | null>;
-  findByCart(input: { shopId: string; cartToken: string }): Promise<string | null>;
+  findByCheckout(input: {
+    shopId: string;
+    checkoutToken: string;
+  }): Promise<string | null>;
+  findByCart(input: {
+    shopId: string;
+    cartToken: string;
+  }): Promise<string | null>;
   removeCartAlias(shopId: string, cartToken: string): Promise<unknown>;
   upsert(input: {
     candidate: PendingRecoveryCandidate;
@@ -44,7 +50,10 @@ type CandidateLifecycleIndexStore = {
     shouldIndexShop: boolean;
   }): Promise<unknown>;
   remove(
-    candidate: Pick<PendingRecoveryCandidate, "shopId" | "checkoutToken" | "cartToken">,
+    candidate: Pick<
+      PendingRecoveryCandidate,
+      "shopId" | "checkoutToken" | "cartToken"
+    >,
     jobId?: string,
   ): Promise<unknown>;
 };
@@ -114,20 +123,19 @@ export class PendingRecoveryCandidateLifecycleService {
       candidate.checkoutToken,
     )}`;
     const fallbackJob = indexed ? null : await queue.getJob(baseJobId);
-    const current = indexed ?? (fallbackJob
-      ? { jobId: baseJobId, candidate: fallbackJob.data }
-      : null);
+    const current =
+      indexed ??
+      (fallbackJob ? { jobId: baseJobId, candidate: fallbackJob.data } : null);
     const currentJob = current ? await queue.getJob(current.jobId) : null;
     const currentState = currentJob ? await currentJob.getState() : null;
     const successorJobId = `${baseJobId}--update-${Date.parse(candidate.lastActivityAt ?? "")}`;
 
-    if (
-      current
-      && currentJob
-      && currentState === "delayed"
-    ) {
+    if (current && currentJob && currentState === "delayed") {
       const refreshed = this.mergeUpdate(candidate, current.candidate);
-      if (current.candidate.cartToken && current.candidate.cartToken !== refreshed.cartToken) {
+      if (
+        current.candidate.cartToken &&
+        current.candidate.cartToken !== refreshed.cartToken
+      ) {
         await this.dependencies.candidateIndexStore.removeCartAlias(
           candidate.shopId,
           current.candidate.cartToken,
@@ -135,16 +143,20 @@ export class PendingRecoveryCandidateLifecycleService {
       }
       await currentJob.updateData(refreshed);
       if (currentState === "delayed") {
-        const dueAtMs = candidateActivityDueAtMs(refreshed.lastActivityAt, delayMinutes);
+        const dueAtMs = candidateActivityDueAtMs(
+          refreshed.lastActivityAt,
+          delayMinutes,
+        );
         await currentJob.changeDelay(Math.max(0, dueAtMs - Date.now()));
       }
       await this.dependencies.candidateIndexStore.upsert({
         candidate: refreshed,
         jobId: current.jobId,
         delayMinutes,
-        dueAtMs: currentState === "delayed"
-          ? candidateActivityDueAtMs(refreshed.lastActivityAt, delayMinutes)
-          : Date.now(),
+        dueAtMs:
+          currentState === "delayed"
+            ? candidateActivityDueAtMs(refreshed.lastActivityAt, delayMinutes)
+            : Date.now(),
         shouldIndexShop: true,
       });
       return {
@@ -169,17 +181,21 @@ export class PendingRecoveryCandidateLifecycleService {
       candidate,
       targetJob?.data ?? current?.candidate,
     );
-    const previousCartToken = targetJob?.data.cartToken ?? current?.candidate.cartToken;
+    const previousCartToken =
+      targetJob?.data.cartToken ?? current?.candidate.cartToken;
     if (previousCartToken && previousCartToken !== updatedCandidate.cartToken) {
       await this.dependencies.candidateIndexStore.removeCartAlias(
         candidate.shopId,
         previousCartToken,
       );
     }
-    const dueAtMs = candidateActivityDueAtMs(updatedCandidate.lastActivityAt, delayMinutes);
+    const dueAtMs = candidateActivityDueAtMs(
+      updatedCandidate.lastActivityAt,
+      delayMinutes,
+    );
     if (targetJob) {
       await targetJob.updateData(updatedCandidate);
-      if (await targetJob.getState() === "delayed") {
+      if ((await targetJob.getState()) === "delayed") {
         await targetJob.changeDelay(Math.max(0, dueAtMs - Date.now()));
       }
     } else {
@@ -196,7 +212,7 @@ export class PendingRecoveryCandidateLifecycleService {
       shouldIndexShop: true,
     });
     return {
-      outcome: targetJob ? "refreshed" as const : "enqueued" as const,
+      outcome: targetJob ? ("refreshed" as const) : ("enqueued" as const),
       jobId,
       delayMinutes,
       candidate: updatedCandidate,
@@ -207,7 +223,10 @@ export class PendingRecoveryCandidateLifecycleService {
     const job = await this.dependencies.getQueue().getJob(input.jobId);
     if (job) await job.remove();
 
-    await this.dependencies.candidateIndexStore.remove(input.candidate, input.jobId);
+    await this.dependencies.candidateIndexStore.remove(
+      input.candidate,
+      input.jobId,
+    );
     return { removed: true } as const;
   }
 
@@ -278,9 +297,9 @@ export class PendingRecoveryCandidateLifecycleService {
     matched: ResolvedCandidate | null,
   ): matched is ResolvedCandidate {
     return Boolean(
-      matched
-      && matched.candidate.shopId === input.shopId
-      && matched.candidate.cartToken === input.cartToken,
+      matched &&
+      matched.candidate.shopId === input.shopId &&
+      matched.candidate.cartToken === input.cartToken,
     );
   }
 
@@ -292,12 +311,10 @@ export class PendingRecoveryCandidateLifecycleService {
       ...existing,
       ...incoming,
       cartToken: incoming.cartToken ?? existing?.cartToken ?? null,
-      abandonedCheckoutUrl: incoming.abandonedCheckoutUrl
-        ?? existing?.abandonedCheckoutUrl
-        ?? null,
-      checkoutCreatedAt: incoming.checkoutCreatedAt
-        ?? existing?.checkoutCreatedAt
-        ?? null,
+      abandonedCheckoutUrl:
+        incoming.abandonedCheckoutUrl ?? existing?.abandonedCheckoutUrl ?? null,
+      checkoutCreatedAt:
+        incoming.checkoutCreatedAt ?? existing?.checkoutCreatedAt ?? null,
       ...optionalCandidateInternationalContext(
         mergeCandidateInternationalContext(
           existing?.internationalContext,
@@ -311,8 +328,11 @@ export class PendingRecoveryCandidateLifecycleService {
     };
     // Only new activity resets the visibility deadline. Stale webhook delivery
     // cannot extend an existing verification retry indefinitely.
-    if (!existing || Date.parse(incoming.lastActivityAt ?? "") >
-        Date.parse(existing.lastActivityAt ?? existing.checkoutCreatedAt ?? "")) {
+    if (
+      !existing ||
+      Date.parse(incoming.lastActivityAt ?? "") >
+        Date.parse(existing.lastActivityAt ?? existing.checkoutCreatedAt ?? "")
+    ) {
       delete merged.shopifyVerification;
     }
     return merged;

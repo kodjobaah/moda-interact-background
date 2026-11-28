@@ -13,15 +13,23 @@ function currentRecovery(admissionBlockReason: string | null = null) {
 
 describe("RecoveryRecipientSuppressionAdmissionService", () => {
   it("looks up only the exact Shop and canonical recipient key", async () => {
-    const findUnique = vi.fn(async () => ({ suppressUntil: new Date("2026-10-12T00:00:00Z") }));
+    const findUnique = vi.fn(async () => ({
+      suppressUntil: new Date("2026-10-12T00:00:00Z"),
+    }));
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique },
     } as never);
 
-    await service.evaluate("shop-1", "15551234567", new Date("2026-10-11T00:00:00Z"));
+    await service.evaluate(
+      "shop-1",
+      "15551234567",
+      new Date("2026-10-11T00:00:00Z"),
+    );
 
     expect(findUnique).toHaveBeenCalledWith({
-      where: { shopId_recipient: { shopId: "shop-1", recipient: "15551234567" } },
+      where: {
+        shopId_recipient: { shopId: "shop-1", recipient: "15551234567" },
+      },
       select: { suppressUntil: true },
     });
   });
@@ -34,8 +42,13 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
       },
     } as never);
 
-    await expect(service.evaluate("shop-1", "15551234567", new Date("2026-10-11T00:00:00Z")))
-      .resolves.toEqual({ kind: "suppressed", until });
+    await expect(
+      service.evaluate(
+        "shop-1",
+        "15551234567",
+        new Date("2026-10-11T00:00:00Z"),
+      ),
+    ).resolves.toEqual({ kind: "suppressed", until });
   });
 
   it.each([
@@ -48,8 +61,13 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
       },
     } as never);
 
-    await expect(service.evaluate("shop-1", "15551234567", new Date("2026-10-11T00:00:00Z")))
-      .resolves.toEqual({ kind: "allowed" });
+    await expect(
+      service.evaluate(
+        "shop-1",
+        "15551234567",
+        new Date("2026-10-11T00:00:00Z"),
+      ),
+    ).resolves.toEqual({ kind: "allowed" });
   });
 
   it("schedules the expiry wake-up before durably blocking the eligible recovery", async () => {
@@ -64,7 +82,9 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
       },
     } as never);
 
-    await expect(service.deferDetectedRecovery("recovery-1", "shop-1", until)).resolves.toBe(true);
+    await expect(
+      service.deferDetectedRecovery("recovery-1", "shop-1", until),
+    ).resolves.toBe(true);
 
     expect(updateMany).toHaveBeenCalledWith({
       where: { id: "recovery-1", status: "DETECTED", updatedAt },
@@ -73,11 +93,14 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
         admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
       },
     });
-    expect(schedule).toHaveBeenCalledWith({
-      shopId: "shop-1",
-      recoveryId: "recovery-1",
-      trigger: `recipient-suppression-recovery-1-${until.getTime()}`,
-    }, until);
+    expect(schedule).toHaveBeenCalledWith(
+      {
+        shopId: "shop-1",
+        recoveryId: "recovery-1",
+        trigger: `recipient-suppression-recovery-1-${until.getTime()}`,
+      },
+      until,
+    );
   });
 
   it("does not persist a suppression block when expiry scheduling fails", async () => {
@@ -93,11 +116,13 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
       },
     } as never);
 
-    await expect(service.deferDetectedRecovery(
-      "recovery-1",
-      "shop-1",
-      new Date("2026-10-12T00:00:00Z"),
-    )).rejects.toMatchObject({
+    await expect(
+      service.deferDetectedRecovery(
+        "recovery-1",
+        "shop-1",
+        new Date("2026-10-12T00:00:00Z"),
+      ),
+    ).rejects.toMatchObject({
       message: "RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED",
       cause: enqueueError,
     });
@@ -109,16 +134,21 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
       checkoutRecovery: {
-        findUnique: vi.fn(async () => ({ ...currentRecovery(), status: "CANCELLED" })),
+        findUnique: vi.fn(async () => ({
+          ...currentRecovery(),
+          status: "CANCELLED",
+        })),
         updateMany: vi.fn(async () => ({ count: 0 })),
       },
     } as never);
 
-    await expect(service.deferDetectedRecovery(
-      "recovery-1",
-      "shop-1",
-      new Date("2026-10-12T00:00:00Z"),
-    )).resolves.toBe(false);
+    await expect(
+      service.deferDetectedRecovery(
+        "recovery-1",
+        "shop-1",
+        new Date("2026-10-12T00:00:00Z"),
+      ),
+    ).resolves.toBe(false);
     expect(schedule).toHaveBeenCalledOnce();
   });
 
@@ -155,8 +185,18 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     const activeTrigger = `recipient-suppression-recovery-1-${until.getTime()}`;
 
     await Promise.all([
-      service.deferDetectedRecovery("recovery-1", "shop-1", until, activeTrigger),
-      service.deferDetectedRecovery("recovery-1", "shop-1", until, activeTrigger),
+      service.deferDetectedRecovery(
+        "recovery-1",
+        "shop-1",
+        until,
+        activeTrigger,
+      ),
+      service.deferDetectedRecovery(
+        "recovery-1",
+        "shop-1",
+        until,
+        activeTrigger,
+      ),
     ]);
 
     expect(schedule).toHaveBeenCalledTimes(2);
@@ -169,7 +209,9 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
       checkoutRecovery: {
-        findUnique: vi.fn(async () => currentRecovery("WHATSAPP_RECIPIENT_SUPPRESSED")),
+        findUnique: vi.fn(async () =>
+          currentRecovery("WHATSAPP_RECIPIENT_SUPPRESSED"),
+        ),
         updateMany,
       },
     } as never);

@@ -83,9 +83,10 @@ export class RecoveryCapacityAdmissionService {
       policy.billingPeriod?.phase === "ACTIVE" &&
       policy.subscriptionStatus !== "FROZEN"
     ) {
-      const paid = await this.paidIncludedReservationService.reserve(
-        { shopId, sourceKey },
-      );
+      const paid = await this.paidIncludedReservationService.reserve({
+        shopId,
+        sourceKey,
+      });
       if (isPaidIncludedAdmission(paid)) {
         return {
           kind: "admitted",
@@ -98,8 +99,15 @@ export class RecoveryCapacityAdmissionService {
       return { kind: "blocked", reason: "reservation-in-flight" };
     }
 
-    const fallback = await this.admitDurableFallbacks(shopId, sourceKey, policy);
-    if (fallback.kind === "admitted" || fallback.reason !== "capacity-exhausted") {
+    const fallback = await this.admitDurableFallbacks(
+      shopId,
+      sourceKey,
+      policy,
+    );
+    if (
+      fallback.kind === "admitted" ||
+      fallback.reason !== "capacity-exhausted"
+    ) {
       return fallback;
     }
 
@@ -160,7 +168,10 @@ export class RecoveryCapacityAdmissionService {
 
 function isPaidIncludedAdmission(
   reservation: PaidIncludedReservationOutcome,
-): reservation is Extract<PaidIncludedReservationOutcome, { sourceKey: string }> {
+): reservation is Extract<
+  PaidIncludedReservationOutcome,
+  { sourceKey: string }
+> {
   return (
     reservation.kind === "reserved" ||
     reservation.kind === "already-reserved" ||

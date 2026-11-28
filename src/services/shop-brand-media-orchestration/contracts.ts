@@ -1,15 +1,25 @@
 /** ARCH-049 ShopBrand JSONB v1. No separate asset table or queue acceptance point. */
-import type { ShopBrandImageRole, ShopBrandMediaResult } from "../shop-brand-media/contracts.js";
+import type {
+  ShopBrandImageRole,
+  ShopBrandMediaResult,
+} from "../shop-brand-media/contracts.js";
 
 export type BrandRole = ShopBrandImageRole;
-export const BRAND_ROLES: readonly BrandRole[] = ["LOGO", "SQUARE_LOGO", "COVER_IMAGE"];
-export const MEDIA_RETRY_DELAYS_MS = [60_000, 300_000, 1_800_000, 7_200_000, 86_400_000] as const;
+export const BRAND_ROLES: readonly BrandRole[] = [
+  "LOGO",
+  "SQUARE_LOGO",
+  "COVER_IMAGE",
+];
+export const MEDIA_RETRY_DELAYS_MS = [
+  60_000, 300_000, 1_800_000, 7_200_000, 86_400_000,
+] as const;
 export const MEDIA_MAX_ATTEMPTS = 5;
 export const MEDIA_LEASE_MS = 10 * 60_000;
 export const MEDIA_RECHECK_MS = 7 * 24 * 60 * 60_000;
 export const MEDIA_SCAN_INTERVAL_MS = 5 * 60_000;
 
-export type BrandStatus = "MISSING" | "PENDING" | "PROCESSING" | "READY" | "FAILED";
+export type BrandStatus =
+  "MISSING" | "PENDING" | "PROCESSING" | "READY" | "FAILED";
 
 export interface SourceObservation {
   shopId: string;
@@ -89,7 +99,10 @@ export interface BrandOutcome {
 }
 
 export class BrandStateError extends Error {
-  constructor(readonly code: "INVALID_OBSERVATION" | "UNSUPPORTED_SCHEMA" | "INVALID_STORED_STATE") {
+  constructor(
+    readonly code:
+      "INVALID_OBSERVATION" | "UNSUPPORTED_SCHEMA" | "INVALID_STORED_STATE",
+  ) {
     super(code);
     this.name = "BrandStateError";
   }

@@ -2,9 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 // Unit-only trusted credential fixture. Production must always read the Commerce row;
 // deliberately setting OPENAI_API_KEY in these tests is NOT an allowed fallback.
-vi.mock("../../../src/services/platform-configuration/support-translation.js", () => ({
-  readSupportTranslationCredential: vi.fn(async () => "unit-test-commerce-credential"),
-}));
+vi.mock(
+  "../../../src/services/platform-configuration/support-translation.js",
+  () => ({
+    readSupportTranslationCredential: vi.fn(
+      async () => "unit-test-commerce-credential",
+    ),
+  }),
+);
 
 process.env.REDIS_URL ??= "redis://localhost:6379/translation-poll-tests";
 process.env.OPENAI_API_KEY ??= "test-key";
@@ -25,15 +30,19 @@ type Batch = {
 function createDatabase(batch: Batch, nextSequence = batch.pollSequence + 1) {
   const query = vi.fn();
   const execute = vi.fn(async () => 1);
-  const transaction = vi.fn(async (callback: (transaction: unknown) => Promise<unknown>) =>
-    callback({ $queryRaw: query, $executeRaw: execute }));
+  const transaction = vi.fn(
+    async (callback: (transaction: unknown) => Promise<unknown>) =>
+      callback({ $queryRaw: query, $executeRaw: execute }),
+  );
   query
     .mockResolvedValueOnce([batch])
     .mockResolvedValue([{ pollSequence: nextSequence }]);
   return { database: { $transaction: transaction }, query, execute };
 }
 
-function provider(status: "nonterminal" | "completed" | "failed" = "nonterminal") {
+function provider(
+  status: "nonterminal" | "completed" | "failed" = "nonterminal",
+) {
   return {
     retrieveBatch: vi.fn(async () => ({
       provider: "openai" as const,
@@ -64,12 +73,14 @@ function sqlText(query: { strings: readonly string[] }): string {
 }
 
 function runtimeConfig(overrides: Record<string, number> = {}) {
-  return { current: vi.fn(() => ({
-    translationPollIntervalSeconds: 300,
-    translationResultRetrySeconds: 300,
-    translationMaxAutoRetries: 3,
-    ...overrides,
-  })) } as any;
+  return {
+    current: vi.fn(() => ({
+      translationPollIntervalSeconds: 300,
+      translationResultRetrySeconds: 300,
+      translationMaxAutoRetries: 3,
+      ...overrides,
+    })),
+  } as any;
 }
 
 function changingRuntimeConfig() {
@@ -79,7 +90,9 @@ function changingRuntimeConfig() {
     translationMaxAutoRetries: 3,
   };
   const second = { ...first, translationPollIntervalSeconds: 60 };
-  return { current: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } as any;
+  return {
+    current: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second),
+  } as any;
 }
 
 describe("TranslationBatchPollService", () => {
@@ -93,8 +106,13 @@ describe("TranslationBatchPollService", () => {
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
-      .resolves.toEqual({ status: "stale", batchId: "batch-1" });
+    await expect(
+      service.poll({
+        schemaVersion: 1,
+        translationBatchId: "batch-1",
+        pollSequence: 4,
+      }),
+    ).resolves.toEqual({ status: "stale", batchId: "batch-1" });
     expect(currentProvider.retrieveBatch).not.toHaveBeenCalled();
   });
 
@@ -109,8 +127,17 @@ describe("TranslationBatchPollService", () => {
       runtimeConfig: runtimeConfig({ translationPollIntervalSeconds: 420 }),
     });
 
-    await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
-      .resolves.toEqual({ status: "rescheduled", batchId: "batch-1", pollSequence: 5 });
+    await expect(
+      service.poll({
+        schemaVersion: 1,
+        translationBatchId: "batch-1",
+        pollSequence: 4,
+      }),
+    ).resolves.toEqual({
+      status: "rescheduled",
+      batchId: "batch-1",
+      pollSequence: 5,
+    });
     expect(add).toHaveBeenCalledWith(
       "translation-batch-poll",
       { schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 5 },
@@ -129,7 +156,11 @@ describe("TranslationBatchPollService", () => {
       runtimeConfig: config,
     });
 
-    await service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 });
+    await service.poll({
+      schemaVersion: 1,
+      translationBatchId: "batch-1",
+      pollSequence: 4,
+    });
 
     expect(config.current).toHaveBeenCalledTimes(1);
     const persisted = database.query.mock.calls[1]?.[0];
@@ -153,8 +184,13 @@ describe("TranslationBatchPollService", () => {
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
-      .resolves.toMatchObject({ status: "rescheduled", pollSequence: 5 });
+    await expect(
+      service.poll({
+        schemaVersion: 1,
+        translationBatchId: "batch-1",
+        pollSequence: 4,
+      }),
+    ).resolves.toMatchObject({ status: "rescheduled", pollSequence: 5 });
     expect(database.execute).not.toHaveBeenCalled();
     expect(add).toHaveBeenCalledTimes(1);
   });
@@ -172,7 +208,11 @@ describe("TranslationBatchPollService", () => {
       runtimeConfig: config,
     });
 
-    await service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 });
+    await service.poll({
+      schemaVersion: 1,
+      translationBatchId: "batch-1",
+      pollSequence: 4,
+    });
 
     expect(config.current).toHaveBeenCalledTimes(1);
     const persisted = database.query.mock.calls[1]?.[0];
@@ -188,15 +228,20 @@ describe("TranslationBatchPollService", () => {
     const database = createDatabase(batch);
     const add = vi.fn();
     const currentProvider = provider("completed");
-     const service = new TranslationBatchPollService({
-       database: database.database,
-       providerFactory: vi.fn(() => currentProvider as never),
-       queue: { add },
-       runtimeConfig: runtimeConfig(),
-     });
+    const service = new TranslationBatchPollService({
+      database: database.database,
+      providerFactory: vi.fn(() => currentProvider as never),
+      queue: { add },
+      runtimeConfig: runtimeConfig(),
+    });
 
-    await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
-      .resolves.toEqual({ status: "completed", batchId: "batch-1" });
+    await expect(
+      service.poll({
+        schemaVersion: 1,
+        translationBatchId: "batch-1",
+        pollSequence: 4,
+      }),
+    ).resolves.toEqual({ status: "completed", batchId: "batch-1" });
     expect(database.execute).toHaveBeenCalledTimes(1);
     expect(add).toHaveBeenCalledWith(
       "translation-batch-results",
@@ -206,18 +251,23 @@ describe("TranslationBatchPollService", () => {
   });
 
   it("retains terminal Batch history and bounds affected translation retry", async () => {
-    const query = vi.fn()
+    const query = vi
+      .fn()
       .mockResolvedValueOnce([batch])
-      .mockResolvedValueOnce([{
-        translationId: "translation-1",
-        messageId: "message-1",
-        kind: "MERCHANT",
-        retryCount: 0,
-      }]);
+      .mockResolvedValueOnce([
+        {
+          translationId: "translation-1",
+          messageId: "message-1",
+          kind: "MERCHANT",
+          retryCount: 0,
+        },
+      ]);
     const execute = vi.fn(async () => 1);
     const database = {
-      $transaction: vi.fn(async (callback: (transaction: unknown) => Promise<unknown>) =>
-        callback({ $queryRaw: query, $executeRaw: execute })),
+      $transaction: vi.fn(
+        async (callback: (transaction: unknown) => Promise<unknown>) =>
+          callback({ $queryRaw: query, $executeRaw: execute }),
+      ),
     };
     const currentProvider = provider("failed");
     const service = new TranslationBatchPollService({
@@ -227,14 +277,27 @@ describe("TranslationBatchPollService", () => {
       runtimeConfig: runtimeConfig({ translationMaxAutoRetries: 0 }),
     });
 
-    await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
-      .resolves.toEqual({ status: "terminal", batchId: "batch-1", providerStatus: "failed" });
+    await expect(
+      service.poll({
+        schemaVersion: 1,
+        translationBatchId: "batch-1",
+        pollSequence: 4,
+      }),
+    ).resolves.toEqual({
+      status: "terminal",
+      batchId: "batch-1",
+      providerStatus: "failed",
+    });
     expect(execute).toHaveBeenCalledTimes(2);
     const batchUpdate = execute.mock.calls[0]?.[0];
     const translationUpdate = execute.mock.calls[1]?.[0];
-    expect(sqlText(batchUpdate)).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(sqlText(batchUpdate)).toContain(
+      'AS "support"."MerchantTranslationBatchStatus"',
+    );
     expect(batchUpdate.values).toContain("FAILED");
-    expect(sqlText(translationUpdate)).toContain('AS "support"."MerchantMessageTranslationStatus"');
+    expect(sqlText(translationUpdate)).toContain(
+      'AS "support"."MerchantMessageTranslationStatus"',
+    );
     expect(translationUpdate.values).toContain("FAILED");
   });
 
@@ -242,8 +305,10 @@ describe("TranslationBatchPollService", () => {
     const query = vi.fn().mockResolvedValueOnce([batch]);
     const execute = vi.fn().mockResolvedValue(0);
     const database = {
-      $transaction: vi.fn(async (callback: (transaction: unknown) => Promise<unknown>) =>
-        callback({ $queryRaw: query, $executeRaw: execute })),
+      $transaction: vi.fn(
+        async (callback: (transaction: unknown) => Promise<unknown>) =>
+          callback({ $queryRaw: query, $executeRaw: execute }),
+      ),
     };
     const service = new TranslationBatchPollService({
       database,
@@ -252,27 +317,35 @@ describe("TranslationBatchPollService", () => {
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
-      .resolves.toEqual({ status: "stale", batchId: "batch-1" });
+    await expect(
+      service.poll({
+        schemaVersion: 1,
+        translationBatchId: "batch-1",
+        pollSequence: 4,
+      }),
+    ).resolves.toEqual({ status: "stale", batchId: "batch-1" });
     expect(execute).toHaveBeenCalledTimes(1);
     expect(query).toHaveBeenCalledTimes(1);
   });
 
   it("does not mark a message failed when terminal item ownership is lost", async () => {
-    const query = vi.fn()
+    const query = vi
+      .fn()
       .mockResolvedValueOnce([batch])
-      .mockResolvedValueOnce([{
-        translationId: "translation-1",
-        messageId: "message-1",
-        kind: "ADMINISTRATIVE",
-        retryCount: 0,
-      }]);
-    const execute = vi.fn()
-      .mockResolvedValueOnce(1)
-      .mockResolvedValueOnce(0);
+      .mockResolvedValueOnce([
+        {
+          translationId: "translation-1",
+          messageId: "message-1",
+          kind: "ADMINISTRATIVE",
+          retryCount: 0,
+        },
+      ]);
+    const execute = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0);
     const database = {
-      $transaction: vi.fn(async (callback: (transaction: unknown) => Promise<unknown>) =>
-        callback({ $queryRaw: query, $executeRaw: execute })),
+      $transaction: vi.fn(
+        async (callback: (transaction: unknown) => Promise<unknown>) =>
+          callback({ $queryRaw: query, $executeRaw: execute }),
+      ),
     };
     const service = new TranslationBatchPollService({
       database,
@@ -281,21 +354,39 @@ describe("TranslationBatchPollService", () => {
       runtimeConfig: runtimeConfig(),
     });
 
-    await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
-      .resolves.toEqual({ status: "terminal", batchId: "batch-1", providerStatus: "failed" });
+    await expect(
+      service.poll({
+        schemaVersion: 1,
+        translationBatchId: "batch-1",
+        pollSequence: 4,
+      }),
+    ).resolves.toEqual({
+      status: "terminal",
+      batchId: "batch-1",
+      providerStatus: "failed",
+    });
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
   it("classifies HTTP terminal and transient failures explicitly", () => {
-    expect(translationBatchPollTestInternals.failureIsRetryable("http-429")).toBe(true);
-    expect(translationBatchPollTestInternals.failureIsRetryable("http-500")).toBe(true);
+    expect(
+      translationBatchPollTestInternals.failureIsRetryable("http-429"),
+    ).toBe(true);
+    expect(
+      translationBatchPollTestInternals.failureIsRetryable("http-500"),
+    ).toBe(true);
     for (const status of [400, 401, 403, 404, 422]) {
-      expect(translationBatchPollTestInternals.failureIsRetryable(`http-${status}`)).toBe(false);
+      expect(
+        translationBatchPollTestInternals.failureIsRetryable(`http-${status}`),
+      ).toBe(false);
     }
   });
 
   it("reads poll interval and automatic retry limit from the runtime snapshot", () => {
-    const config = runtimeConfig({ translationPollIntervalSeconds: 90, translationMaxAutoRetries: 8 });
+    const config = runtimeConfig({
+      translationPollIntervalSeconds: 90,
+      translationMaxAutoRetries: 8,
+    });
     expect(config.current().translationPollIntervalSeconds).toBe(90);
     expect(config.current().translationMaxAutoRetries).toBe(8);
   });

@@ -24,33 +24,52 @@ vi.mock("../../../src/services/meta-template-management/service.js", () => ({
 vi.mock("../../../src/services/recovery-multipart/runtime.js", () => ({
   startMultipartRepair: mocks.multipartStart,
 }));
-vi.mock("../../../src/services/conversation-ai-delay/start-pending-turn-repair.js", () => ({
-  startProductionPendingTurnRepair: mocks.repairStart,
-}));
-vi.mock("../../../src/runtime/readiness.js", () => ({
-  startReadyWorkerProcess: vi.fn((options: { loadWorkerProcess: () => Promise<{
-    closeResources: readonly (() => Promise<unknown>)[];
-  }> }) => {
-    const loading = options.loadWorkerProcess().then((loaded) => { mocks.load = loaded; });
-    mocks.loading = loading;
-    return loading;
+vi.mock(
+  "../../../src/services/conversation-ai-delay/start-pending-turn-repair.js",
+  () => ({
+    startProductionPendingTurnRepair: mocks.repairStart,
   }),
+);
+vi.mock("../../../src/runtime/readiness.js", () => ({
+  startReadyWorkerProcess: vi.fn(
+    (options: {
+      loadWorkerProcess: () => Promise<{
+        closeResources: readonly (() => Promise<unknown>)[];
+      }>;
+    }) => {
+      const loading = options.loadWorkerProcess().then((loaded) => {
+        mocks.load = loaded;
+      });
+      mocks.loading = loading;
+      return loading;
+    },
+  ),
 }));
-vi.mock("../../../src/runtime/observability.js", () => ({ closeWorkerObservability: vi.fn(async () => {}) }));
+vi.mock("../../../src/runtime/observability.js", () => ({
+  closeWorkerObservability: vi.fn(async () => {}),
+}));
 vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
 vi.mock("../../../src/observability/queue-performance.js", () => ({
   startQueuePerformanceTelemetry: () => async () => {},
 }));
 vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
-  backgroundRuntimeConfigService: { start: vi.fn(async () => {}), close: vi.fn(async () => {}) },
+  backgroundRuntimeConfigService: {
+    start: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
+  },
 }));
-vi.mock("../../../src/runtime/background-runtime-lease.js", () => ({ backgroundRuntimeLeaseService: {} }));
+vi.mock("../../../src/runtime/background-runtime-lease.js", () => ({
+  backgroundRuntimeLeaseService: {},
+}));
 vi.mock("../../../src/runtime/queue-concurrency-controller.js", () => ({
   startQueueConcurrencyController: vi.fn(async () => async () => {}),
 }));
-vi.mock("../../../src/services/recovery-conversation/start-human-command-dispatcher.js", () => ({
-  startHumanCommandDispatcher: vi.fn(async () => async () => {}),
-}));
+vi.mock(
+  "../../../src/services/recovery-conversation/start-human-command-dispatcher.js",
+  () => ({
+    startHumanCommandDispatcher: vi.fn(async () => async () => {}),
+  }),
+);
 vi.mock("../../../src/entrypoints/resources.js", () => ({
   closeWorkerResources: [async () => {}],
 }));
@@ -60,7 +79,10 @@ vi.mock("../../../src/workers/whatsapp.worker.js", () => ({
 }));
 
 describe("ARCH-047 BG003 production messaging entrypoint", () => {
-  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   it("starts the due scheduler automatically, invokes the service and stops cleanly", async () => {
     vi.useFakeTimers();

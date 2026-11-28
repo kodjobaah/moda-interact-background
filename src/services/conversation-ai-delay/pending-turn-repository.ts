@@ -76,15 +76,16 @@ export async function recordProcessableInbound(
       where: { shopId: state.recoveryShopId! },
       select: { aiResponseDelayMinutes: true },
     });
-    const delayMinutes = settings === null
-      ? 0
-      : settings.aiResponseDelayMinutes;
+    const delayMinutes =
+      settings === null ? 0 : settings.aiResponseDelayMinutes;
     if (
       !Number.isInteger(delayMinutes) ||
       delayMinutes < 0 ||
       delayMinutes > 30
     ) {
-      throw new RangeError("Persisted AI response delay must be an integer from 0 through 30");
+      throw new RangeError(
+        "Persisted AI response delay must be an integer from 0 through 30",
+      );
     }
     pendingAiFields = {
       pendingAiNotBeforeAt: computePendingAiNotBeforeAt({

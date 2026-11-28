@@ -1,6 +1,9 @@
 import { Prisma } from "@prisma/client";
 
-export async function lockShopSettings(transaction: Prisma.TransactionClient, shopId: string): Promise<void> {
+export async function lockShopSettings(
+  transaction: Prisma.TransactionClient,
+  shopId: string,
+): Promise<void> {
   await transaction.$queryRaw(Prisma.sql`
       SELECT "shopId"
       FROM "shopify"."ShopSettings"
@@ -9,7 +12,10 @@ export async function lockShopSettings(transaction: Prisma.TransactionClient, sh
     `);
 }
 
-export async function lockShop(transaction: Prisma.TransactionClient, shopId: string): Promise<void> {
+export async function lockShop(
+  transaction: Prisma.TransactionClient,
+  shopId: string,
+): Promise<void> {
   await transaction.$queryRaw(Prisma.sql`
       SELECT "id"
       FROM "commerce"."Shop"
@@ -18,7 +24,10 @@ export async function lockShop(transaction: Prisma.TransactionClient, shopId: st
     `);
 }
 
-export async function lockSubscription(transaction: Prisma.TransactionClient, subscriptionId: string): Promise<void> {
+export async function lockSubscription(
+  transaction: Prisma.TransactionClient,
+  subscriptionId: string,
+): Promise<void> {
   await transaction.$queryRaw(Prisma.sql`
       SELECT "id"
       FROM "billing"."Subscription"

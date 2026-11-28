@@ -17,7 +17,9 @@ type CandidateIndexIdentity = {
 };
 
 export class PendingRecoveryCandidateIndexStore {
-  constructor(private readonly readPolicy?: () => Promise<RecoveryExecutionPolicy>) {}
+  constructor(
+    private readonly readPolicy?: () => Promise<RecoveryExecutionPolicy>,
+  ) {}
   async findByCheckout(input: { shopId: string; checkoutToken: string }) {
     return connectionRedis.get(
       pendingCandidateCheckoutIndexKey({
@@ -45,11 +47,17 @@ export class PendingRecoveryCandidateIndexStore {
     /** Woo's outage/replay horizon can exceed the legacy Shopify index TTL. */
     retentionMs?: number;
   }) {
-    const retentionBufferMs = this.readPolicy ? (await this.readPolicy()).recoveryCandidateTtlBufferMs : undefined;
-    const ttlMs = input.retentionMs ?? shopifyCandidateIndexTtlMs(
-      input.delayMinutes, pendingCandidateIndexTtlMs(input.delayMinutes, retentionBufferMs),
-      Date.now(), input.dueAtMs,
-    );
+    const retentionBufferMs = this.readPolicy
+      ? (await this.readPolicy()).recoveryCandidateTtlBufferMs
+      : undefined;
+    const ttlMs =
+      input.retentionMs ??
+      shopifyCandidateIndexTtlMs(
+        input.delayMinutes,
+        pendingCandidateIndexTtlMs(input.delayMinutes, retentionBufferMs),
+        Date.now(),
+        input.dueAtMs,
+      );
 
     await connectionRedis.set(
       pendingCandidateCheckoutIndexKey({
@@ -84,10 +92,7 @@ export class PendingRecoveryCandidateIndexStore {
     }
   }
 
-  async remove(
-    candidate: CandidateIndexIdentity,
-    jobId?: string,
-  ) {
+  async remove(candidate: CandidateIndexIdentity, jobId?: string) {
     const keys = [
       pendingCandidateCheckoutIndexKey({
         shopId: candidate.shopId,
@@ -112,7 +117,10 @@ export class PendingRecoveryCandidateIndexStore {
   }
 
   /** Woo cleanup may only clear the checkout pointer while it still owns it. */
-  async compareAndRemoveCheckout(input: { shopId: string; checkoutToken: string }, jobId: string): Promise<boolean> {
+  async compareAndRemoveCheckout(
+    input: { shopId: string; checkoutToken: string },
+    jobId: string,
+  ): Promise<boolean> {
     const key = pendingCandidateCheckoutIndexKey(input);
     const removed = await connectionRedis.eval(
       "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
@@ -137,15 +145,24 @@ export class PendingRecoveryCandidateIndexStore {
     );
   }
 
-  async addCartAlias(shopId: string, cartToken: string, jobId: string, delayMinutes: number) {
-    const retentionBufferMs = this.readPolicy ? (await this.readPolicy()).recoveryCandidateTtlBufferMs : undefined;
+  async addCartAlias(
+    shopId: string,
+    cartToken: string,
+    jobId: string,
+    delayMinutes: number,
+  ) {
+    const retentionBufferMs = this.readPolicy
+      ? (await this.readPolicy()).recoveryCandidateTtlBufferMs
+      : undefined;
     await connectionRedis.set(
       pendingCandidateCartIndexKey({ shopId, cartToken }),
       jobId,
       "PX",
       shopifyCandidateIndexTtlMs(
-        delayMinutes, pendingCandidateIndexTtlMs(delayMinutes, retentionBufferMs),
-        Date.now(), Date.now() + delayMinutes * 60_000,
+        delayMinutes,
+        pendingCandidateIndexTtlMs(delayMinutes, retentionBufferMs),
+        Date.now(),
+        Date.now() + delayMinutes * 60_000,
       ),
     );
   }

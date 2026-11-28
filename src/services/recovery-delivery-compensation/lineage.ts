@@ -2,7 +2,13 @@ import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared
 import type { UsageReservation } from "@prisma/client";
 import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
 import { outreachDeliveryFailureCode } from "../../domain/whatsapp-recipient-failure.js";
-import { requireLineage, type CompensationTransaction, type RecoverySource, type RecoverySourceKind, type ResolvedRecoverySource } from "./types.js";
+import {
+  requireLineage,
+  type CompensationTransaction,
+  type RecoverySource,
+  type RecoverySourceKind,
+  type ResolvedRecoverySource,
+} from "./types.js";
 
 export type FailedOutbound = {
   id: string;
@@ -33,43 +39,98 @@ export async function resolveExactRecoverySource(
 ): Promise<ResolvedRecoverySource | null> {
   const recovery = message.conversation.checkoutRecovery;
   if (!recovery) return null;
-  requireLineage(recovery.shopId === shopId, "conversation/recovery shop mismatch");
+  requireLineage(
+    recovery.shopId === shopId,
+    "conversation/recovery shop mismatch",
+  );
 
-  const pinned = await tx.conversationMessage.findUnique({where:{id:message.id},select:{allowanceBlockId:true}});
-  if(pinned?.allowanceBlockId){
-    const block=await tx.conversationAllowanceBlock.findUnique({where:{id:pinned.allowanceBlockId}});
-    requireLineage(block && block.shopId===shopId && block.conversationId===message.conversationId,"allowance owner mismatch");
-    const opening=await tx.conversationMessage.findFirst({where:{allowanceBlockId:block!.id,direction:"OUTBOUND"},orderBy:[{createdAt:"asc"},{id:"asc"}],select:{id:true}});
-    if(opening?.id!==message.id)return null;
+  const pinned = await tx.conversationMessage.findUnique({
+    where: { id: message.id },
+    select: { allowanceBlockId: true },
+  });
+  if (pinned?.allowanceBlockId) {
+    const block = await tx.conversationAllowanceBlock.findUnique({
+      where: { id: pinned.allowanceBlockId },
+    });
+    requireLineage(
+      block &&
+        block.shopId === shopId &&
+        block.conversationId === message.conversationId,
+      "allowance owner mismatch",
+    );
+    const opening = await tx.conversationMessage.findFirst({
+      where: { allowanceBlockId: block!.id, direction: "OUTBOUND" },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true },
+    });
+    if (opening?.id !== message.id) return null;
     // A late opener failure cannot undo credit already funding another permit.
-    const consumed=await tx.conversationMessage.findFirst({where:{allowanceBlockId:block!.id,id:{not:message.id},OR:[{providerDispatchKey:{not:null}},{providerDispatchAdmittedAt:{not:null}},{providerMessageId:{not:null}},{sentAt:{not:null}}]},select:{id:true}});
-    requireLineage(!consumed,"late allowance opening failure after other provider-admitted consumption");
-    if(block!.fundingKind==="CONTINUATION"){
-      const source=await findExactReservationSource(tx,shopId,createRecoveryIdempotencyKey(shopId,`recovery-continuation:${block!.id}`));
-      requireLineage(source&&source.reservation.id===block!.creditReservationId,"continuation reservation mismatch");
+    const consumed = await tx.conversationMessage.findFirst({
+      where: {
+        allowanceBlockId: block!.id,
+        id: { not: message.id },
+        OR: [
+          { providerDispatchKey: { not: null } },
+          { providerDispatchAdmittedAt: { not: null } },
+          { providerMessageId: { not: null } },
+          { sentAt: { not: null } },
+        ],
+      },
+      select: { id: true },
+    });
+    requireLineage(
+      !consumed,
+      "late allowance opening failure after other provider-admitted consumption",
+    );
+    if (block!.fundingKind === "CONTINUATION") {
+      const source = await findExactReservationSource(
+        tx,
+        shopId,
+        createRecoveryIdempotencyKey(
+          shopId,
+          `recovery-continuation:${block!.id}`,
+        ),
+      );
+      requireLineage(
+        source && source.reservation.id === block!.creditReservationId,
+        "continuation reservation mismatch",
+      );
       return source;
     }
   }
 
   const command = await tx.merchantConversationSendCommand.findUnique({
     where: { outboundMessageId: message.id },
-    select: { kind: true, shopId: true, conversationId: true, recoveryOutreachAttemptId: true },
+    select: {
+      kind: true,
+      shopId: true,
+      conversationId: true,
+      recoveryOutreachAttemptId: true,
+    },
   });
   if (command) {
-    requireLineage(command.shopId === shopId && command.conversationId === message.conversationId,
-      "merchant command shop/conversation mismatch");
+    requireLineage(
+      command.shopId === shopId &&
+        command.conversationId === message.conversationId,
+      "merchant command shop/conversation mismatch",
+    );
   }
 
   let attemptId: string | null = null;
   if (message.senderType === "HUMAN") {
     if (!command || command.kind === "HUMAN_TEXT") return null;
-    requireLineage(command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE" &&
-      !!command.recoveryOutreachAttemptId, "human recovery-template attempt missing");
+    requireLineage(
+      command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE" &&
+        !!command.recoveryOutreachAttemptId,
+      "human recovery-template attempt missing",
+    );
     attemptId = command.recoveryOutreachAttemptId;
   } else if (message.senderType === "AUTOMATION") {
     requireLineage(!command, "automated recovery has a human command");
     if (automatedUsage?.sourceType === "OUTBOUND_AUTOMATED_MESSAGE") {
-      const match = /^recovery-outreach:([A-Za-z0-9_-]+)$/.exec(automatedUsage.idempotencyKey);
+      const match = /^recovery-outreach:([A-Za-z0-9_-]+)$/.exec(
+        automatedUsage.idempotencyKey,
+      );
       attemptId = match?.[1] ?? null;
     }
   } else {
@@ -78,70 +139,149 @@ export async function resolveExactRecoverySource(
 
   const byMessage = await tx.recoveryOutreachAttempt.findUnique({
     where: { outboundMessageId: message.id },
-    select: { id: true, checkoutRecoveryId: true, outboundMessageId: true, sequence: true },
+    select: {
+      id: true,
+      checkoutRecoveryId: true,
+      outboundMessageId: true,
+      sequence: true,
+    },
   });
   if (byMessage) {
-    requireLineage(!attemptId || attemptId === byMessage.id, "conflicting attempt identity");
+    requireLineage(
+      !attemptId || attemptId === byMessage.id,
+      "conflicting attempt identity",
+    );
     attemptId = byMessage.id;
   }
   if (!attemptId) return null;
 
   const attempt = await tx.recoveryOutreachAttempt.findUnique({
     where: { id: attemptId },
-    select: { id: true, checkoutRecoveryId: true, outboundMessageId: true, sequence: true, status: true, sentAt: true,
-      initiatedBy: true, customerRespondedAt: true },
+    select: {
+      id: true,
+      checkoutRecoveryId: true,
+      outboundMessageId: true,
+      sequence: true,
+      status: true,
+      sentAt: true,
+      initiatedBy: true,
+      customerRespondedAt: true,
+    },
   });
-  requireLineage(attempt && attempt.checkoutRecoveryId === recovery.id &&
-    (!attempt.outboundMessageId || attempt.outboundMessageId === message.id),
-    "attempt/recovery/message mismatch");
+  requireLineage(
+    attempt &&
+      attempt.checkoutRecoveryId === recovery.id &&
+      (!attempt.outboundMessageId || attempt.outboundMessageId === message.id),
+    "attempt/recovery/message mismatch",
+  );
   if (attempt.sequence >= 3) {
-    requireLineage(message.senderType === "AUTOMATION" && attempt.initiatedBy !== "HUMAN",
-      "physical retry is not automated");
-    await readRetryFundingLineage(tx, { recoveryId: recovery.id, conversationId: message.conversationId, attemptId: attempt.id });
+    requireLineage(
+      message.senderType === "AUTOMATION" && attempt.initiatedBy !== "HUMAN",
+      "physical retry is not automated",
+    );
+    await readRetryFundingLineage(tx, {
+      recoveryId: recovery.id,
+      conversationId: message.conversationId,
+      attemptId: attempt.id,
+    });
   } else {
-    requireLineage(attempt.sequence === 1 || attempt.sequence === 2, "invalid original outreach sequence");
+    requireLineage(
+      attempt.sequence === 1 || attempt.sequence === 2,
+      "invalid original outreach sequence",
+    );
   }
   if (message.senderType === "HUMAN") {
-    requireLineage(attempt.sequence === 2 && command?.recoveryOutreachAttemptId === attempt.id,
-      "human follow-up is not sequence two");
+    requireLineage(
+      attempt.sequence === 2 &&
+        command?.recoveryOutreachAttemptId === attempt.id,
+      "human follow-up is not sequence two",
+    );
   }
-  if (message.senderType === "AUTOMATION" && attempt.outboundMessageId === null) {
-    requireLineage(automatedUsage?.idempotencyKey === `recovery-outreach:${attempt.id}`,
-      "unlinked automated recovery message");
+  if (
+    message.senderType === "AUTOMATION" &&
+    attempt.outboundMessageId === null
+  ) {
+    requireLineage(
+      automatedUsage?.idempotencyKey === `recovery-outreach:${attempt.id}`,
+      "unlinked automated recovery message",
+    );
   }
 
-  const source = await findExactRecoveryReservationSource(tx, shopId, attempt.id);
+  const source = await findExactRecoveryReservationSource(
+    tx,
+    shopId,
+    attempt.id,
+  );
   requireLineage(source, "missing or ambiguous reservation");
   if (attempt.sequence >= 3 && pinned?.allowanceBlockId) {
-    const block = await tx.conversationAllowanceBlock.findUnique({ where: { id: pinned.allowanceBlockId } });
-    requireLineage(block?.creditReservationId === source.reservation.id, "outreach allowance reservation mismatch");
+    const block = await tx.conversationAllowanceBlock.findUnique({
+      where: { id: pinned.allowanceBlockId },
+    });
+    requireLineage(
+      block?.creditReservationId === source.reservation.id,
+      "outreach allowance reservation mismatch",
+    );
   }
   // A failure may arrive before finalization links the outbound message. The
   // exact admission key (or verified merchant command) proves that identity.
   // Preserve it before deleting the hard-limit usage row; otherwise replays
   // could lose the source and an old attempt key could admit a duplicate send.
-  const close = ["PENDING", "CAPACITY_BLOCKED", "WAITING_FOR_RESPONSE"].includes(attempt.status);
+  const close = [
+    "PENDING",
+    "CAPACITY_BLOCKED",
+    "WAITING_FOR_RESPONSE",
+  ].includes(attempt.status);
   if (!attempt.outboundMessageId || close) {
-    requireLineage(message.failedAt, "failed recovery message lacks failure timestamp");
-    requireLineage(!attempt.sentAt || (message.sentAt && attempt.sentAt.getTime() === message.sentAt.getTime()),
-      "attempt/message sent timestamp mismatch");
+    requireLineage(
+      message.failedAt,
+      "failed recovery message lacks failure timestamp",
+    );
+    requireLineage(
+      !attempt.sentAt ||
+        (message.sentAt &&
+          attempt.sentAt.getTime() === message.sentAt.getTime()),
+      "attempt/message sent timestamp mismatch",
+    );
     const changed = await tx.recoveryOutreachAttempt.updateMany({
-      where: { id: attempt.id, checkoutRecoveryId: recovery.id, status: attempt.status,
-        outboundMessageId: attempt.outboundMessageId },
-      data: { outboundMessageId: message.id,
-        ...(message.sentAt && !attempt.sentAt ? { sentAt: message.sentAt } : {}),
-        ...(close ? { status: "FAILED" as const, failureCode: outreachDeliveryFailureCode(message.providerFailureCode),
-          followUpDueAt: null, closedAt: message.failedAt } : {}) },
+      where: {
+        id: attempt.id,
+        checkoutRecoveryId: recovery.id,
+        status: attempt.status,
+        outboundMessageId: attempt.outboundMessageId,
+      },
+      data: {
+        outboundMessageId: message.id,
+        ...(message.sentAt && !attempt.sentAt
+          ? { sentAt: message.sentAt }
+          : {}),
+        ...(close
+          ? {
+              status: "FAILED" as const,
+              failureCode: outreachDeliveryFailureCode(
+                message.providerFailureCode,
+              ),
+              followUpDueAt: null,
+              closedAt: message.failedAt,
+            }
+          : {}),
+      },
     });
-    requireLineage(changed.count === 1, "failed recovery attempt convergence conflict");
+    requireLineage(
+      changed.count === 1,
+      "failed recovery attempt convergence conflict",
+    );
   }
   // Reuse the already-validated attempt read. A delayed failure for an
   // engaged/no-response attempt still gets compensation, not an automatic
   // retry decision. Human sends and continuation funding never recycle here.
-  const retryCandidate = message.senderType === "AUTOMATION" &&
-    attempt.initiatedBy !== "HUMAN" && !attempt.customerRespondedAt &&
+  const retryCandidate =
+    message.senderType === "AUTOMATION" &&
+    attempt.initiatedBy !== "HUMAN" &&
+    !attempt.customerRespondedAt &&
     (close || attempt.status === "FAILED");
-  return retryCandidate ? { ...source, retryCandidateAttemptId: attempt.id } : source;
+  return retryCandidate
+    ? { ...source, retryCandidateAttemptId: attempt.id }
+    : source;
 }
 
 export async function findExactRecoveryReservationSource(
@@ -149,33 +289,58 @@ export async function findExactRecoveryReservationSource(
   shopId: string,
   outreachAttemptId: string,
 ): Promise<RecoverySource | null> {
-  return findExactReservationSource(tx, shopId, createRecoveryIdempotencyKey(shopId, `recovery-outreach:${outreachAttemptId}`));
+  return findExactReservationSource(
+    tx,
+    shopId,
+    createRecoveryIdempotencyKey(
+      shopId,
+      `recovery-outreach:${outreachAttemptId}`,
+    ),
+  );
 }
 
 /** One canonical source reader for every funded recovery action; never infer from today's plan. */
-export async function findExactReservationSource(tx: CompensationTransaction, shopId: string, logicalSource: string): Promise<RecoverySource | null> {
+export async function findExactReservationSource(
+  tx: CompensationTransaction,
+  shopId: string,
+  logicalSource: string,
+): Promise<RecoverySource | null> {
   const reservations = await tx.usageReservation.findMany({
-    where: { OR: [
-      { sourceKey: logicalSource },
-      { sourceKey: { startsWith: "paid-included:", endsWith: `:${logicalSource}` } },
-    ] },
+    where: {
+      OR: [
+        { sourceKey: logicalSource },
+        {
+          sourceKey: {
+            startsWith: "paid-included:",
+            endsWith: `:${logicalSource}`,
+          },
+        },
+      ],
+    },
     take: 2,
   });
   requireLineage(reservations.length <= 1, "missing or ambiguous reservation");
   if (reservations.length === 0) return null;
 
   const reservation = reservations[0]!;
-  requireLineage(reservation.shopId === shopId && reservation.quantity === 1,
-    "reservation shop/quantity mismatch");
+  requireLineage(
+    reservation.shopId === shopId && reservation.quantity === 1,
+    "reservation shop/quantity mismatch",
+  );
   const kind = sourceKind(reservation);
   if (kind === "free" || kind === "purchased") {
     const counter = await tx.shopEntitlementCounter.findUnique({
       where: { id: reservation.counterId! },
       select: { shopId: true, counter: true },
     });
-    requireLineage(counter?.shopId === shopId &&
-      counter.counter === (kind === "free" ? "LIFETIME_FREE_RECOVERY_CREDITS" : "PURCHASED_RECOVERY_CREDITS"),
-      "source-owned Shop credit counter mismatch");
+    requireLineage(
+      counter?.shopId === shopId &&
+        counter.counter ===
+          (kind === "free"
+            ? "LIFETIME_FREE_RECOVERY_CREDITS"
+            : "PURCHASED_RECOVERY_CREDITS"),
+      "source-owned Shop credit counter mismatch",
+    );
   }
   if (kind === "purchased") {
     const purchase = await tx.recoveryCreditPurchase.findUnique({
@@ -196,29 +361,44 @@ export async function findExactReservationSource(tx: CompensationTransaction, sh
       where: { id: reservation.billingPeriodEntitlementCounterId! },
       select: { shopId: true, billingPeriodId: true, counter: true },
     });
-    requireLineage(periodCounter?.shopId === shopId &&
-      periodCounter.counter === "INCLUDED_RECOVERY_CREDITS" &&
-      reservation.sourceKey === `paid-included:${periodCounter.billingPeriodId}:${logicalSource}`,
-      "paid included period/source mismatch");
+    requireLineage(
+      periodCounter?.shopId === shopId &&
+        periodCounter.counter === "INCLUDED_RECOVERY_CREDITS" &&
+        reservation.sourceKey ===
+          `paid-included:${periodCounter.billingPeriodId}:${logicalSource}`,
+      "paid included period/source mismatch",
+    );
   } else {
-    requireLineage(reservation.sourceKey === logicalSource, "unexpected source key");
+    requireLineage(
+      reservation.sourceKey === logicalSource,
+      "unexpected source key",
+    );
   }
   return { reservation, kind };
 }
 
 function sourceKind(source: UsageReservation): RecoverySourceKind {
   if (source.purchasedCreditPurchaseId) {
-    requireLineage(!!source.counterId && !source.billingPeriodEntitlementCounterId &&
-      !source.promotionalCreditGrantId, "reservation has invalid purchased ownership");
+    requireLineage(
+      !!source.counterId &&
+        !source.billingPeriodEntitlementCounterId &&
+        !source.promotionalCreditGrantId,
+      "reservation has invalid purchased ownership",
+    );
     return "purchased";
   }
   if (source.billingPeriodEntitlementCounterId) {
-    requireLineage(!source.counterId && !source.promotionalCreditGrantId,
-      "reservation has invalid paid ownership");
+    requireLineage(
+      !source.counterId && !source.promotionalCreditGrantId,
+      "reservation has invalid paid ownership",
+    );
     return "paid";
   }
   if (source.promotionalCreditGrantId) {
-    requireLineage(!source.counterId, "reservation has invalid promotional ownership");
+    requireLineage(
+      !source.counterId,
+      "reservation has invalid promotional ownership",
+    );
     return "promotional";
   }
   requireLineage(!!source.counterId, "free source counter missing");

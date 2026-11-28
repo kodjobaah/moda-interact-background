@@ -28,9 +28,10 @@ describe("Merchant Knowledge worker entrypoint", () => {
       { name: "postgresql", check: postgresqlCheck },
     ];
 
-    expect(
-      WORKER_DEPENDENCIES["moda-merchant-knowledge-worker"],
-    ).toEqual(["redis", "postgresql"]);
+    expect(WORKER_DEPENDENCIES["moda-merchant-knowledge-worker"]).toEqual([
+      "redis",
+      "postgresql",
+    ]);
     await assertWorkerReady("moda-merchant-knowledge-worker", probes);
     expect(redisCheck).toHaveBeenCalledOnce();
     expect(postgresqlCheck).toHaveBeenCalledOnce();
@@ -39,7 +40,9 @@ describe("Merchant Knowledge worker entrypoint", () => {
   it("starts one dedicated worker with both fixed leased schedules", () => {
     expect(source).toContain('serviceName: "moda-merchant-knowledge-worker"');
     expect(source).toContain("const worker = createMerchantKnowledgeWorker({");
-    expect(source).toContain("processJob: async (job) => (await newProcessingService()).processJob(job)");
+    expect(source).toContain(
+      "processJob: async (job) => (await newProcessingService()).processJob(job)",
+    );
     expect(source.match(/createMerchantKnowledgeWorker\(/g)).toHaveLength(1);
     expect(source.match(/startDynamicLeasedScheduler\(\{/g)).toHaveLength(3);
 
@@ -52,14 +55,16 @@ describe("Merchant Knowledge worker entrypoint", () => {
       "merchantKnowledgeReconciliationService.reconcilePendingOnce",
     );
     expect(source).toContain("pageSize: 100");
-    expect(source).toContain('leaseName: "MERCHANT_KNOWLEDGE_ENTITLEMENT_RECONCILIATION"');
+    expect(source).toContain(
+      'leaseName: "MERCHANT_KNOWLEDGE_ENTITLEMENT_RECONCILIATION"',
+    );
     expect(source).toContain("intervalMs: 300_000");
-    expect(source).toContain("merchantKnowledgeEntitlementReconciliationService.reconcileOnce");
+    expect(source).toContain(
+      "merchantKnowledgeEntitlementReconciliationService.reconcileOnce",
+    );
     expect(source).toContain("shopPageSize: 100");
 
-    expect(source).toContain(
-      'leaseName: "MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP"',
-    );
+    expect(source).toContain('leaseName: "MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP"');
     expect(source).toContain("intervalMs: 3_600_000");
     expect(source).toContain("await cleanup()");
     expect(source).toContain("const config = await readR2Configuration()");

@@ -13,16 +13,16 @@ import { MerchantKnowledgeReconciliationService } from "../../../src/services/me
 function createHarness(revisions: Array<Record<string, unknown>>) {
   const findMany = vi.fn().mockResolvedValue(revisions);
   const add = vi.fn().mockResolvedValue(undefined);
-  const resolveSourceEligibility = vi.fn().mockResolvedValue({ eligible: true });
+  const resolveSourceEligibility = vi
+    .fn()
+    .mockResolvedValue({ eligible: true });
   const database = {
     merchantKnowledgeSourceRevision: { findMany },
   } as unknown as PrismaClient;
   const queue = { add } as unknown as Queue;
-  const service = new MerchantKnowledgeReconciliationService(
-    database,
-    queue,
-    { resolveSourceEligibility } as never,
-  );
+  const service = new MerchantKnowledgeReconciliationService(database, queue, {
+    resolveSourceEligibility,
+  } as never);
   return { service, findMany, add, resolveSourceEligibility };
 }
 
@@ -48,9 +48,11 @@ describe("MerchantKnowledgeReconciliationService", () => {
       revision("stale", 2, 3),
       revision("dormant", 4),
     ]);
-    harness.resolveSourceEligibility.mockImplementation(async (sourceId: string) => ({
-      eligible: sourceId !== "source-dormant",
-    }));
+    harness.resolveSourceEligibility.mockImplementation(
+      async (sourceId: string) => ({
+        eligible: sourceId !== "source-dormant",
+      }),
+    );
   });
 
   it("scans one bounded ordered PENDING page and enqueues only current eligible revisions", async () => {
@@ -101,28 +103,34 @@ describe("MerchantKnowledgeReconciliationService", () => {
 
   it("leaves PENDING work dormant until opt-in, then uses the existing deterministic job id", async () => {
     harness.findMany.mockResolvedValue([revision("opt-in-transition", 5)]);
-    harness.resolveSourceEligibility.mockResolvedValueOnce({
-      eligible: false,
-      activationModeEligible: true,
-      merchantEnabled: false,
-    }).mockResolvedValue({
-      eligible: true,
-      activationModeEligible: true,
-      merchantEnabled: true,
-    });
+    harness.resolveSourceEligibility
+      .mockResolvedValueOnce({
+        eligible: false,
+        activationModeEligible: true,
+        merchantEnabled: false,
+      })
+      .mockResolvedValue({
+        eligible: true,
+        activationModeEligible: true,
+        merchantEnabled: true,
+      });
 
-    await expect(harness.service.reconcilePendingOnce()).resolves.toMatchObject({
-      scanned: 1,
-      enqueued: 0,
-      skippedDormant: 1,
-    });
+    await expect(harness.service.reconcilePendingOnce()).resolves.toMatchObject(
+      {
+        scanned: 1,
+        enqueued: 0,
+        skippedDormant: 1,
+      },
+    );
     expect(harness.add).not.toHaveBeenCalled();
 
-    await expect(harness.service.reconcilePendingOnce()).resolves.toMatchObject({
-      scanned: 1,
-      enqueued: 1,
-      skippedDormant: 0,
-    });
+    await expect(harness.service.reconcilePendingOnce()).resolves.toMatchObject(
+      {
+        scanned: 1,
+        enqueued: 1,
+        skippedDormant: 0,
+      },
+    );
     const [name, job, options] = harness.add.mock.calls[0] as [
       string,
       MerchantKnowledgeProcessSourceRevisionJob,
@@ -132,13 +140,20 @@ describe("MerchantKnowledgeReconciliationService", () => {
     expect(options.jobId).toBe(createMerchantKnowledgeProcessJobId(job));
   });
 
-  it.each([0, -1, 501, 1.5])("rejects invalid page size %s", async (pageSize) => {
-    await expect(harness.service.reconcilePendingOnce({ pageSize })).rejects.toThrow(RangeError);
-    expect(harness.findMany).not.toHaveBeenCalled();
-  });
+  it.each([0, -1, 501, 1.5])(
+    "rejects invalid page size %s",
+    async (pageSize) => {
+      await expect(
+        harness.service.reconcilePendingOnce({ pageSize }),
+      ).rejects.toThrow(RangeError);
+      expect(harness.findMany).not.toHaveBeenCalled();
+    },
+  );
 
   it("accepts the maximum page size", async () => {
     await harness.service.reconcilePendingOnce({ pageSize: 500 });
-    expect(harness.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 500 }));
+    expect(harness.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 500 }),
+    );
   });
 });

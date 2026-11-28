@@ -7,16 +7,23 @@ import { describe, expect, it, vi } from "vitest";
 import { createTranslationProviderCredentialResolver } from "../../../src/commerce/translation-provider-credential.js";
 
 const key = Buffer.alloc(32, 17);
-const keyring = parseCredentialKeyring(JSON.stringify({ active: key.toString("base64") }));
+const keyring = parseCredentialKeyring(
+  JSON.stringify({ active: key.toString("base64") }),
+);
 
 function seal(credential: string) {
   const nonce = Buffer.alloc(12, 7);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
-  cipher.setAAD(Buffer.from(createCommerceTranslationProviderCredentialAad({
-    environment: "DEVELOPMENT",
-    provider: "openai",
-    keyId: "active",
-  }), "utf8"));
+  cipher.setAAD(
+    Buffer.from(
+      createCommerceTranslationProviderCredentialAad({
+        environment: "DEVELOPMENT",
+        provider: "openai",
+        keyId: "active",
+      }),
+      "utf8",
+    ),
+  );
   const ciphertext = Buffer.concat([
     cipher.update(Buffer.from(credential, "utf8")),
     cipher.final(),
@@ -42,12 +49,17 @@ describe("translation provider credential decryption", () => {
     const db = {
       commerceTranslationProviderCredential: { findUnique },
     } as unknown as PrismaClient;
-    const resolver = createTranslationProviderCredentialResolver({ db, keyring });
+    const resolver = createTranslationProviderCredentialResolver({
+      db,
+      keyring,
+    });
 
-    await expect(resolver.resolve({
-      environment: "DEVELOPMENT",
-      provider: "openai",
-    })).resolves.toBe("translation-key");
+    await expect(
+      resolver.resolve({
+        environment: "DEVELOPMENT",
+        provider: "openai",
+      }),
+    ).resolves.toBe("translation-key");
     expect(findUnique).toHaveBeenCalledWith({
       where: {
         environment_provider: {
@@ -65,39 +77,60 @@ describe("translation provider credential decryption", () => {
         findUnique: vi.fn(async () => ({ ...row, provider: "deepl" })),
       },
     } as unknown as PrismaClient;
-    const resolver = createTranslationProviderCredentialResolver({ db, keyring });
+    const resolver = createTranslationProviderCredentialResolver({
+      db,
+      keyring,
+    });
 
-    await expect(resolver.resolve({
-      environment: "DEVELOPMENT",
-      provider: "deepl",
-    })).rejects.toThrow("Translation provider credential is unavailable");
+    await expect(
+      resolver.resolve({
+        environment: "DEVELOPMENT",
+        provider: "deepl",
+      }),
+    ).rejects.toThrow("Translation provider credential is unavailable");
   });
 
   it("rejects a valid-looking row whose ciphertext is bound to another provider", async () => {
     const db = {
       commerceTranslationProviderCredential: {
-        findUnique: vi.fn(async () => ({ ...seal("translation-key"), provider: "deepl" })),
+        findUnique: vi.fn(async () => ({
+          ...seal("translation-key"),
+          provider: "deepl",
+        })),
       },
     } as unknown as PrismaClient;
-    const resolver = createTranslationProviderCredentialResolver({ db, keyring });
+    const resolver = createTranslationProviderCredentialResolver({
+      db,
+      keyring,
+    });
 
-    await expect(resolver.resolve({
-      environment: "DEVELOPMENT",
-      provider: "deepl",
-    })).rejects.toThrow("Translation provider credential is unavailable");
+    await expect(
+      resolver.resolve({
+        environment: "DEVELOPMENT",
+        provider: "deepl",
+      }),
+    ).rejects.toThrow("Translation provider credential is unavailable");
   });
 
   it("fails bounded for missing or malformed encrypted state", async () => {
     const db = {
       commerceTranslationProviderCredential: {
-        findUnique: vi.fn(async () => ({ ...seal("translation-key"), authTag: Buffer.alloc(15) })),
+        findUnique: vi.fn(async () => ({
+          ...seal("translation-key"),
+          authTag: Buffer.alloc(15),
+        })),
       },
     } as unknown as PrismaClient;
-    const resolver = createTranslationProviderCredentialResolver({ db, keyring });
+    const resolver = createTranslationProviderCredentialResolver({
+      db,
+      keyring,
+    });
 
-    await expect(resolver.resolve({
-      environment: "DEVELOPMENT",
-      provider: "openai",
-    })).rejects.toThrow("Translation provider credential is unavailable");
+    await expect(
+      resolver.resolve({
+        environment: "DEVELOPMENT",
+        provider: "openai",
+      }),
+    ).rejects.toThrow("Translation provider credential is unavailable");
   });
 });

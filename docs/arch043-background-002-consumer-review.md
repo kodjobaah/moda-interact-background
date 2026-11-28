@@ -2,24 +2,24 @@
 
 This file records code paths introduced in the implementation candidate; it is **not** a Completion Report or architect acceptance. Configuration source is BACKGROUND-001's typed service, backed by the trusted deployment environment and fresh PostgreSQL reads. There is no application configuration cache.
 
-| Existing consumer | Canonical PostgreSQL key | Operation boundary | Test/proof |
-|---|---|---|---|
-| Recovery Woo dispatcher | `woo.couponSync` | Each leased dispatch cycle | Platform consumer snapshot unit test; local leased scheduler regression required |
-| Woo catalogue worker + transport | `woo.couponSync` | Each claimed Woo sync job | Platform consumer snapshot unit test; existing Woo catalogue/worker regressions required |
-| Woo read grant decryption | `commerce.connectionKeys` | After grant validity checks, before AEAD decryption | Existing Woo grant integrity regressions require rerun |
-| Merchant Knowledge uploaded assets | `merchant.knowledge.r2` | Each asset acquisition | Platform consumer snapshot unit test; actual R2/acquisition integration required |
-| Merchant Knowledge orphan cleanup | `merchant.knowledge.r2` | Each cleanup scheduler iteration | Existing cleanup integration required |
-| Merchant Knowledge embeddings | `commerce.connectionKeys` | Each source-processing job | Existing embedding runtime tests require rerun |
-| WhatsApp speech | `speech.transcription`, `ai.providers` | One bundled read for each transcription | Platform consumer bundle unit test; speech provider unit regressions required |
-| Shopify OAuth refresh | `shopify.oauth` | Each expired session refresh | Existing session refresh regressions required |
-| Shopify Partner billing | `shopify.partner` | Each Partner GraphQL operation | Existing Partner unit tests require rerun |
-| Shopify App Events | `shopify.appEvents` | Each claimed billing event, new client per event | Existing token refresh + publisher tests require rerun |
-| WhatsApp outbound text and template | `messaging.sender` | One full sender tuple for each send | Existing sender/send integration regressions required |
-| WhatsApp media download | `messaging.sender` | One token read per media download | Existing media unit tests require rerun |
-| Commerce agent/OpenRouter | `commerce.connectionKeys` | Each Commerce model invocation | Existing Commerce agent tests require rerun |
-| Store-category/merchant-pricing translation credential resolvers | `commerce.connectionKeys` | Each provider operation | Existing translation tests require rerun |
-| Support translation model selection | Existing `CommerceTranslationModelConfiguration` automatic default | Each newly assembled batch, persists provider/model | Existing batch assembly concurrent tests require rerun |
-| Support translation provider credential | Existing `CommerceTranslationProviderCredential` | Each submit/poll/results operation | Existing support translation lifecycle tests require rerun |
+| Existing consumer                                                | Canonical PostgreSQL key                                           | Operation boundary                                  | Test/proof                                                                               |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Recovery Woo dispatcher                                          | `woo.couponSync`                                                   | Each leased dispatch cycle                          | Platform consumer snapshot unit test; local leased scheduler regression required         |
+| Woo catalogue worker + transport                                 | `woo.couponSync`                                                   | Each claimed Woo sync job                           | Platform consumer snapshot unit test; existing Woo catalogue/worker regressions required |
+| Woo read grant decryption                                        | `commerce.connectionKeys`                                          | After grant validity checks, before AEAD decryption | Existing Woo grant integrity regressions require rerun                                   |
+| Merchant Knowledge uploaded assets                               | `merchant.knowledge.r2`                                            | Each asset acquisition                              | Platform consumer snapshot unit test; actual R2/acquisition integration required         |
+| Merchant Knowledge orphan cleanup                                | `merchant.knowledge.r2`                                            | Each cleanup scheduler iteration                    | Existing cleanup integration required                                                    |
+| Merchant Knowledge embeddings                                    | `commerce.connectionKeys`                                          | Each source-processing job                          | Existing embedding runtime tests require rerun                                           |
+| WhatsApp speech                                                  | `speech.transcription`, `ai.providers`                             | One bundled read for each transcription             | Platform consumer bundle unit test; speech provider unit regressions required            |
+| Shopify OAuth refresh                                            | `shopify.oauth`                                                    | Each expired session refresh                        | Existing session refresh regressions required                                            |
+| Shopify Partner billing                                          | `shopify.partner`                                                  | Each Partner GraphQL operation                      | Existing Partner unit tests require rerun                                                |
+| Shopify App Events                                               | `shopify.appEvents`                                                | Each claimed billing event, new client per event    | Existing token refresh + publisher tests require rerun                                   |
+| WhatsApp outbound text and template                              | `messaging.sender`                                                 | One full sender tuple for each send                 | Existing sender/send integration regressions required                                    |
+| WhatsApp media download                                          | `messaging.sender`                                                 | One token read per media download                   | Existing media unit tests require rerun                                                  |
+| Commerce agent/OpenRouter                                        | `commerce.connectionKeys`                                          | Each Commerce model invocation                      | Existing Commerce agent tests require rerun                                              |
+| Store-category/merchant-pricing translation credential resolvers | `commerce.connectionKeys`                                          | Each provider operation                             | Existing translation tests require rerun                                                 |
+| Support translation model selection                              | Existing `CommerceTranslationModelConfiguration` automatic default | Each newly assembled batch, persists provider/model | Existing batch assembly concurrent tests require rerun                                   |
+| Support translation provider credential                          | Existing `CommerceTranslationProviderCredential`                   | Each submit/poll/results operation                  | Existing support translation lifecycle tests require rerun                               |
 
 ## Deployment/cutover caveats
 

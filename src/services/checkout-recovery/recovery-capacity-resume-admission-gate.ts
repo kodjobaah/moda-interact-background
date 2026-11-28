@@ -6,9 +6,18 @@ import type { recoveryPolicyService } from "../recovery-policy.service.js";
 import { createRecoveryCapacityResumeMaturitySuccessor } from "../../domain/recovery-capacity-resume.js";
 import { isTargetedSuppressionWakeup } from "./recovery-capacity-resume-maturity.js";
 
-type CheckoutLockPort = Pick<typeof pendingRecoveryCandidateService, "withCheckoutLock">;
-type ExecutionEligibilityPort = Pick<typeof shopExecutionEligibilityService, "evaluate">;
-type RecoveryResumeScheduler = Pick<typeof recoveryCapacityResumeService, "schedule">;
+type CheckoutLockPort = Pick<
+  typeof pendingRecoveryCandidateService,
+  "withCheckoutLock"
+>;
+type ExecutionEligibilityPort = Pick<
+  typeof shopExecutionEligibilityService,
+  "evaluate"
+>;
+type RecoveryResumeScheduler = Pick<
+  typeof recoveryCapacityResumeService,
+  "schedule"
+>;
 type RecoveryPolicyResolver = Pick<typeof recoveryPolicyService, "resolve">;
 
 export async function runRecoveryCapacityResumeAdmissionGate(input: {
@@ -23,10 +32,18 @@ export async function runRecoveryCapacityResumeAdmissionGate(input: {
   wakeupTrigger?: string;
   clock: () => Date;
 }) {
-  const execution = await input.eligibility.evaluate(input.shopId, undefined, "recovery");
-  if (!execution.allowed) return { kind: "ignored", reason: execution.reason } as const;
+  const execution = await input.eligibility.evaluate(
+    input.shopId,
+    undefined,
+    "recovery",
+  );
+  if (!execution.allowed)
+    return { kind: "ignored", reason: execution.reason } as const;
 
-  const policy = isTargetedSuppressionWakeup(input.wakeupTrigger, input.recoveryId)
+  const policy = isTargetedSuppressionWakeup(
+    input.wakeupTrigger,
+    input.recoveryId,
+  )
     ? await input.policyResolver.resolve(input.shopId)
     : null;
   const decision = await input.checkoutLock.withCheckoutLock(
@@ -55,7 +72,8 @@ export async function runRecoveryCapacityResumeAdmissionGate(input: {
 
       if (policy && input.wakeupTrigger) {
         const dueAt = new Date(
-          latest.lastExternalActivityAt.getTime() + policy.recoveryDelayMinutes * 60_000,
+          latest.lastExternalActivityAt.getTime() +
+            policy.recoveryDelayMinutes * 60_000,
         );
         if (dueAt > input.clock()) {
           return {
@@ -81,7 +99,9 @@ export async function runRecoveryCapacityResumeAdmissionGate(input: {
   return { kind: "deferred-activity" as const, dueAt: decision.dueAt };
 }
 
-type AdmissionGateResult = Awaited<ReturnType<typeof runRecoveryCapacityResumeAdmissionGate>>;
+type AdmissionGateResult = Awaited<
+  ReturnType<typeof runRecoveryCapacityResumeAdmissionGate>
+>;
 type AdmissionGateOutcome = Exclude<AdmissionGateResult, { kind: "admit" }>;
 
 export function createRecoveryCapacityResumeAdmissionGate(
@@ -104,10 +124,12 @@ export function isResumeEligibleBlockReason(
   wakeupTrigger?: string,
   recoveryId?: string,
 ): boolean {
-  return reason === "RECOVERY_CAPACITY_EXHAUSTED" ||
+  return (
+    reason === "RECOVERY_CAPACITY_EXHAUSTED" ||
     reason === "WHATSAPP_RECIPIENT_SUPPRESSED" ||
     (reason === null &&
       typeof wakeupTrigger === "string" &&
       typeof recoveryId === "string" &&
-      wakeupTrigger.startsWith(`recipient-suppression-${recoveryId}-`));
+      wakeupTrigger.startsWith(`recipient-suppression-${recoveryId}-`))
+  );
 }

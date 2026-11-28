@@ -2,9 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 // Unit-only trusted credential fixture. Production must always read the Commerce row;
 // deliberately setting OPENAI_API_KEY in these tests is NOT an allowed fallback.
-vi.mock("../../../src/services/platform-configuration/support-translation.js", () => ({
-  readSupportTranslationCredential: vi.fn(async () => "unit-test-commerce-credential"),
-}));
+vi.mock(
+  "../../../src/services/platform-configuration/support-translation.js",
+  () => ({
+    readSupportTranslationCredential: vi.fn(
+      async () => "unit-test-commerce-credential",
+    ),
+  }),
+);
 
 process.env.REDIS_URL ??= "redis://localhost:6379/translation-lifecycle-tests";
 process.env.OPENAI_API_KEY ??= "test-key";
@@ -20,17 +25,39 @@ describe("translation Batch replay boundary", () => {
     const query = vi.fn(async () => {
       queryCount += 1;
       const step = queryCount % 4;
-      if (step === 1) return [{
-        id: "batch-1", provider: "openai", model: "test-model", status: "PROVIDER_COMPLETED",
-        outputFileId: "output-1", errorFileId: null, providerBatchId: "provider-batch-1",
-      }];
-      if (step === 2) return [{ providerCustomId: "custom-1", translationId: "translation-1" }];
-      if (step === 3) return [{
-        translationId: "translation-1", messageId: "message-1", threadId: "thread-1",
-        kind: "MERCHANT", translationStatus: status, retryCount: 0,
-        currentBatchId: "batch-1", targetLanguageTag: "fr-FR", displayLanguageTag: "fr-FR",
-        messageState: "AVAILABLE", messageCreatedAt: new Date(), respondsThroughMerchantVersion: null,
-      }];
+      if (step === 1)
+        return [
+          {
+            id: "batch-1",
+            provider: "openai",
+            model: "test-model",
+            status: "PROVIDER_COMPLETED",
+            outputFileId: "output-1",
+            errorFileId: null,
+            providerBatchId: "provider-batch-1",
+          },
+        ];
+      if (step === 2)
+        return [
+          { providerCustomId: "custom-1", translationId: "translation-1" },
+        ];
+      if (step === 3)
+        return [
+          {
+            translationId: "translation-1",
+            messageId: "message-1",
+            threadId: "thread-1",
+            kind: "MERCHANT",
+            translationStatus: status,
+            retryCount: 0,
+            currentBatchId: "batch-1",
+            targetLanguageTag: "fr-FR",
+            displayLanguageTag: "fr-FR",
+            messageState: "AVAILABLE",
+            messageCreatedAt: new Date(),
+            respondsThroughMerchantVersion: null,
+          },
+        ];
       return [{ count: 0n }];
     });
     const execute = vi.fn(async () => {
@@ -38,14 +65,20 @@ describe("translation Batch replay boundary", () => {
       return 1;
     });
     const database = {
-      $transaction: vi.fn(async (callback: (transaction: unknown) => Promise<unknown>) =>
-        callback({ $queryRaw: query, $executeRaw: execute })),
+      $transaction: vi.fn(
+        async (callback: (transaction: unknown) => Promise<unknown>) =>
+          callback({ $queryRaw: query, $executeRaw: execute }),
+      ),
     };
     const provider = {
-      readOutputFile: vi.fn(async () => [{
-        providerCustomId: "custom-1", status: "completed" as const,
-        translatedText: "Translated", failureCode: null,
-      }]),
+      readOutputFile: vi.fn(async () => [
+        {
+          providerCustomId: "custom-1",
+          status: "completed" as const,
+          translatedText: "Translated",
+          failureCode: null,
+        },
+      ]),
     };
     const service = new TranslationBatchResultsService({
       database,
@@ -53,7 +86,9 @@ describe("translation Batch replay boundary", () => {
     });
 
     await service.apply({ translationBatchId: "batch-1" });
-    await expect(service.apply({ translationBatchId: "batch-1" })).resolves.toMatchObject({ applied: 0 });
+    await expect(
+      service.apply({ translationBatchId: "batch-1" }),
+    ).resolves.toMatchObject({ applied: 0 });
     expect(execute).toHaveBeenCalledTimes(3);
   });
 });

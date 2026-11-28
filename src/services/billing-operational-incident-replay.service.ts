@@ -1,4 +1,9 @@
-import { ShopPlatform, SubscriptionProjectionStatus, type PrismaClient, type Prisma } from "@prisma/client";
+import {
+  ShopPlatform,
+  SubscriptionProjectionStatus,
+  type PrismaClient,
+  type Prisma,
+} from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../lib/db.js";
@@ -34,15 +39,21 @@ export class BillingOperationalIncidentReplayService {
       shop: { is: { platform: ShopPlatform.SHOPIFY } },
       OR: [
         { status: SubscriptionProjectionStatus.UNMAPPED },
-        { lastSyncErrorCode: { not: null, notIn: [...nonActionableBillingErrorCodes] } },
+        {
+          lastSyncErrorCode: {
+            not: null,
+            notIn: [...nonActionableBillingErrorCodes],
+          },
+        },
       ],
     } satisfies Prisma.SubscriptionWhereInput;
-    const findPage = (afterId: string | null) => this.database.subscription.findMany({
-      where: { ...actionable, ...(afterId ? { id: { gt: afterId } } : {}) },
-      orderBy: { id: "asc" },
-      take: REPLAY_BATCH_LIMIT,
-      select: { ...billingIncidentProjectionSelect, shopId: true },
-    });
+    const findPage = (afterId: string | null) =>
+      this.database.subscription.findMany({
+        where: { ...actionable, ...(afterId ? { id: { gt: afterId } } : {}) },
+        orderBy: { id: "asc" },
+        take: REPLAY_BATCH_LIMIT,
+        select: { ...billingIncidentProjectionSelect, shopId: true },
+      });
 
     let rows = await findPage(this.lastSeenSubscriptionId);
     if (rows.length === 0 && this.lastSeenSubscriptionId !== null) {
@@ -70,8 +81,12 @@ export class BillingOperationalIncidentReplayService {
   }
 }
 
-export const billingOperationalIncidentReplayService = new BillingOperationalIncidentReplayService(
-  prisma,
-  billingOperationalIncidentSink,
-  createLogger({ serviceName: "moda-billing-worker", environment: resolveDeploymentEnvironmentName() }),
-);
+export const billingOperationalIncidentReplayService =
+  new BillingOperationalIncidentReplayService(
+    prisma,
+    billingOperationalIncidentSink,
+    createLogger({
+      serviceName: "moda-billing-worker",
+      environment: resolveDeploymentEnvironmentName(),
+    }),
+  );

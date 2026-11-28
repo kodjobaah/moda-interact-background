@@ -58,15 +58,19 @@ describe("BillingReconciliationSchedulerService", () => {
   });
 
   it("keeps periodic reconciliation successful when queue publication fails", async () => {
-    const queue = { add: vi.fn().mockRejectedValue(new Error("Redis unavailable")) };
+    const queue = {
+      add: vi.fn().mockRejectedValue(new Error("Redis unavailable")),
+    };
     const test = harness({ queue });
 
-    await expect(test.service.enqueue(
-      "shop-1",
-      "subscription-1",
-      new Date("2026-09-12T12:01:00.000Z"),
-      test.now(),
-    )).resolves.toBeUndefined();
+    await expect(
+      test.service.enqueue(
+        "shop-1",
+        "subscription-1",
+        new Date("2026-09-12T12:01:00.000Z"),
+        test.now(),
+      ),
+    ).resolves.toBeUndefined();
 
     expect(test.logger.warn).toHaveBeenCalledWith(
       "billing.subscription_reconciliation.enqueue_failed",
@@ -107,7 +111,12 @@ describe("BillingReconciliationSchedulerService", () => {
     });
     expect(test.logger.error).toHaveBeenCalledWith(
       "billing.subscription_reconciliation.error",
-      { shopId: "shop-1", errorCode: "PARTNER_API_ERROR", errorMessage: "Partner unavailable", error: expect.any(Error) },
+      {
+        shopId: "shop-1",
+        errorCode: "PARTNER_API_ERROR",
+        errorMessage: "Partner unavailable",
+        error: expect.any(Error),
+      },
     );
     expect(test.queue.add).toHaveBeenCalledWith(
       "reconcile-subscription",
@@ -126,11 +135,13 @@ describe("BillingReconciliationSchedulerService", () => {
       { billingFrozenRecheckSeconds: 900, billingProviderRetrySeconds: 300 },
     );
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        nextReconcileAt: new Date("2026-09-12T12:15:00.000Z"),
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          nextReconcileAt: new Date("2026-09-12T12:15:00.000Z"),
+        }),
       }),
-    }));
+    );
     expect(test.queue.add).toHaveBeenCalledWith(
       "reconcile-subscription",
       expect.any(Object),
@@ -138,75 +149,146 @@ describe("BillingReconciliationSchedulerService", () => {
     );
   });
 
-
   it("preserves a durable unfreeze accounting block while logging the original provider error", async () => {
-    const test = harness({ status: "SYNC_ERROR", lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT" });
-    const error = Object.assign(new Error("Shopify 503"), { code: "THROTTLED", response: { status: 503 } });
-    await test.service.markSyncError("shop-1", "PARTNER_API_ERROR", error);
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        status: "SYNC_ERROR", lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
-      }),
-      data: { lastSyncedAt: test.now(), nextReconcileAt: new Date("2026-09-12T12:05:00.000Z") },
-    }));
-    expect(test.logger.error).toHaveBeenCalledWith("billing.subscription_reconciliation.error", {
-      shopId: "shop-1", errorCode: "PARTNER_API_ERROR", errorMessage: "Shopify 503", error,
+    const test = harness({
+      status: "SYNC_ERROR",
+      lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
     });
+    const error = Object.assign(new Error("Shopify 503"), {
+      code: "THROTTLED",
+      response: { status: 503 },
+    });
+    await test.service.markSyncError("shop-1", "PARTNER_API_ERROR", error);
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: "SYNC_ERROR",
+          lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
+        }),
+        data: {
+          lastSyncedAt: test.now(),
+          nextReconcileAt: new Date("2026-09-12T12:05:00.000Z"),
+        },
+      }),
+    );
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.error",
+      {
+        shopId: "shop-1",
+        errorCode: "PARTNER_API_ERROR",
+        errorMessage: "Shopify 503",
+        error,
+      },
+    );
     expect(test.queue.add).toHaveBeenCalledOnce();
   });
 
   it("preserves an unfreeze accounting block after a newer FROZEN event and retries on provider cadence", async () => {
-    const test = harness({ status: "FROZEN", lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT" });
-    await test.service.markSyncError("shop-1", "PARTNER_API_ERROR", new Error("Shopify unavailable"), {
-      billingFrozenRecheckSeconds: 3600, billingProviderRetrySeconds: 300,
+    const test = harness({
+      status: "FROZEN",
+      lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
     });
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ status: "FROZEN", lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT" }),
-      data: {
-        lastSyncedAt: test.now(), nextReconcileAt: new Date("2026-09-12T12:05:00.000Z"),
+    await test.service.markSyncError(
+      "shop-1",
+      "PARTNER_API_ERROR",
+      new Error("Shopify unavailable"),
+      {
+        billingFrozenRecheckSeconds: 3600,
+        billingProviderRetrySeconds: 300,
       },
-    }));
-    expect(test.queue.add).toHaveBeenCalledWith("reconcile-subscription", expect.any(Object),
-      expect.objectContaining({ delay: 300_000 }));
+    );
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: "FROZEN",
+          lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
+        }),
+        data: {
+          lastSyncedAt: test.now(),
+          nextReconcileAt: new Date("2026-09-12T12:05:00.000Z"),
+        },
+      }),
+    );
+    expect(test.queue.add).toHaveBeenCalledWith(
+      "reconcile-subscription",
+      expect.any(Object),
+      expect.objectContaining({ delay: 300_000 }),
+    );
   });
 
   it("does not replace a concurrent accounting block when the scanner read was stale", async () => {
     const test = harness({ status: "ACTIVE" });
     test.database.subscription.updateMany.mockResolvedValueOnce({ count: 0 });
-    await test.service.markSyncError("shop-1", "PARTNER_API_ERROR", new Error("Shopify 503"));
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ status: "ACTIVE", lastSyncErrorCode: null }),
-    }));
+    await test.service.markSyncError(
+      "shop-1",
+      "PARTNER_API_ERROR",
+      new Error("Shopify 503"),
+    );
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: "ACTIVE",
+          lastSyncErrorCode: null,
+        }),
+      }),
+    );
     expect(test.queue.add).not.toHaveBeenCalled();
   });
 
   it("reports an actionable scanner error only after a successful CAS", async () => {
     const test = harness();
-    await test.service.markSyncError("shop-1", "INTERNAL_RECONCILIATION_ERROR", new Error("Local projection invalid"));
+    await test.service.markSyncError(
+      "shop-1",
+      "INTERNAL_RECONCILIATION_ERROR",
+      new Error("Local projection invalid"),
+    );
     expect(test.incidentSink.report).toHaveBeenCalledOnce();
     test.incidentSink.report.mockClear();
     test.database.subscription.updateMany.mockResolvedValueOnce({ count: 0 });
-    await test.service.markSyncError("shop-1", "INTERNAL_RECONCILIATION_ERROR", new Error("Stale scanner"));
+    await test.service.markSyncError(
+      "shop-1",
+      "INTERNAL_RECONCILIATION_ERROR",
+      new Error("Stale scanner"),
+    );
     expect(test.incidentSink.report).not.toHaveBeenCalled();
   });
 
   it("publishes an actionable incident using the existing committed-state read", async () => {
-    const test = harness({ status: "SYNC_ERROR", lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT" });
-    await test.service.publishCommittedLifecycleSchedule("shop-1", "subscription-1");
-    expect(test.incidentSink.report).toHaveBeenCalledWith("shop-1", expect.objectContaining({
-      status: "SYNC_ERROR", lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
-    }));
+    const test = harness({
+      status: "SYNC_ERROR",
+      lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
+    });
+    await test.service.publishCommittedLifecycleSchedule(
+      "shop-1",
+      "subscription-1",
+    );
+    expect(test.incidentSink.report).toHaveBeenCalledWith(
+      "shop-1",
+      expect.objectContaining({
+        status: "SYNC_ERROR",
+        lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
+      }),
+    );
     expect(test.database.subscription.findUnique).toHaveBeenCalledOnce();
   });
 
   it("publishes a committed lifecycle schedule from durable subscription state", async () => {
-    const test = harness({ nextReconcileAt: new Date("2026-09-12T12:02:00.000Z") });
+    const test = harness({
+      nextReconcileAt: new Date("2026-09-12T12:02:00.000Z"),
+    });
 
-    await test.service.publishCommittedLifecycleSchedule("shop-1", "subscription-1");
+    await test.service.publishCommittedLifecycleSchedule(
+      "shop-1",
+      "subscription-1",
+    );
 
     expect(test.database.subscription.findUnique).toHaveBeenCalledWith({
       where: { id: "subscription-1" },
-      select: expect.objectContaining({ nextReconcileAt: true, lastSyncErrorCode: true, status: true }),
+      select: expect.objectContaining({
+        nextReconcileAt: true,
+        lastSyncErrorCode: true,
+        status: true,
+      }),
     });
     expect(test.queue.add).toHaveBeenCalledWith(
       "reconcile-subscription",

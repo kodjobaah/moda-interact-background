@@ -9,7 +9,9 @@ export type StoreCategoryTranslationRunStateTransaction = {
 
 type RunStateDatabase = {
   $transaction<T>(
-    callback: (transaction: StoreCategoryTranslationRunStateTransaction) => Promise<T>,
+    callback: (
+      transaction: StoreCategoryTranslationRunStateTransaction,
+    ) => Promise<T>,
   ): Promise<T>;
 };
 
@@ -36,7 +38,8 @@ export class StoreCategoryTranslationRunStateService {
       return this.advanceInTransaction(transaction, runId);
     }
     return this.database.$transaction((currentTransaction) =>
-      this.advanceInTransaction(currentTransaction, runId));
+      this.advanceInTransaction(currentTransaction, runId),
+    );
   }
 
   private async advanceInTransaction(

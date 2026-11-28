@@ -12,7 +12,7 @@ projection, not inferred from original ShopBrand URLs or from the body text.
 `ShopBrandReadyMediaAdapter` reads one `commerce.ShopBrand` record by `shopId`
 using Prisma `findUnique`, selecting only `shopId` and `whatsAppMedia`. It reads
 `shopBrand.publicMedia` through the existing validated Background platform
-configuration reader; an absent configuration *row* uses Admin's default-on-read
+configuration reader; an absent configuration _row_ uses Admin's default-on-read
 policy, not an unchecked environment variable. No policy is cached across
 preparation operations.
 
@@ -30,7 +30,7 @@ exceptions are logged by the existing shared-logger preparer at a bounded
 exception type and rethrown. No customer/source URLs or tokens appear in logs.
 
 Original `shopBrand.logoUrl`, `squareLogoUrl`, and `coverImageUrl` fields remain
-source metadata. When an *existing text variable* requests one of those URLs,
+source metadata. When an _existing text variable_ requests one of those URLs,
 the runtime returns the respective validated derivative and never a raw source.
 The `headerMediaRole` is a separate IMAGE-header parameter and never a TEXT
 placeholder.

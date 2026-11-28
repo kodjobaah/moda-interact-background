@@ -15,7 +15,8 @@ export function validateMerchantPricingTranslatedText(
   if (!value) return null;
 
   if (field.sourceEntityKind === "PLAN") {
-    return field.sourceField === "DESCRIPTION" && value.length <= PLAN_DESCRIPTION_MAX_LENGTH
+    return field.sourceField === "DESCRIPTION" &&
+      value.length <= PLAN_DESCRIPTION_MAX_LENGTH
       ? value
       : null;
   }

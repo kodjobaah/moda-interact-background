@@ -48,9 +48,9 @@ Before enabling BG002 or claiming live media delivery readiness:
    Enforcing TLS ≥1.2 on the fetch client does not prove the Cloudflare zone has
    disabled TLS 1.0/1.1.
 2. Confirm the database-backed R2 credentials used by this local test have
-  `PutObject` and `HeadObject` permission on the configured ShopBrand target
-  bucket. Do not treat the private Merchant Knowledge bucket name as the public
-  ShopBrand bucket.
+   `PutObject` and `HeadObject` permission on the configured ShopBrand target
+   bucket. Do not treat the private Merchant Knowledge bucket name as the public
+   ShopBrand bucket.
 3. Run an isolated image processor invocation with a permitted brand source.
    The processor must verify the current public HTTPS domain returns HTTP 200,
    correct JPEG/PNG Content-Type, and the exact uploaded bytes/hash. A previous

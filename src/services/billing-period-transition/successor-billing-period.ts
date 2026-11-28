@@ -25,9 +25,10 @@ type SuccessorBillingPeriodErrors = {
   incompatibleIncludedCounter: string;
 };
 
-export type EnsureSuccessorBillingPeriodInput = SuccessorBillingPeriodIdentity & {
-  errors: SuccessorBillingPeriodErrors;
-};
+export type EnsureSuccessorBillingPeriodInput =
+  SuccessorBillingPeriodIdentity & {
+    errors: SuccessorBillingPeriodErrors;
+  };
 
 export type CompatibleSuccessorBillingPeriod = { id: string };
 
@@ -49,16 +50,17 @@ export async function findCompatibleSuccessorBillingPeriod(
     throw new Error(input.errors.closedPeriod);
   }
   if (
-    successor.shopId !== input.shopId
-    || successor.subscriptionId !== input.subscriptionId
-    || successor.planId !== input.planId
-    || successor.shopifyPlanHandleSnapshot !== input.shopifyPlanHandleSnapshot
-    || successor.planNameSnapshot !== input.planNameSnapshot
-    || successor.planKindSnapshot !== input.planKindSnapshot
-    || successor.includedRecoveryCreditsGranted !== input.includedRecoveryCreditsGranted
-    || successor.periodStart.getTime() !== input.periodStart.getTime()
-    || successor.periodEnd.getTime() !== input.periodEnd.getTime()
-    || successor.status !== BillingPeriodStatus.OPEN
+    successor.shopId !== input.shopId ||
+    successor.subscriptionId !== input.subscriptionId ||
+    successor.planId !== input.planId ||
+    successor.shopifyPlanHandleSnapshot !== input.shopifyPlanHandleSnapshot ||
+    successor.planNameSnapshot !== input.planNameSnapshot ||
+    successor.planKindSnapshot !== input.planKindSnapshot ||
+    successor.includedRecoveryCreditsGranted !==
+      input.includedRecoveryCreditsGranted ||
+    successor.periodStart.getTime() !== input.periodStart.getTime() ||
+    successor.periodEnd.getTime() !== input.periodEnd.getTime() ||
+    successor.status !== BillingPeriodStatus.OPEN
   ) {
     throw new Error(input.errors.incompatiblePeriod);
   }
@@ -70,20 +72,22 @@ export async function ensureSuccessorBillingPeriod(
   input: EnsureSuccessorBillingPeriodInput,
   existingSuccessor: CompatibleSuccessorBillingPeriod | null,
 ): Promise<CompatibleSuccessorBillingPeriod> {
-  const period = existingSuccessor ?? await transaction.billingPeriod.create({
-    data: {
-      shopId: input.shopId,
-      subscriptionId: input.subscriptionId,
-      planId: input.planId,
-      shopifyPlanHandleSnapshot: input.shopifyPlanHandleSnapshot,
-      planNameSnapshot: input.planNameSnapshot,
-      planKindSnapshot: input.planKindSnapshot,
-      includedRecoveryCreditsGranted: input.includedRecoveryCreditsGranted,
-      periodStart: input.periodStart,
-      periodEnd: input.periodEnd,
-      status: BillingPeriodStatus.OPEN,
-    },
-  });
+  const period =
+    existingSuccessor ??
+    (await transaction.billingPeriod.create({
+      data: {
+        shopId: input.shopId,
+        subscriptionId: input.subscriptionId,
+        planId: input.planId,
+        shopifyPlanHandleSnapshot: input.shopifyPlanHandleSnapshot,
+        planNameSnapshot: input.planNameSnapshot,
+        planKindSnapshot: input.planKindSnapshot,
+        includedRecoveryCreditsGranted: input.includedRecoveryCreditsGranted,
+        periodStart: input.periodStart,
+        periodEnd: input.periodEnd,
+        status: BillingPeriodStatus.OPEN,
+      },
+    }));
 
   if (input.planKindSnapshot === BillingPlanKind.PAID_METERED) {
     const expectedGrant = input.includedRecoveryCreditsGranted;
@@ -93,14 +97,16 @@ export async function ensureSuccessorBillingPeriod(
     // A newly created period cannot have a pre-existing included-credit counter.
     // Only reused periods need a compatibility read before the idempotent upsert.
     if (existingSuccessor) {
-      const counter = await transaction.billingPeriodEntitlementCounter.findUnique({
-        where: {
-          billingPeriodId_counter: {
-            billingPeriodId: period.id,
-            counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+      const counter =
+        await transaction.billingPeriodEntitlementCounter.findUnique({
+          where: {
+            billingPeriodId_counter: {
+              billingPeriodId: period.id,
+              counter:
+                BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+            },
           },
-        },
-      });
+        });
       if (counter && counter.grantedQuantity !== expectedGrant) {
         throw new Error(input.errors.incompatibleIncludedCounter);
       }
@@ -109,7 +115,8 @@ export async function ensureSuccessorBillingPeriod(
       where: {
         billingPeriodId_counter: {
           billingPeriodId: period.id,
-          counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+          counter:
+            BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
         },
       },
       update: {},

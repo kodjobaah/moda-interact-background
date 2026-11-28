@@ -22,27 +22,39 @@ export type WooChargePriceSnapshotInput = {
   quotedCurrency: string;
 };
 
-export function parseChargePaymentEvidence(charge: unknown): ChargePaymentEvidenceResult {
+export function parseChargePaymentEvidence(
+  charge: unknown,
+): ChargePaymentEvidenceResult {
   if (!isRecord(charge)) return incomplete();
-  const intents = Array.isArray(charge.billing_intents) ? charge.billing_intents : [];
-  const transactions = Array.isArray(charge.transactions) ? charge.transactions : [];
+  const intents = Array.isArray(charge.billing_intents)
+    ? charge.billing_intents
+    : [];
+  const transactions = Array.isArray(charge.transactions)
+    ? charge.transactions
+    : [];
   if (intents.length === 0 || transactions.length === 0) return incomplete();
 
   const completedIntentIds = new Set(
-    intents.flatMap((intent) => isRecord(intent)
-      && intent.status === "completed"
-      && isPositiveSafeInteger(intent.id)
-      ? [intent.id]
-      : []),
+    intents.flatMap((intent) =>
+      isRecord(intent) &&
+      intent.status === "completed" &&
+      isPositiveSafeInteger(intent.id)
+        ? [intent.id]
+        : [],
+    ),
   );
-  const candidates = transactions.filter((transaction) => isRecord(transaction)
-    && isPositiveSafeInteger(transaction.id)
-    && isPositiveSafeInteger(transaction.billing_intent_id)
-    && completedIntentIds.has(transaction.billing_intent_id)
-    && typeof transaction.completed_at === "string"
-    && transaction.completed_at.trim().length > 0);
+  const candidates = transactions.filter(
+    (transaction) =>
+      isRecord(transaction) &&
+      isPositiveSafeInteger(transaction.id) &&
+      isPositiveSafeInteger(transaction.billing_intent_id) &&
+      completedIntentIds.has(transaction.billing_intent_id) &&
+      typeof transaction.completed_at === "string" &&
+      transaction.completed_at.trim().length > 0,
+  );
   if (candidates.length === 0) return incomplete();
-  if (candidates.length > 1) return { errorCode: "CHARGE_PAYMENT_EVIDENCE_AMBIGUOUS" };
+  if (candidates.length > 1)
+    return { errorCode: "CHARGE_PAYMENT_EVIDENCE_AMBIGUOUS" };
 
   const transaction = candidates[0];
   if (!isRecord(transaction)) return incomplete();
@@ -54,7 +66,11 @@ export function parseChargePaymentEvidence(charge: unknown): ChargePaymentEviden
   if (!amountRefunded.isZero()) return incomplete();
 
   const intentId = transaction.billing_intent_id;
-  if (!isPositiveSafeInteger(intentId) || !isPositiveSafeInteger(transaction.id)) return incomplete();
+  if (
+    !isPositiveSafeInteger(intentId) ||
+    !isPositiveSafeInteger(transaction.id)
+  )
+    return incomplete();
   return {
     evidence: {
       billingIntentId: intentId,

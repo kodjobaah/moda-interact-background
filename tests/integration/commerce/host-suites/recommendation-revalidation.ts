@@ -10,10 +10,16 @@ export function registerRecommendationRevalidationTests() {
         minimalBody: "verified store fallback",
       });
       expect(candidates).toEqual([
-        "verified full answer", "verified first product", "verified store fallback",
+        "verified full answer",
+        "verified first product",
+        "verified store fallback",
       ]);
-      expect(buildReplyCandidates({ fullBody: "x".repeat(4097), minimalBody: "Store: https://fixture.invalid" }))
-        .toEqual(["Store: https://fixture.invalid"]);
+      expect(
+        buildReplyCandidates({
+          fullBody: "x".repeat(4097),
+          minimalBody: "Store: https://fixture.invalid",
+        }),
+      ).toEqual(["Store: https://fixture.invalid"]);
     });
   });
 }

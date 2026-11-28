@@ -4,24 +4,47 @@ import Redis from "ioredis";
 import { afterAll, describe, expect, it } from "vitest";
 
 const redisUrl = process.env.TEST_REDIS_URL;
-const integration = redisUrl && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
-const digest = (value: object) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const jobId = (shopId: string, eventId: string) => `woo-order-${createHash("sha256")
-  .update(shopId).update("\0").update(eventId).digest("hex")}`;
-const event = (eventId: string, kind: "ORDER_PLACED" | "ORDER_PAID" | "ORDER_CANCELLED") => ({
-  schemaVersion: "woo.activity.v1", eventId, eventType: kind,
-  checkoutKey: "cart-1", occurredAt: "2026-10-20T12:00:00.000Z",
+const integration =
+  redisUrl && process.env.MODA_DISPOSABLE_INTEGRATION === "1"
+    ? describe
+    : describe.skip;
+const digest = (value: object) =>
+  createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const jobId = (shopId: string, eventId: string) =>
+  `woo-order-${createHash("sha256")
+    .update(shopId)
+    .update("\0")
+    .update(eventId)
+    .digest("hex")}`;
+const event = (
+  eventId: string,
+  kind: "ORDER_PLACED" | "ORDER_PAID" | "ORDER_CANCELLED",
+) => ({
+  schemaVersion: "woo.activity.v1",
+  eventId,
+  eventType: kind,
+  checkoutKey: "cart-1",
+  occurredAt: "2026-10-20T12:00:00.000Z",
   order: { orderId: "order-1", checkoutKey: "cart-1", status: "processing" },
 });
 const payload = (shopId: string, value: ReturnType<typeof event>) => ({
-  ...value, shopId, contentDigest: digest(value),
+  ...value,
+  shopId,
+  contentDigest: digest(value),
 });
 
 /** Wait for the real worker's job-specific event instead of sleeping. */
-function untilJob(worker: { on: (event: string, handler: (...args: any[]) => void) => unknown },
-  id: string, state: "completed" | "failed", count = 1): Promise<void> {
+function untilJob(
+  worker: { on: (event: string, handler: (...args: any[]) => void) => unknown },
+  id: string,
+  state: "completed" | "failed",
+  count = 1,
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`Woo order ${state} timeout`)), 20_000);
+    const timeout = setTimeout(
+      () => reject(new Error(`Woo order ${state} timeout`)),
+      20_000,
+    );
     let seen = 0;
     worker.on(state, (job: { id?: string } | undefined) => {
       if (job?.id !== id || ++seen !== count) return;
@@ -46,31 +69,50 @@ integration("ARCH-035 Woo order capture with disposable Redis/BullMQ", () => {
     const queue = new Queue("woo-order-capture-v1", { connection });
     const checkoutQueue = new Queue("woo-checkout-capture-v1", { connection });
     const shopifyOrderQueue = new Queue("order-events", { connection });
-    const worker = createWooOrderCaptureWorker({ onOrder: async () => ({ kind: "placed-suppressed" }) });
+    const worker = createWooOrderCaptureWorker({
+      onOrder: async () => ({ kind: "placed-suppressed" }),
+    });
     try {
       // These shared queues can retain completed or failed jobs from earlier integration
       // suites. Assert that order capture creates no *new* work in either queue.
       const states = ["waiting", "active", "completed", "failed"] as const;
-      const [checkoutCountsBefore, shopifyOrderCountsBefore] = await Promise.all([
-        checkoutQueue.getJobCounts(...states),
-        shopifyOrderQueue.getJobCounts(...states),
-      ]);
+      const [checkoutCountsBefore, shopifyOrderCountsBefore] =
+        await Promise.all([
+          checkoutQueue.getJobCounts(...states),
+          shopifyOrderQueue.getJobCounts(...states),
+        ]);
       await worker.waitUntilReady();
       const shopId = `woo-${randomUUID()}`;
       const otherShop = `woo-${randomUUID()}`;
       // The first order event is independent of checkout capture and payment state.
-      for (const kind of ["ORDER_PAID", "ORDER_PLACED", "ORDER_CANCELLED"] as const) {
+      for (const kind of [
+        "ORDER_PAID",
+        "ORDER_PLACED",
+        "ORDER_CANCELLED",
+      ] as const) {
         const value = event(`event-${randomUUID()}`, kind);
         const id = jobId(shopId, value.eventId);
         const completed = untilJob(worker, id, "completed");
-        const first = await queue.add("order-lifecycle", payload(shopId, value), {
-          jobId: id, removeOnComplete: false,
-        });
+        const first = await queue.add(
+          "order-lifecycle",
+          payload(shopId, value),
+          {
+            jobId: id,
+            removeOnComplete: false,
+          },
+        );
         await completed;
-        expect(await queue.getJob(id).then((job) => job?.getState())).toBe("completed");
-        const duplicate = await queue.add("order-lifecycle", payload(shopId, value), {
-          jobId: id, removeOnComplete: false,
-        });
+        expect(await queue.getJob(id).then((job) => job?.getState())).toBe(
+          "completed",
+        );
+        const duplicate = await queue.add(
+          "order-lifecycle",
+          payload(shopId, value),
+          {
+            jobId: id,
+            removeOnComplete: false,
+          },
+        );
         expect(duplicate.id).toBe(first.id);
       }
       const crossTenantEvent = event(`event-${randomUUID()}`, "ORDER_PAID");
@@ -78,14 +120,23 @@ integration("ARCH-035 Woo order capture with disposable Redis/BullMQ", () => {
         const id = jobId(shop, crossTenantEvent.eventId);
         const done = untilJob(worker, id, "completed");
         await queue.add("order-lifecycle", payload(shop, crossTenantEvent), {
-          jobId: id, removeOnComplete: false,
+          jobId: id,
+          removeOnComplete: false,
         });
         await done;
-        expect(await queue.getJob(id).then((job) => job?.getState())).toBe("completed");
+        expect(await queue.getJob(id).then((job) => job?.getState())).toBe(
+          "completed",
+        );
       }
-      expect(jobId(shopId, crossTenantEvent.eventId)).not.toBe(jobId(otherShop, crossTenantEvent.eventId));
-      expect(await checkoutQueue.getJobCounts(...states)).toEqual(checkoutCountsBefore);
-      expect(await shopifyOrderQueue.getJobCounts(...states)).toEqual(shopifyOrderCountsBefore);
+      expect(jobId(shopId, crossTenantEvent.eventId)).not.toBe(
+        jobId(otherShop, crossTenantEvent.eventId),
+      );
+      expect(await checkoutQueue.getJobCounts(...states)).toEqual(
+        checkoutCountsBefore,
+      );
+      expect(await shopifyOrderQueue.getJobCounts(...states)).toEqual(
+        shopifyOrderCountsBefore,
+      );
     } finally {
       await worker.close();
       await queue.close();
@@ -101,19 +152,30 @@ integration("ARCH-035 Woo order capture with disposable Redis/BullMQ", () => {
     ]);
     const connection = new Redis(redisUrl!, { maxRetriesPerRequest: null });
     const queue = new Queue("woo-order-capture-v1", { connection });
-    const worker = createWooOrderCaptureWorker({ onOrder: async () => ({ kind: "placed-suppressed" }) });
+    const worker = createWooOrderCaptureWorker({
+      onOrder: async () => ({ kind: "placed-suppressed" }),
+    });
     try {
       await worker.waitUntilReady();
       const shopId = `woo-${randomUUID()}`;
       for (const invalidData of [
-        (source: ReturnType<typeof event>) => ({ ...payload(shopId, source), contentDigest: "0".repeat(64) }),
-        (source: ReturnType<typeof event>) => ({ ...payload(shopId, source), order: { ...source.order, checkoutKey: "different" } }),
+        (source: ReturnType<typeof event>) => ({
+          ...payload(shopId, source),
+          contentDigest: "0".repeat(64),
+        }),
+        (source: ReturnType<typeof event>) => ({
+          ...payload(shopId, source),
+          order: { ...source.order, checkoutKey: "different" },
+        }),
       ]) {
         const source = event(`event-${randomUUID()}`, "ORDER_PAID");
         const id = jobId(shopId, source.eventId);
         const failed = untilJob(worker, id, "failed", 2);
         await queue.add("order-lifecycle", invalidData(source), {
-          jobId: id, attempts: 2, backoff: { type: "fixed", delay: 20 }, removeOnFail: false,
+          jobId: id,
+          attempts: 2,
+          backoff: { type: "fixed", delay: 20 },
+          removeOnFail: false,
         });
         await failed;
         const stored = await queue.getJob(id);

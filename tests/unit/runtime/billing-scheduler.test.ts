@@ -7,7 +7,12 @@ describe("billing reconciliation scheduler", () => {
     vi.useFakeTimers();
     try {
       let resolveScan!: () => void;
-      const scan = vi.fn(() => new Promise<void>((resolve) => { resolveScan = resolve; }));
+      const scan = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveScan = resolve;
+          }),
+      );
       const stop = startBillingReconciliationScheduler(scan, 60_000);
 
       await vi.advanceTimersByTimeAsync(60_000);
@@ -27,7 +32,8 @@ describe("billing reconciliation scheduler", () => {
   it("keeps future scans scheduled after failure and cancels on shutdown", async () => {
     vi.useFakeTimers();
     try {
-      const scan = vi.fn()
+      const scan = vi
+        .fn()
         .mockRejectedValueOnce(new Error("temporary failure"))
         .mockResolvedValue(undefined);
       const error = vi.fn();
@@ -49,7 +55,10 @@ describe("billing reconciliation scheduler", () => {
     vi.useFakeTimers();
     try {
       const failure = new Error("provider failure");
-      const scan = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(undefined);
+      const scan = vi
+        .fn()
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValue(undefined);
       const reporter = vi.fn();
       const stop = startBillingReconciliationScheduler(scan, 60_000, reporter);
 

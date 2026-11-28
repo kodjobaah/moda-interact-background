@@ -1,5 +1,8 @@
 import { decideRecoveryOutreachRetry } from "../../domain/recovery-outreach-retry-policy.js";
-import { requireLineage, type CompensationTransaction } from "../recovery-delivery-compensation/types.js";
+import {
+  requireLineage,
+  type CompensationTransaction,
+} from "../recovery-delivery-compensation/types.js";
 
 type RetryIntentInput = {
   attemptId: string;
@@ -31,7 +34,11 @@ export async function recordRecoveryDeliveryRetryIntent(
       recoveryDeliveryMaxRetries: true,
     },
   });
-  const decision = decideRecoveryOutreachRetry(input.providerFailureCode, input.failedAt, config);
+  const decision = decideRecoveryOutreachRetry(
+    input.providerFailureCode,
+    input.failedAt,
+    config,
+  );
   const intent = await tx.recoveryOutreachRetryIntent.upsert({
     where: { failedAttemptId: input.attemptId },
     create: {
@@ -44,19 +51,38 @@ export async function recordRecoveryDeliveryRetryIntent(
       expectedLastExternalActivityAt: input.expectedLastExternalActivityAt,
     },
     update: {},
-    select: { id: true, failedMessageId: true, fundingReservationId: true, providerFailureCode: true, cancelledAt: true, policy: true, notBeforeAt: true },
+    select: {
+      id: true,
+      failedMessageId: true,
+      fundingReservationId: true,
+      providerFailureCode: true,
+      cancelledAt: true,
+      policy: true,
+      notBeforeAt: true,
+    },
   });
-  requireLineage(intent.failedMessageId === input.messageId && intent.fundingReservationId === input.reservationId,
-    "retry decision immutable identity mismatch");
+  requireLineage(
+    intent.failedMessageId === input.messageId &&
+      intent.fundingReservationId === input.reservationId,
+    "retry decision immutable identity mismatch",
+  );
   // A v3 receipt can enrich an earlier code-less FAILED receipt. Keep the
   // same identity and original failure clock; never revive a cancelled plan.
-  if (intent.providerFailureCode === null && input.providerFailureCode !== null && !intent.cancelledAt) {
+  if (
+    intent.providerFailureCode === null &&
+    input.providerFailureCode !== null &&
+    !intent.cancelledAt
+  ) {
     const enriched = await tx.recoveryOutreachRetryIntent.updateMany({
       where: { id: intent.id, providerFailureCode: null, cancelledAt: null },
       data: { providerFailureCode: input.providerFailureCode, ...decision },
     });
     requireLineage(enriched.count === 1, "retry decision enrichment conflict");
-    return { ...intent, providerFailureCode: input.providerFailureCode, ...decision };
+    return {
+      ...intent,
+      providerFailureCode: input.providerFailureCode,
+      ...decision,
+    };
   }
   return intent;
 }

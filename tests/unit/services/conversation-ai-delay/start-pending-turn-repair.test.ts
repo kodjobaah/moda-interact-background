@@ -10,13 +10,19 @@ describe("startPendingTurnRepairPoller", () => {
   it("runs every 30 seconds, logs failures, and cancels future cycles on close", async () => {
     vi.useFakeTimers();
     const error = new Error("temporary database failure");
-    const runPass = vi.fn().mockRejectedValueOnce(error).mockResolvedValue(undefined);
+    const runPass = vi
+      .fn()
+      .mockRejectedValueOnce(error)
+      .mockResolvedValue(undefined);
     const log = { error: vi.fn() };
     const close = startPendingTurnRepairPoller({ runPass, log });
 
     await vi.advanceTimersByTimeAsync(PENDING_TURN_REPAIR_INTERVAL_MS);
     expect(runPass).toHaveBeenCalledTimes(1);
-    expect(log.error).toHaveBeenCalledWith("whatsapp.turn.repair.pass_failed", expect.objectContaining({ error }));
+    expect(log.error).toHaveBeenCalledWith(
+      "whatsapp.turn.repair.pass_failed",
+      expect.objectContaining({ error }),
+    );
 
     await vi.advanceTimersByTimeAsync(PENDING_TURN_REPAIR_INTERVAL_MS);
     expect(runPass).toHaveBeenCalledTimes(2);
@@ -28,8 +34,16 @@ describe("startPendingTurnRepairPoller", () => {
   it("does not overlap repair passes and waits for an active pass during shutdown", async () => {
     vi.useFakeTimers();
     let finishPass: (() => void) | undefined;
-    const runPass = vi.fn(() => new Promise<void>((resolve) => { finishPass = resolve; }));
-    const close = startPendingTurnRepairPoller({ runPass, log: { error: vi.fn() } });
+    const runPass = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishPass = resolve;
+        }),
+    );
+    const close = startPendingTurnRepairPoller({
+      runPass,
+      log: { error: vi.fn() },
+    });
 
     await vi.advanceTimersByTimeAsync(PENDING_TURN_REPAIR_INTERVAL_MS);
     expect(runPass).toHaveBeenCalledTimes(1);
@@ -37,7 +51,9 @@ describe("startPendingTurnRepairPoller", () => {
     expect(runPass).toHaveBeenCalledTimes(1);
 
     let closed = false;
-    const closing = close().then(() => { closed = true; });
+    const closing = close().then(() => {
+      closed = true;
+    });
     await Promise.resolve();
     expect(closed).toBe(false);
     finishPass?.();

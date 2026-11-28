@@ -1,15 +1,21 @@
 import { canProcessConversation } from "../services/recovery-sender-pool/inbound-authority.js";
-import { AiFailureFallbackService, withGenerationBudget } from '../services/ai-failure-fallback.js';
-import { brandedMainReplyEnabled } from '../services/recovery-multipart/composition.js';
-import { compositeReplyEnabled } from '../services/recovery-multipart/composite.js';
-import { bindMultipartQueue, recoveryMultipartEngine, processMultipartStatus, MULTIPART_CONTINUATION_JOB } from "../services/recovery-multipart/runtime.js";
+import {
+  AiFailureFallbackService,
+  withGenerationBudget,
+} from "../services/ai-failure-fallback.js";
+import { brandedMainReplyEnabled } from "../services/recovery-multipart/composition.js";
+import { compositeReplyEnabled } from "../services/recovery-multipart/composite.js";
+import {
+  bindMultipartQueue,
+  recoveryMultipartEngine,
+  processMultipartStatus,
+  MULTIPART_CONTINUATION_JOB,
+} from "../services/recovery-multipart/runtime.js";
 import { Queue, Worker } from "bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { observeConversationTurn } from "@modainteract/moda-interact-shared/observability/genai";
-import {
-  safeParseNormalizedWhatsAppInboundMessage,
-} from "@modainteract/moda-interact-shared/whatsapp";
+import { safeParseNormalizedWhatsAppInboundMessage } from "@modainteract/moda-interact-shared/whatsapp";
 import {
   META_TEMPLATE_STATUS_JOB,
   type MetaTemplateStatusObservationV2,
@@ -40,7 +46,11 @@ import {
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
-import { recoveryRecipientAttemptsSelect, recoveryRecipientCustomerSelect, resolveRecoveryRecipient } from "../services/recovery-recipient-ownership.js";
+import {
+  recoveryRecipientAttemptsSelect,
+  recoveryRecipientCustomerSelect,
+  resolveRecoveryRecipient,
+} from "../services/recovery-recipient-ownership.js";
 
 const logger = createLogger({
   serviceName: "moda-messaging-worker",
@@ -54,7 +64,13 @@ const bullMQTelemetry = createBullMQTelemetry({
 const workerMetricDefinition = {
   workerName: "whatsapp",
   queueName: "whatsapp-events",
-  jobNames: ["message-received", "message-status", "process-conversation-turn", META_TEMPLATE_STATUS_JOB, MULTIPART_CONTINUATION_JOB],
+  jobNames: [
+    "message-received",
+    "message-status",
+    "process-conversation-turn",
+    META_TEMPLATE_STATUS_JOB,
+    MULTIPART_CONTINUATION_JOB,
+  ],
 } as const;
 const conversationTurnObservation = {
   mapException: () => ({
@@ -74,72 +90,96 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
   Awaited<ReturnType<typeof runCommerceAgent>>
 >({
   queue: whatsappQueue,
-  currentRouteActive: id => canProcessConversation(prisma,id),
+  currentRouteActive: (id) => canProcessConversation(prisma, id),
   conversation: conversationService,
   moderation: moderationTurnGate,
   ownership: new AiTurnOwnershipService(),
   admission: outboundWhatsAppAdmissionService,
   abuseAdmission: inboundWhatsAppAbuseAdmissionService,
   loadTurn: loadConversationTurn,
-  runAgent: (context,options) => options ? withGenerationBudget(options.deadlineAt, signal => runCommerceAgent(context,{signal})) : runCommerceAgent(context),
-  prepareFailureFallback: input => new AiFailureFallbackService().prepare(input),
-  aiWrapper: new ConversationWrapperService({ onMissingSlot: "passthrough", logger }),
+  runAgent: (context, options) =>
+    options
+      ? withGenerationBudget(options.deadlineAt, (signal) =>
+          runCommerceAgent(context, { signal }),
+        )
+      : runCommerceAgent(context),
+  prepareFailureFallback: (input) =>
+    new AiFailureFallbackService().prepare(input),
+  aiWrapper: new ConversationWrapperService({
+    onMissingSlot: "passthrough",
+    logger,
+  }),
   getResult: (result) => result,
   logger,
 });
 
 export function createWhatsappWorker() {
   const worker = new Worker<
-  WhatsAppInboundEvent | ConversationTurnJob | MetaTemplateStatusObservationV2 | {messageId:string}
->(
-  "whatsapp-events",
+    | WhatsAppInboundEvent
+    | ConversationTurnJob
+    | MetaTemplateStatusObservationV2
+    | { messageId: string }
+  >(
+    "whatsapp-events",
 
-  async (job) =>
-    observeWorkerJob(workerMetricDefinition, job, async () => {
-      logger.debug("whatsapp.job.started", {
-        jobId: normalizeJobId(job.id),
-        jobName: job.name,
-        attemptsMade: job.attemptsMade,
-        configuredAttempts: job.opts.attempts ?? 1,
-      });
-      switch (job.name) {
-        case "message-received":
-          await processInboundJobData(job.data, job.id, { finalAttempt: job.attemptsMade + 1 >= (job.opts.attempts ?? 1) });
-          return;
+    async (job) =>
+      observeWorkerJob(workerMetricDefinition, job, async () => {
+        logger.debug("whatsapp.job.started", {
+          jobId: normalizeJobId(job.id),
+          jobName: job.name,
+          attemptsMade: job.attemptsMade,
+          configuredAttempts: job.opts.attempts ?? 1,
+        });
+        switch (job.name) {
+          case "message-received":
+            await processInboundJobData(job.data, job.id, {
+              finalAttempt: job.attemptsMade + 1 >= (job.opts.attempts ?? 1),
+            });
+            return;
 
-        case "process-conversation-turn":
-          await conversationTurnProcessor.process(
-            job.data as ConversationTurnJob,
-            job,
-          );
-          return;
+          case "process-conversation-turn":
+            await conversationTurnProcessor.process(
+              job.data as ConversationTurnJob,
+              job,
+            );
+            return;
 
-        case "message-status":
-          if (!(await processMultipartStatus(job.data))) await whatsappProviderStatusService.process(job.data);
-          return;
+          case "message-status":
+            if (!(await processMultipartStatus(job.data)))
+              await whatsappProviderStatusService.process(job.data);
+            return;
 
-        case MULTIPART_CONTINUATION_JOB: {
-          const data=job.data as {messageId?:unknown};
-          if(typeof data.messageId!=="string" || !data.messageId || data.messageId.length>128) throw new Error("Invalid multipart continuation identity");
-          await recoveryMultipartEngine.continue(data.messageId);
-          return;
+          case MULTIPART_CONTINUATION_JOB: {
+            const data = job.data as { messageId?: unknown };
+            if (
+              typeof data.messageId !== "string" ||
+              !data.messageId ||
+              data.messageId.length > 128
+            )
+              throw new Error("Invalid multipart continuation identity");
+            await recoveryMultipartEngine.continue(data.messageId);
+            return;
+          }
+
+          case META_TEMPLATE_STATUS_JOB:
+            await processTemplateStatusJob(job.name, job.data, job.id);
+            return;
+
+          default:
+            throw new Error(`Unknown WhatsApp job: ${job.name}`);
         }
+      }),
 
-        case META_TEMPLATE_STATUS_JOB:
-          await processTemplateStatusJob(job.name, job.data, job.id);
-          return;
-
-        default:
-          throw new Error(`Unknown WhatsApp job: ${job.name}`);
-      }
-    }),
-
-  {
-    connection: connectionRedis,
-    telemetry: bullMQTelemetry,
-  },
-);
-  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "whatsappQueueGlobalConcurrency");
+    {
+      connection: connectionRedis,
+      telemetry: bullMQTelemetry,
+    },
+  );
+  bindWorkerConcurrency(
+    worker,
+    backgroundRuntimeConfigService,
+    "whatsappQueueGlobalConcurrency",
+  );
   worker.on("completed", (job) => {
     logger.debug("whatsapp.job.completed", {
       jobId: normalizeJobId(job.id),
@@ -172,15 +212,26 @@ export async function processInboundMessage(
   event: WhatsAppInboundEvent,
   audioOptions: { finalAttempt?: boolean } = {},
 ) {
-  return processRoutedInboundMessage(event, audioOptions, logger,
-    (conversationId, version) => conversationTurnProcessor.enqueue(conversationId, version));
+  return processRoutedInboundMessage(
+    event,
+    audioOptions,
+    logger,
+    (conversationId, version) =>
+      conversationTurnProcessor.enqueue(conversationId, version),
+  );
 }
 
-function isContinuingRecoveryStatus(status: string | null | undefined): boolean {
+function isContinuingRecoveryStatus(
+  status: string | null | undefined,
+): boolean {
   return status === "MESSAGE_SENT" || status === "ENGAGED";
 }
 
-export async function processInboundJobData(input: unknown, jobId?: string, audioOptions: { finalAttempt?: boolean } = {}) {
+export async function processInboundJobData(
+  input: unknown,
+  jobId?: string,
+  audioOptions: { finalAttempt?: boolean } = {},
+) {
   const parsed = safeParseNormalizedWhatsAppInboundMessage(input);
   if (!parsed.success) {
     logger.warn("whatsapp.inbound.invalid_job", {
@@ -216,7 +267,10 @@ function boundedError(error: unknown): {
   };
 
   redact(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]");
-  redact(/\b((?:api[_-]?key|token|password|secret|authorization)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+  redact(
+    /\b((?:api[_-]?key|token|password|secret|authorization)\s*[=:]\s*)[^\s,;]+/gi,
+    "$1[REDACTED]",
+  );
   redact(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED]");
   redact(/\+?\d[\d\s().-]{7,}\d/g, "[REDACTED]");
 
@@ -257,7 +311,9 @@ export async function loadConversationTurn(
           id: true,
           shopId: true,
           status: true,
-          shop: { select: { domain: true, status: true, defaultCountryCode: true } },
+          shop: {
+            select: { domain: true, status: true, defaultCountryCode: true },
+          },
           customer: { select: recoveryRecipientCustomerSelect },
           outreachAttempts: recoveryRecipientAttemptsSelect,
         },
@@ -265,8 +321,14 @@ export async function loadConversationTurn(
       messages: {
         where: {
           OR: [
-            { contentType: { not: "AUDIO" }, createdAt: { gte: pendingTurnStartedAt } },
-            { contentType: "AUDIO", transcriptionCompletedAt: { gte: pendingTurnStartedAt } },
+            {
+              contentType: { not: "AUDIO" },
+              createdAt: { gte: pendingTurnStartedAt },
+            },
+            {
+              contentType: "AUDIO",
+              transcriptionCompletedAt: { gte: pendingTurnStartedAt },
+            },
           ],
           direction: "INBOUND",
           senderType: "CUSTOMER",
@@ -277,11 +339,13 @@ export async function loadConversationTurn(
   });
   const shopId = conversation.checkoutRecovery?.shopId;
   const owner = conversation.checkoutRecovery;
-  const to = owner && (!conversation.shopId || conversation.shopId === owner.shopId) &&
+  const to =
+    owner &&
+    (!conversation.shopId || conversation.shopId === owner.shopId) &&
     (!conversation.customerId || conversation.customerId === owner.customer?.id)
-    ? resolveRecoveryRecipient(owner, conversationId) : null;
-  const shopStatus =
-    conversation.checkoutRecovery?.shop?.status;
+      ? resolveRecoveryRecipient(owner, conversationId)
+      : null;
+  const shopStatus = conversation.checkoutRecovery?.shop?.status;
   const recoveryStatus = conversation.checkoutRecovery?.status;
   const executionScope = isContinuingRecoveryStatus(recoveryStatus)
     ? "recovery"
@@ -318,9 +382,12 @@ export async function loadConversationTurn(
     ),
   } as const;
 
-  if (!conversation.checkoutRecoveryId) throw new Error("Recovery ownership is required");
+  if (!conversation.checkoutRecoveryId)
+    throw new Error("Recovery ownership is required");
   const context = await checkoutRecoveryService.getAgentContext({
-    checkoutRecoveryId: conversation.checkoutRecoveryId, conversationId, pendingTurnStartedAt,
+    checkoutRecoveryId: conversation.checkoutRecoveryId,
+    conversationId,
+    pendingTurnStartedAt,
   });
 
   return {
@@ -328,7 +395,12 @@ export async function loadConversationTurn(
     to,
     ...settledMetadata,
     context,
-    ...(context.conversation.oversized ? { clarificationText: "Please send a shorter question so I can help with your basket." } : {}),
+    ...(context.conversation.oversized
+      ? {
+          clarificationText:
+            "Please send a shorter question so I can help with your basket.",
+        }
+      : {}),
     languageMessage: context.conversation.messages
       .filter((message) => message.role === "user")
       .map((message) => message.content)

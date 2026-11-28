@@ -10,8 +10,14 @@ import { PostContractRecoveryPolicyResolver } from "./post-contract-recovery-pol
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import type { ShopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
-import type { SendTemplateInput, SendTextInput } from "../integration/whatsapp/types.js";
-import { moderationAssessmentService, type ModerationAssessmentService } from "./conversation-moderation/moderation-assessment.service.js";
+import type {
+  SendTemplateInput,
+  SendTextInput,
+} from "../integration/whatsapp/types.js";
+import {
+  moderationAssessmentService,
+  type ModerationAssessmentService,
+} from "./conversation-moderation/moderation-assessment.service.js";
 import { AiTurnOwnershipService } from "./recovery-conversation/ai-turn-ownership.service.js";
 import { OutboundSendFenceService } from "./recovery-conversation/outbound-send-fence.service.js";
 import { recoveryRuntimeEligibility } from "./recovery-conversation/recovery-runtime-eligibility.service.js";
@@ -27,13 +33,18 @@ import type {
   OutboundAdmissionResult,
 } from "./outbound-whatsapp-admission/outbound-whatsapp-admission.types.js";
 export type {
-  InitialOutreachAdmissionScope, InitialOutreachMessageEvidence, InitialOutreachAdmissionLookup,
+  InitialOutreachAdmissionScope,
+  InitialOutreachMessageEvidence,
+  InitialOutreachAdmissionLookup,
   OutboundAdmissionInput,
   OutboundAdmissionResult,
   OutboundSuppressionReason,
 } from "./outbound-whatsapp-admission/outbound-whatsapp-admission.types.js";
 
-import { recoveryStoredConsentService, type StoredRecoveryConsentReader } from "./recovery-conversation/recovery-stored-consent.service.js";
+import {
+  recoveryStoredConsentService,
+  type StoredRecoveryConsentReader,
+} from "./recovery-conversation/recovery-stored-consent.service.js";
 
 const MAX_TRANSACTION_RETRIES = 3;
 type AdmissionDatabase = Pick<
@@ -60,13 +71,18 @@ export class OutboundWhatsAppAdmissionService {
       new EffectiveBillingPolicyResolver(client),
     provider = whatsAppService,
     maxRetries = MAX_TRANSACTION_RETRIES,
-    executionEligibility: Pick<ShopExecutionEligibilityService, "evaluate"> =
-      shopExecutionEligibilityService,
+    executionEligibility: Pick<
+      ShopExecutionEligibilityService,
+      "evaluate"
+    > = shopExecutionEligibilityService,
     createPostContractPolicyResolver = (client: Prisma.TransactionClient) =>
       new PostContractRecoveryPolicyResolver(client),
     moderation: ModerationAssessmentService = moderationAssessmentService,
     ownership = new AiTurnOwnershipService(),
-    recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
+    recoveryFence = new OutboundSendFenceService(
+      undefined,
+      recoveryRuntimeEligibility,
+    ),
     recoveryConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
   ) {
     this.reservation = new OutboundAdmissionReservationService(
@@ -96,18 +112,22 @@ export class OutboundWhatsAppAdmissionService {
     return this.reservation.findExistingAdmission(idempotencyKey);
   }
 
-  inspectInitialOutreachAdmission(
-    scope: InitialOutreachAdmissionScope,
-  ) {
+  inspectInitialOutreachAdmission(scope: InitialOutreachAdmissionScope) {
     return this.reservation.inspectInitialOutreachAdmission(scope);
   }
 
-  async reserve(input: OutboundAdmissionInput): Promise<OutboundAdmissionResult> {
+  async reserve(
+    input: OutboundAdmissionInput,
+  ): Promise<OutboundAdmissionResult> {
     return this.reservation.reserve(input);
   }
 
   async sendText(
-    input: OutboundAdmissionInput & Omit<SendTextInput, "to"> & { to: string; expectedControlRevision?: number },
+    input: OutboundAdmissionInput &
+      Omit<SendTextInput, "to"> & {
+        to: string;
+        expectedControlRevision?: number;
+      },
   ): Promise<OutboundAdmissionResult> {
     const admission = await this.reserve({ ...input, content: input.text });
     if (admission.kind !== "admitted") return admission;
@@ -117,37 +137,64 @@ export class OutboundWhatsAppAdmissionService {
       to: input.to,
       text: admission.terminal ? TERMINAL_MESSAGE : input.text,
       prepareRecoveryFooter: true,
-      ...(input.previewUrl !== undefined ? { previewUrl: input.previewUrl } : {}),
-      ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
+      ...(input.previewUrl !== undefined
+        ? { previewUrl: input.previewUrl }
+        : {}),
+      ...(input.expectedControlRevision === undefined
+        ? {}
+        : { expectedControlRevision: input.expectedControlRevision }),
       ...(input.replyToProviderMessageId
         ? { replyToProviderMessageId: input.replyToProviderMessageId }
         : {}),
     });
   }
 
-  async resumeInitialTemplate(input: InitialOutreachAdmissionScope & {
-    messageId: string;
-    recoveryCreditSourceKey: string;
-    template: Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number };
-  }): Promise<OutboundAdmissionResult> {
+  async resumeInitialTemplate(
+    input: InitialOutreachAdmissionScope & {
+      messageId: string;
+      recoveryCreditSourceKey: string;
+      template: Omit<SendTemplateInput, "to"> & {
+        to: string;
+        expectedControlRevision?: number;
+      };
+    },
+  ): Promise<OutboundAdmissionResult> {
     const existing = await this.inspectInitialOutreachAdmission(input);
     if (existing.kind !== "prepared" || existing.message.id !== input.messageId)
       return { kind: "suppressed", reason: "duplicate" };
-    return this.delivery.sendPreparedTemplate({
-      kind: "admitted", shopId: input.shopId, messageId: existing.message.id,
-      conversationId: existing.message.conversationId, terminal: false, executionScope: "recovery",
-    }, { ...input.template, initialOutreach: input, recoveryCreditSourceKey: input.recoveryCreditSourceKey });
+    return this.delivery.sendPreparedTemplate(
+      {
+        kind: "admitted",
+        shopId: input.shopId,
+        messageId: existing.message.id,
+        conversationId: existing.message.conversationId,
+        terminal: false,
+        executionScope: "recovery",
+      },
+      {
+        ...input.template,
+        initialOutreach: input,
+        recoveryCreditSourceKey: input.recoveryCreditSourceKey,
+      },
+    );
   }
 
   async sendTemplate(
     input: OutboundAdmissionInput &
-      Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
+      Omit<SendTemplateInput, "to"> & {
+        to: string;
+        expectedControlRevision?: number;
+      },
   ): Promise<OutboundAdmissionResult> {
-    if (input.initialOutreach && (
-      input.senderType !== "AUTOMATION" || input.shopId !== input.initialOutreach.shopId ||
-      input.idempotencyKey !== `recovery-outreach:${input.initialOutreach.outreachAttemptId}` ||
-      !input.recoveryCreditSourceKey
-    )) return { kind: "suppressed", reason: "conversation-invalid" };
+    if (
+      input.initialOutreach &&
+      (input.senderType !== "AUTOMATION" ||
+        input.shopId !== input.initialOutreach.shopId ||
+        input.idempotencyKey !==
+          `recovery-outreach:${input.initialOutreach.outreachAttemptId}` ||
+        !input.recoveryCreditSourceKey)
+    )
+      return { kind: "suppressed", reason: "conversation-invalid" };
     const admission = await this.reserve(input);
     if (admission.kind !== "admitted") return admission;
 
@@ -162,7 +209,8 @@ export class OutboundWhatsAppAdmissionService {
       replyToProviderMessageId?: string;
       expectedControlRevision?: number;
       expectedInboundVersion?: number;
-      prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
+      prepareRecoveryFooter?: true;
+      recoveryShopHeader?: RecoveryShopHeaderReceipt;
       productContextUpdate?: CommerceConversationProductContext;
     },
   ): Promise<OutboundAdmissionResult> {
@@ -171,7 +219,8 @@ export class OutboundWhatsAppAdmissionService {
 
   async sendPreparedConversation(
     input: Extract<OutboundAdmissionResult, { kind: "admitted" }> & {
-      brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
+      brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef;
+      deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
       presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
       to: string;
       text: string;
@@ -179,7 +228,8 @@ export class OutboundWhatsAppAdmissionService {
       replyToProviderMessageId?: string;
       expectedControlRevision?: number;
       expectedInboundVersion?: number;
-      prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
+      prepareRecoveryFooter?: true;
+      recoveryShopHeader?: RecoveryShopHeaderReceipt;
       productContextUpdate?: CommerceConversationProductContext;
     },
   ): Promise<OutboundAdmissionResult> {

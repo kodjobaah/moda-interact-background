@@ -11,10 +11,10 @@ export function availablePaidIncludedQuantity(
 ): number {
   const allowance = counter.currentAllowanceQuantity ?? counter.grantedQuantity;
   return Math.max(
-    allowance
-      - counter.committedQuantity
-      - counter.reservedQuantity
-      - counter.forfeitedQuantity,
+    allowance -
+      counter.committedQuantity -
+      counter.reservedQuantity -
+      counter.forfeitedQuantity,
     0,
   );
 }
@@ -32,15 +32,17 @@ export function isValidPaidIncludedAllowanceCounter(
     return false;
   }
   if (
-    counter.committedQuantity
-      + counter.reservedQuantity
-      + counter.forfeitedQuantity
-    > counter.grantedQuantity
+    counter.committedQuantity +
+      counter.reservedQuantity +
+      counter.forfeitedQuantity >
+    counter.grantedQuantity
   ) {
     return false;
   }
-  return counter.currentAllowanceQuantity === null
-    || (Number.isSafeInteger(counter.currentAllowanceQuantity)
-      && counter.currentAllowanceQuantity >= 0
-      && counter.currentAllowanceQuantity <= counter.grantedQuantity);
+  return (
+    counter.currentAllowanceQuantity === null ||
+    (Number.isSafeInteger(counter.currentAllowanceQuantity) &&
+      counter.currentAllowanceQuantity >= 0 &&
+      counter.currentAllowanceQuantity <= counter.grantedQuantity)
+  );
 }

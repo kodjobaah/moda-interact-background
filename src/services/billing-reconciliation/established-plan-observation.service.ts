@@ -17,11 +17,22 @@ import type { BillingReconciliationSchedulerService } from "./reconciliation-sch
 import { resolveShopifyUsageEventMapping } from "./shopify-usage-event-mapping.js";
 import { planChangeTargetPrerequisiteFailure } from "./plan-change-target-prerequisites.js";
 
-type EstablishedPlanObservationDatabase = Pick<PrismaClient, "$transaction" | "billingPlan" | "subscription">;
-type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "enqueue"> &
-  Partial<Pick<BillingReconciliationSchedulerService, "publishCommittedFailure">>;
+type EstablishedPlanObservationDatabase = Pick<
+  PrismaClient,
+  "$transaction" | "billingPlan" | "subscription"
+>;
+type ReconciliationScheduler = Pick<
+  BillingReconciliationSchedulerService,
+  "enqueue"
+> &
+  Partial<
+    Pick<BillingReconciliationSchedulerService, "publishCommittedFailure">
+  >;
 type CapacityResumeScheduler = Pick<RecoveryCapacityResumeService, "schedule">;
-type PlanChangeTransition = Pick<ShopifyPlanChangeTransitionService, "transition">;
+type PlanChangeTransition = Pick<
+  ShopifyPlanChangeTransitionService,
+  "transition"
+>;
 
 type ExistingSubscription = {
   id: string;
@@ -45,12 +56,14 @@ type EstablishedPendingPlanSubscription = ExistingSubscription & {
 function hasEstablishedPendingPlan(
   existing: ExistingSubscription | null,
 ): existing is EstablishedPendingPlanSubscription {
-  return existing !== null
-    && existing.id.length > 0
-    && existing.planId !== null
-    && existing.pendingPlanId !== null
-    && existing.pendingShopifyPlanHandle !== null
-    && existing.pendingEffectiveAt !== null;
+  return (
+    existing !== null &&
+    existing.id.length > 0 &&
+    existing.planId !== null &&
+    existing.pendingPlanId !== null &&
+    existing.pendingShopifyPlanHandle !== null &&
+    existing.pendingEffectiveAt !== null
+  );
 }
 
 type EstablishedPlanObservationInput = {
@@ -82,14 +95,18 @@ export class EstablishedPlanObservationService {
     private readonly scheduler: ReconciliationScheduler,
     private readonly logger: StructuredLogger,
     private readonly capacityResume: CapacityResumeScheduler = recoveryCapacityResumeService,
-    private readonly planChangeTransition: PlanChangeTransition = new ShopifyPlanChangeTransitionService(database),
+    private readonly planChangeTransition: PlanChangeTransition = new ShopifyPlanChangeTransitionService(
+      database,
+    ),
   ) {}
 
-  async reconcile(input: EstablishedPlanObservationInput): Promise<EstablishedPlanObservationResult> {
+  async reconcile(
+    input: EstablishedPlanObservationInput,
+  ): Promise<EstablishedPlanObservationResult> {
     const { shopId, provider, observedPlan, existing, now } = input;
     if (
-      !hasEstablishedPendingPlan(existing)
-      || existing.planId === observedPlan?.id
+      !hasEstablishedPendingPlan(existing) ||
+      existing.planId === observedPlan?.id
     ) {
       return { kind: "not-applicable" };
     }
@@ -114,20 +131,32 @@ export class EstablishedPlanObservationService {
       return {
         kind: "handled",
         billingPeriodId: existing.billingPeriodId,
-        packMeterHandle: currentPlan.shopifyRecoveryCreditPackEventHandle ?? null,
+        packMeterHandle:
+          currentPlan.shopifyRecoveryCreditPackEventHandle ?? null,
       };
     }
 
     if (
-      observedPlan?.active
-      && provider.planHandle === existing.pendingShopifyPlanHandle
-      && observedPlan.id === existing.pendingPlanId
+      observedPlan?.active &&
+      provider.planHandle === existing.pendingShopifyPlanHandle &&
+      observedPlan.id === existing.pendingPlanId
     ) {
-      return this.reconcileExpectedTarget({ shopId, provider, plan: observedPlan, existing, now });
+      return this.reconcileExpectedTarget({
+        shopId,
+        provider,
+        plan: observedPlan,
+        existing,
+        now,
+      });
     }
 
     if (!observedPlan?.active) {
-      await this.recordUnmappedPlan(existing, provider, now, observedPlan !== null);
+      await this.recordUnmappedPlan(
+        existing,
+        provider,
+        now,
+        observedPlan !== null,
+      );
       await this.scheduler.publishCommittedFailure?.(shopId, existing.id);
       return { kind: "handled", billingPeriodId: null, packMeterHandle: null };
     }
@@ -140,7 +169,11 @@ export class EstablishedPlanObservationService {
       provider,
       provider.planHandle,
     );
-    return { kind: "handled", billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+    return {
+      kind: "handled",
+      billingPeriodId: existing.billingPeriodId,
+      packMeterHandle: null,
+    };
   }
 
   private async persistUsageEventMapping(
@@ -148,19 +181,34 @@ export class EstablishedPlanObservationService {
     provider: PartnerSubscription,
   ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
-      await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "billing"."Subscription" WHERE "id" = ${expected.id} FOR UPDATE`);
+      await transaction.$queryRaw(
+        Prisma.sql`SELECT "id" FROM "billing"."Subscription" WHERE "id" = ${expected.id} FOR UPDATE`,
+      );
       const current = await transaction.subscription.findUnique({
         where: { id: expected.id },
         select: {
-          id: true, status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true,
-          pendingEffectiveAt: true, billingPeriodId: true, currentPeriodStart: true, currentPeriodEnd: true,
+          id: true,
+          status: true,
+          planId: true,
+          pendingPlanId: true,
+          pendingShopifyPlanHandle: true,
+          pendingEffectiveAt: true,
+          billingPeriodId: true,
+          currentPeriodStart: true,
+          currentPeriodEnd: true,
         },
       });
       if (!matchesExpectedSubscription(current, expected)) return;
-      const mapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
+      const mapping = await resolveShopifyUsageEventMapping(
+        transaction,
+        provider.planHandle,
+        provider.usageEventHandles,
+      );
       await transaction.subscription.update({
         where: { id: expected.id },
-        data: { unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles },
+        data: {
+          unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles,
+        },
       });
     });
   }
@@ -172,12 +220,21 @@ export class EstablishedPlanObservationService {
     inactivePlan: boolean,
   ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
-      await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "billing"."Subscription" WHERE "id" = ${expected.id} FOR UPDATE`);
+      await transaction.$queryRaw(
+        Prisma.sql`SELECT "id" FROM "billing"."Subscription" WHERE "id" = ${expected.id} FOR UPDATE`,
+      );
       const current = await transaction.subscription.findUnique({
         where: { id: expected.id },
         select: {
-          id: true, status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true,
-          pendingEffectiveAt: true, billingPeriodId: true, currentPeriodStart: true, currentPeriodEnd: true,
+          id: true,
+          status: true,
+          planId: true,
+          pendingPlanId: true,
+          pendingShopifyPlanHandle: true,
+          pendingEffectiveAt: true,
+          billingPeriodId: true,
+          currentPeriodStart: true,
+          currentPeriodEnd: true,
         },
       });
       if (!current || !matchesExpectedSubscription(current, expected)) return;
@@ -186,7 +243,11 @@ export class EstablishedPlanObservationService {
         billingPeriodId: current.billingPeriodId,
         now,
       });
-      const mapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
+      const mapping = await resolveShopifyUsageEventMapping(
+        transaction,
+        provider.planHandle,
+        provider.usageEventHandles,
+      );
       await transaction.subscription.update({
         where: { id: expected.id },
         data: {
@@ -215,25 +276,55 @@ export class EstablishedPlanObservationService {
     now: Date;
   }): Promise<EstablishedPlanObservationResult> {
     const { shopId, provider, plan, existing, now } = input;
-    const sameCycle = existing.currentPeriodStart !== null
-      && existing.currentPeriodEnd !== null
-      && provider.currentPeriodStart?.getTime() === existing.currentPeriodStart.getTime()
-      && provider.currentPeriodEnd?.getTime() === existing.currentPeriodEnd.getTime();
+    const sameCycle =
+      existing.currentPeriodStart !== null &&
+      existing.currentPeriodEnd !== null &&
+      provider.currentPeriodStart?.getTime() ===
+        existing.currentPeriodStart.getTime() &&
+      provider.currentPeriodEnd?.getTime() ===
+        existing.currentPeriodEnd.getTime();
 
     if (sameCycle) {
-      await this.recordPlanChangeFailure(shopId, existing, now, "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", provider);
-      return { kind: "handled", billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+      await this.recordPlanChangeFailure(
+        shopId,
+        existing,
+        now,
+        "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
+        provider,
+      );
+      return {
+        kind: "handled",
+        billingPeriodId: existing.billingPeriodId,
+        packMeterHandle: null,
+      };
     }
 
     if (now < existing.pendingEffectiveAt) {
       await this.persistUsageEventMapping(existing, provider);
-      return { kind: "handled", billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+      return {
+        kind: "handled",
+        billingPeriodId: existing.billingPeriodId,
+        packMeterHandle: null,
+      };
     }
 
-    const prerequisiteFailure = planChangeTargetPrerequisiteFailure(provider, plan);
+    const prerequisiteFailure = planChangeTargetPrerequisiteFailure(
+      provider,
+      plan,
+    );
     if (prerequisiteFailure) {
-      await this.recordPlanChangeFailure(shopId, existing, now, prerequisiteFailure, provider);
-      return { kind: "handled", billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+      await this.recordPlanChangeFailure(
+        shopId,
+        existing,
+        now,
+        prerequisiteFailure,
+        provider,
+      );
+      return {
+        kind: "handled",
+        billingPeriodId: existing.billingPeriodId,
+        packMeterHandle: null,
+      };
     }
 
     const transition = await this.planChangeTransition.transition({
@@ -246,8 +337,18 @@ export class EstablishedPlanObservationService {
     });
 
     if (transition.kind === "not-applicable") {
-      await this.recordPlanChangeFailure(shopId, existing, now, "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", provider);
-      return { kind: "handled", billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+      await this.recordPlanChangeFailure(
+        shopId,
+        existing,
+        now,
+        "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
+        provider,
+      );
+      return {
+        kind: "handled",
+        billingPeriodId: existing.billingPeriodId,
+        packMeterHandle: null,
+      };
     }
 
     await this.afterSuccessfulTransition(shopId, existing.id, transition, now);
@@ -265,7 +366,12 @@ export class EstablishedPlanObservationService {
     now: Date,
   ): Promise<void> {
     if (transition.nextReconcileAt) {
-      await this.scheduler.enqueue(shopId, subscriptionId, transition.nextReconcileAt, now);
+      await this.scheduler.enqueue(
+        shopId,
+        subscriptionId,
+        transition.nextReconcileAt,
+        now,
+      );
     }
     if (transition.planKind !== BillingPlanKind.PAID_METERED) return;
 
@@ -274,7 +380,8 @@ export class EstablishedPlanObservationService {
     } catch (error) {
       this.logger.warn("billing.recovery_capacity_resume.enqueue_failed", {
         shopId,
-        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        errorMessage:
+          error instanceof Error ? error.message : "unknown failure",
         error: error,
       });
     }
@@ -290,8 +397,14 @@ export class EstablishedPlanObservationService {
   ): Promise<void> {
     const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
     const updated = await this.database.$transaction(async (transaction) => {
-      await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "billing"."Subscription" WHERE "id" = ${existing.id} FOR UPDATE`);
-      const mapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
+      await transaction.$queryRaw(
+        Prisma.sql`SELECT "id" FROM "billing"."Subscription" WHERE "id" = ${existing.id} FOR UPDATE`,
+      );
+      const mapping = await resolveShopifyUsageEventMapping(
+        transaction,
+        provider.planHandle,
+        provider.usageEventHandles,
+      );
       return transaction.subscription.updateMany({
         where: this.pendingIntentFence(existing),
         data: {
@@ -336,19 +449,23 @@ function matchesExpectedSubscription(
   } | null,
   expected: ExistingSubscription,
 ): boolean {
-  return current !== null
-    && current.id === expected.id
-    && current.status === expected.status
-    && current.planId === expected.planId
-    && current.pendingPlanId === expected.pendingPlanId
-    && current.pendingShopifyPlanHandle === expected.pendingShopifyPlanHandle
-    && sameDate(current.pendingEffectiveAt, expected.pendingEffectiveAt)
-    && current.billingPeriodId === expected.billingPeriodId
-    && sameDate(current.currentPeriodStart, expected.currentPeriodStart)
-    && sameDate(current.currentPeriodEnd, expected.currentPeriodEnd);
+  return (
+    current !== null &&
+    current.id === expected.id &&
+    current.status === expected.status &&
+    current.planId === expected.planId &&
+    current.pendingPlanId === expected.pendingPlanId &&
+    current.pendingShopifyPlanHandle === expected.pendingShopifyPlanHandle &&
+    sameDate(current.pendingEffectiveAt, expected.pendingEffectiveAt) &&
+    current.billingPeriodId === expected.billingPeriodId &&
+    sameDate(current.currentPeriodStart, expected.currentPeriodStart) &&
+    sameDate(current.currentPeriodEnd, expected.currentPeriodEnd)
+  );
 }
 
 function sameDate(left: Date | null, right: Date | null): boolean {
-  return left === null && right === null
-    || left !== null && right !== null && left.getTime() === right.getTime();
+  return (
+    (left === null && right === null) ||
+    (left !== null && right !== null && left.getTime() === right.getTime())
+  );
 }

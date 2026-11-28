@@ -14,40 +14,83 @@ import { whatsAppService } from "../whatsapp.service.js";
 import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
 import { synchronousRecipientFailureService } from "../synchronous-recipient-failure.service.js";
 import { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
-import { recoveryOutreachAttemptService, type RecoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
-import { FollowUpClaimKeyIntegrityError, MerchantSendCommandService, type HumanCommand } from "./merchant-send-command.service.js";
+import {
+  recoveryOutreachAttemptService,
+  type RecoveryOutreachAttemptService,
+} from "../recovery-outreach-attempt.service.js";
+import {
+  FollowUpClaimKeyIntegrityError,
+  MerchantSendCommandService,
+  type HumanCommand,
+} from "./merchant-send-command.service.js";
 import { RecoveryFollowUpPolicyService } from "./recovery-follow-up-policy.service.js";
 import { HumanSendPolicyService } from "./human-send-policy.service.js";
 import { HumanCommandEvaluationService } from "./human-command-evaluation.service.js";
-import { OutboundSendFenceService, type RecoveryMarketingPermit } from "./outbound-send-fence.service.js";
 import {
-  recoveryStoredConsentService, type StoredRecoveryConsentReader,
+  OutboundSendFenceService,
+  type RecoveryMarketingPermit,
+} from "./outbound-send-fence.service.js";
+import {
+  recoveryStoredConsentService,
+  type StoredRecoveryConsentReader,
 } from "./recovery-stored-consent.service.js";
-import { merchantFollowUpTemplateService, type MerchantFollowUpTemplateService } from "./merchant-follow-up-template.service.js";
+import {
+  merchantFollowUpTemplateService,
+  type MerchantFollowUpTemplateService,
+} from "./merchant-follow-up-template.service.js";
 import { HumanSendReconciliationService } from "./human-send-reconciliation.service.js";
 import { RecoveryFollowUpBillingService } from "./recovery-follow-up-billing.service.js";
-import { FollowUpClaimCancellationService, type FollowUpClaimCancellation } from "./follow-up-claim-cancellation.service.js";
+import {
+  FollowUpClaimCancellationService,
+  type FollowUpClaimCancellation,
+} from "./follow-up-claim-cancellation.service.js";
 import { recoveryRuntimeEligibility } from "./recovery-runtime-eligibility.service.js";
-import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
-import { humanModerationAdmission, type ModerationAdmission } from "../conversation-moderation/moderation-decision-adapter.js";
+import {
+  moderationAssessmentService,
+  type ModerationAssessmentService,
+} from "../conversation-moderation/moderation-assessment.service.js";
+import {
+  humanModerationAdmission,
+  type ModerationAdmission,
+} from "../conversation-moderation/moderation-decision-adapter.js";
 import { moderationExceptionLogFields } from "../conversation-moderation/moderation-failure-diagnostics.js";
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
-import { first, rows, changed, recoveryDatabase, readRecoveryContext, type RecoveryDatabase } from "./recovery-conversation.sql.js";
+import {
+  first,
+  rows,
+  changed,
+  recoveryDatabase,
+  readRecoveryContext,
+  type RecoveryDatabase,
+} from "./recovery-conversation.sql.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
-import { createHumanSendIncidentSink, type HumanSendIncidentSink } from "./human-send-operational-incident.service.js";
+import {
+  createHumanSendIncidentSink,
+  type HumanSendIncidentSink,
+} from "./human-send-operational-incident.service.js";
 import { HumanPreparedCommandService } from "./human-prepared-command.service.js";
 
 const deploymentEnvironment = resolveDeploymentEnvironmentName();
-const logger = createLogger({ serviceName: "moda-messaging-worker", environment: deploymentEnvironment });
+const logger = createLogger({
+  serviceName: "moda-messaging-worker",
+  environment: deploymentEnvironment,
+});
 const POLL_MS = 3_000;
 const MAX_PER_POLL = 25;
 const MAX_IN_FLIGHT = 4;
 
 export type HumanDispatcherDependencies = {
   database: RecoveryDatabase;
-  multipart?: Pick<RecoveryMultipartDeliveryEngine,"continue"> & Partial<Pick<RecoveryMultipartDeliveryEngine,"freeze">>;
-  senderIdentity?: ()=>Promise<{providerAccountId:string;providerPhoneNumberId:string}>;
-  outreach: Pick<RecoveryOutreachAttemptService, "markWaitingAfterConfirmedSend">;
+  multipart?: Pick<RecoveryMultipartDeliveryEngine, "continue"> &
+    Partial<Pick<RecoveryMultipartDeliveryEngine, "freeze">>;
+  senderIdentity?: () => Promise<{
+    providerAccountId: string;
+    providerPhoneNumberId: string;
+  }>;
+  outreach: Pick<
+    RecoveryOutreachAttemptService,
+    "markWaitingAfterConfirmedSend"
+  >;
   commands: MerchantSendCommandService;
   evaluator: HumanCommandEvaluationService;
   followUps: RecoveryFollowUpPolicyService;
@@ -55,7 +98,11 @@ export type HumanDispatcherDependencies = {
   reconciliation: HumanSendReconciliationService;
   billing: RecoveryFollowUpBillingService;
   followUpCancellations: FollowUpClaimCancellation;
-  provider: Pick<typeof whatsAppService, "sendWhatsAppText" | "sendWhatsAppTemplate"> & Partial<Pick<typeof whatsAppService, "sendWhatsAppImage">>;
+  provider: Pick<
+    typeof whatsAppService,
+    "sendWhatsAppText" | "sendWhatsAppTemplate"
+  > &
+    Partial<Pick<typeof whatsAppService, "sendWhatsAppImage">>;
   execution: Pick<typeof shopExecutionEligibilityService, "evaluate">;
   now: () => Date;
   moderation: ModerationAssessmentService;
@@ -66,11 +113,17 @@ export type HumanDispatcherDependencies = {
   /** Optional injected incident reporter; production always supplies it. */
   incidents?: HumanSendIncidentSink;
   /** Recovery-template only: ordinary HUMAN_TEXT must never invoke this. */
-  recipientFailure?: Pick<typeof synchronousRecipientFailureService, "afterPersistedRejection">;
+  recipientFailure?: Pick<
+    typeof synchronousRecipientFailureService,
+    "afterPersistedRejection"
+  >;
   /** Both are required by production for merchant post-window templates. */
   storedConsent?: StoredRecoveryConsentReader;
   followUpTemplates?: Pick<MerchantFollowUpTemplateService, "resolve">;
-  followUpOfferAdmission?: Pick<typeof merchantFollowUpOfferService, "validateAdmission">;
+  followUpOfferAdmission?: Pick<
+    typeof merchantFollowUpOfferService,
+    "validateAdmission"
+  >;
 };
 
 export function createHumanDispatcherDependencies(): HumanDispatcherDependencies {
@@ -79,13 +132,24 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
   const policy = new HumanSendPolicyService(recoveryDatabase, connectionRedis);
   return {
     multipart: {
-      freeze: async source => (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine.freeze(source),
-      continue: async messageId => (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine.continue(messageId),
+      freeze: async (source) =>
+        (
+          await import("../recovery-multipart/runtime.js")
+        ).recoveryMultipartEngine.freeze(source),
+      continue: async (messageId) =>
+        (
+          await import("../recovery-multipart/runtime.js")
+        ).recoveryMultipartEngine.continue(messageId),
     },
-    database: recoveryDatabase, outreach: recoveryOutreachAttemptService,
-    commands, followUps,
+    database: recoveryDatabase,
+    outreach: recoveryOutreachAttemptService,
+    commands,
+    followUps,
     evaluator: new HumanCommandEvaluationService(commands, followUps, policy),
-    fence: new OutboundSendFenceService(recoveryDatabase, recoveryRuntimeEligibility),
+    fence: new OutboundSendFenceService(
+      recoveryDatabase,
+      recoveryRuntimeEligibility,
+    ),
     reconciliation: new HumanSendReconciliationService(),
     billing: new RecoveryFollowUpBillingService(),
     followUpCancellations: new FollowUpClaimCancellationService(),
@@ -113,10 +177,13 @@ export class HumanCommandDispatcherService {
   private pollPromise: Promise<void> | undefined;
   private readonly inFlight = new Set<Promise<unknown>>();
 
-  constructor(private readonly deps: HumanDispatcherDependencies = createHumanDispatcherDependencies()) {}
+  constructor(
+    private readonly deps: HumanDispatcherDependencies = createHumanDispatcherDependencies(),
+  ) {}
 
   start() {
-    if (this.stopped) throw new Error("ARCH040 dispatcher cannot restart after close");
+    if (this.stopped)
+      throw new Error("ARCH040 dispatcher cannot restart after close");
     if (this.timer || this.pollPromise) return;
     this.queuePoll(0);
   }
@@ -125,15 +192,20 @@ export class HumanCommandDispatcherService {
     if (this.stopped) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.pollPromise = this.poll().catch((error: unknown) => {
-        logger.error("arch040.human_dispatcher.poll_failed", { reason: "poll_failed", errorType: error instanceof Error ? error.name : "unknown",
-          errorMessage: error instanceof Error ? error.message : String(error),
-          error: error,
+      this.pollPromise = this.poll()
+        .catch((error: unknown) => {
+          logger.error("arch040.human_dispatcher.poll_failed", {
+            reason: "poll_failed",
+            errorType: error instanceof Error ? error.name : "unknown",
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+            error: error,
+          });
+        })
+        .finally(() => {
+          this.pollPromise = undefined;
+          this.queuePoll(POLL_MS);
         });
-      }).finally(() => {
-        this.pollPromise = undefined;
-        this.queuePoll(POLL_MS);
-      });
     }, delay);
   }
 
@@ -144,19 +216,36 @@ export class HumanCommandDispatcherService {
     await this.reconcileConfirmedFollowUps();
     await this.deps.followUpCancellations.repairCancelledClaims();
     const commands = await this.deps.commands.claimDueHumanCommands({
-      limit: Math.min(MAX_PER_POLL, available), now: this.deps.now(), leaseMs:180_000,
+      limit: Math.min(MAX_PER_POLL, available),
+      now: this.deps.now(),
+      leaseMs: 180_000,
     });
     for (const claim of commands) {
-      const active: Promise<void> = this.processClaim(claim.id, claim.leaseToken).catch((error: unknown) => {
-        logger.error(error instanceof FollowUpClaimKeyIntegrityError
-          ? "arch055.human_dispatcher.follow_up_claim_key_integrity_failed"
-          : "arch040.human_dispatcher.command_failed", {
-          commandId: claim.id, errorType: error instanceof Error ? error.name : "unknown",
-          reasonCode: error instanceof FollowUpClaimKeyIntegrityError ? "persisted_claim_key_missing" : undefined,
-          errorMessage: error instanceof Error ? error.message : String(error),
-          error: error,
+      const active: Promise<void> = this.processClaim(
+        claim.id,
+        claim.leaseToken,
+      )
+        .catch((error: unknown) => {
+          logger.error(
+            error instanceof FollowUpClaimKeyIntegrityError
+              ? "arch055.human_dispatcher.follow_up_claim_key_integrity_failed"
+              : "arch040.human_dispatcher.command_failed",
+            {
+              commandId: claim.id,
+              errorType: error instanceof Error ? error.name : "unknown",
+              reasonCode:
+                error instanceof FollowUpClaimKeyIntegrityError
+                  ? "persisted_claim_key_missing"
+                  : undefined,
+              errorMessage:
+                error instanceof Error ? error.message : String(error),
+              error: error,
+            },
+          );
+        })
+        .finally(() => {
+          this.inFlight.delete(active);
         });
-      }).finally(() => { this.inFlight.delete(active); });
       this.inFlight.add(active);
     }
   }
@@ -166,15 +255,19 @@ export class HumanCommandDispatcherService {
    * it for another Meta submission. Concurrent replicas converge by CAS.
    */
   async reconcileExpiredPermits(): Promise<void> {
-    const expired = await rows<{ id: string; leaseToken: string }>(this.deps.database, `
+    const expired = await rows<{ id: string; leaseToken: string }>(
+      this.deps.database,
+      `
       SELECT "id", "leaseToken" FROM "whatsapp"."MerchantConversationSendCommand"
       WHERE "state"='DISPATCH_ADMITTED' AND "providerDispatchKey" IS NOT NULL
         AND "leaseToken" IS NOT NULL AND "leaseExpiresAt"<=statement_timestamp()
         AND NOT EXISTS (SELECT 1 FROM "whatsapp"."ConversationDeliveryPart" part WHERE part."messageId"="MerchantConversationSendCommand"."outboundMessageId")
-      ORDER BY "leaseExpiresAt","id" LIMIT 25`);
+      ORDER BY "leaseExpiresAt","id" LIMIT 25`,
+    );
     for (const command of expired) {
       await this.deps.reconciliation.recordProviderUnknown({
-        commandId: command.id, leaseToken: command.leaseToken,
+        commandId: command.id,
+        leaseToken: command.leaseToken,
       });
     }
   }
@@ -185,9 +278,15 @@ export class HumanCommandDispatcherService {
    */
   async reconcileConfirmedFollowUps(): Promise<void> {
     const waiting = await rows<{
-      commandId: string; shopId: string; attemptId: string; recoveryId: string;
-      messageId: string; sentAt: Date;
-    }>(this.deps.database, `
+      commandId: string;
+      shopId: string;
+      attemptId: string;
+      recoveryId: string;
+      messageId: string;
+      sentAt: Date;
+    }>(
+      this.deps.database,
+      `
       SELECT cmd."id" AS "commandId",cmd."shopId",cmd."recoveryOutreachAttemptId" AS "attemptId",
         a."checkoutRecoveryId" AS "recoveryId",m."id" AS "messageId",m."sentAt"
       FROM "whatsapp"."MerchantConversationSendCommand" cmd
@@ -195,17 +294,23 @@ export class HumanCommandDispatcherService {
       JOIN "whatsapp"."ConversationMessage" m ON m."id"=cmd."outboundMessageId"
       WHERE cmd."state"='SENT' AND a."status"='PENDING'
         AND m."status" IN ('SENT','DELIVERED','READ') AND m."sentAt" IS NOT NULL
-      ORDER BY cmd."createdAt",cmd."id" LIMIT 25`);
+      ORDER BY cmd."createdAt",cmd."id" LIMIT 25`,
+    );
     for (const row of waiting) {
       const credit = await this.deps.billing.admitAndRevalidate({
-        shopId: row.shopId, recoveryId: row.recoveryId, sequenceTwoAttemptId: row.attemptId,
+        shopId: row.shopId,
+        recoveryId: row.recoveryId,
+        sequenceTwoAttemptId: row.attemptId,
       });
       if (credit.kind !== "admitted") continue;
       await this.deps.billing.onConfirmedProviderSend({
-        admission: credit.admission, recoveryId: row.recoveryId, occurredAt: row.sentAt,
+        admission: credit.admission,
+        recoveryId: row.recoveryId,
+        occurredAt: row.sentAt,
       });
       await this.deps.outreach.markWaitingAfterConfirmedSend(row.attemptId, {
-        sentAt: row.sentAt, outboundMessageId: row.messageId,
+        sentAt: row.sentAt,
+        outboundMessageId: row.messageId,
       });
     }
   }
@@ -220,14 +325,25 @@ export class HumanCommandDispatcherService {
 
   async processClaim(commandId: string, leaseToken: string): Promise<void> {
     // Validate immutable ownership before evaluation can cancel or release it.
-    let resolved: Awaited<ReturnType<MerchantSendCommandService["loadClaimedCommand"]>>;
+    let resolved: Awaited<
+      ReturnType<MerchantSendCommandService["loadClaimedCommand"]>
+    >;
     try {
-      resolved = await this.deps.commands.loadClaimedCommand(commandId, leaseToken, this.deps.now());
+      resolved = await this.deps.commands.loadClaimedCommand(
+        commandId,
+        leaseToken,
+        this.deps.now(),
+      );
     } catch (error) {
       if (!(error instanceof FollowUpClaimKeyIntegrityError)) throw error;
       // Durably cancel malformed commands, but cancellation's integrity fence
       // logs the typed integrity failure and holds its attempt/credit for repair.
-      await this.rejectTerminal(commandId, leaseToken, "follow_up_claim_key_integrity_failed", error);
+      await this.rejectTerminal(
+        commandId,
+        leaseToken,
+        "follow_up_claim_key_integrity_failed",
+        error,
+      );
       return;
     }
     if (resolved.kind !== "claimed") {
@@ -235,7 +351,11 @@ export class HumanCommandDispatcherService {
       return;
     }
     const command = resolved.command;
-    const evaluated = await this.deps.evaluator.evaluateHumanCommand(commandId, leaseToken, this.deps.now());
+    const evaluated = await this.deps.evaluator.evaluateHumanCommand(
+      commandId,
+      leaseToken,
+      this.deps.now(),
+    );
     if (evaluated.kind === "terminal") {
       await this.rejectTerminal(commandId, leaseToken, evaluated.reason);
       return;
@@ -244,12 +364,19 @@ export class HumanCommandDispatcherService {
       await this.defer(commandId, leaseToken, evaluated.reason);
       return;
     }
-    const context = await readRecoveryContext(this.deps.database, command.conversationId);
+    const context = await readRecoveryContext(
+      this.deps.database,
+      command.conversationId,
+    );
     if (!context || context.shopId !== command.shopId) {
       await this.rejectTerminal(commandId, leaseToken, "not_recovery_linked");
       return;
     }
-    const eligibility = await this.deps.execution.evaluate(command.shopId, undefined, "recovery");
+    const eligibility = await this.deps.execution.evaluate(
+      command.shopId,
+      undefined,
+      "recovery",
+    );
     if (!eligibility.allowed) {
       await this.rejectTerminal(commandId, leaseToken, eligibility.reason);
       return;
@@ -258,21 +385,30 @@ export class HumanCommandDispatcherService {
     // R0: freeze full customer-visible HUMAN_TEXT under the current SQL lease.
     // Retry and reclaim reuse the same bytes; do not re-render or fall back to raw.
     let frozenBody: string | undefined;
-    let multipartPrepared=false;
-    let commonPreparation: import("../recovery-multipart/preparation.js").CommonMultipartPreparation|undefined;
-    let commonReceipt: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt|undefined;
+    let multipartPrepared = false;
+    let commonPreparation:
+      | import("../recovery-multipart/preparation.js").CommonMultipartPreparation
+      | undefined;
+    let commonReceipt:
+      | import("../recovery-multipart/common-layout.js").CommonLayoutReceipt
+      | undefined;
     let frozenPlan: ConversationMediaDeliveryPlan | undefined;
     if (command.kind === "HUMAN_TEXT") {
       const frozen = await this.deps.preparation.freeze(command, leaseToken);
       if (frozen.kind !== "frozen") {
         logger.warn("arch047.human_dispatcher.preparation_refused", {
-          commandId, reasonCode: frozen.reason,
+          commandId,
+          reasonCode: frozen.reason,
         });
         await this.rejectTerminal(commandId, leaseToken, frozen.reason);
         return;
       }
-      multipartPrepared=frozen.evidence.recoveryShopHeader?.schemaVersion===2;
-      if(frozen.evidence.recoveryShopHeader?.schemaVersion===2){commonReceipt=frozen.evidence.recoveryShopHeader;commonPreparation=frozen.evidence.multipartPreparation;}
+      multipartPrepared =
+        frozen.evidence.recoveryShopHeader?.schemaVersion === 2;
+      if (frozen.evidence.recoveryShopHeader?.schemaVersion === 2) {
+        commonReceipt = frozen.evidence.recoveryShopHeader;
+        commonPreparation = frozen.evidence.multipartPreparation;
+      }
       frozenBody = frozen.body;
       frozenPlan = frozen.evidence?.mediaPreparation?.plan;
     }
@@ -289,16 +425,25 @@ export class HumanCommandDispatcherService {
         throw new Error("moderation_content_identity_mismatch");
       }
       const cfg = moderationConfig();
-      decision = humanModerationAdmission(await moderation.assessText({
-        subject, shopId: command.shopId, conversationId: command.conversationId,
-        effectiveText, inputKind: command.kind === "HUMAN_TEXT" ? "TEXT" : "TEMPLATE_PARAMETERS",
-        policyVersion: cfg.policyVersion, now: this.deps.now(),
-      }));
+      decision = humanModerationAdmission(
+        await moderation.assessText({
+          subject,
+          shopId: command.shopId,
+          conversationId: command.conversationId,
+          effectiveText,
+          inputKind:
+            command.kind === "HUMAN_TEXT" ? "TEXT" : "TEMPLATE_PARAMETERS",
+          policyVersion: cfg.policyVersion,
+          now: this.deps.now(),
+        }),
+      );
     } catch (error) {
       // Only moderation failures are retryable here. Database cancellation
       // errors must not be mistaken for a new chance to send denied content.
       logger.warn("arch040.human_dispatcher.moderation_pipeline_retry", {
-        commandId, reasonCode: "moderation_pipeline_exception", retryDelayMs: 30_000,
+        commandId,
+        reasonCode: "moderation_pipeline_exception",
+        retryDelayMs: 30_000,
         ...moderationExceptionLogFields(error, deploymentEnvironment),
         errorMessage: error instanceof Error ? error.message : String(error),
       });
@@ -307,28 +452,76 @@ export class HumanCommandDispatcherService {
     }
     if (decision.kind === "retry") {
       logger.info("arch040.human_dispatcher.moderation_deferred", {
-        commandId, reasonCode: "moderation_assessment_retry", retryAt: decision.retryAt.toISOString(),
+        commandId,
+        reasonCode: "moderation_assessment_retry",
+        retryAt: decision.retryAt.toISOString(),
       });
-      await this.deps.commands.deferCommand(commandId, leaseToken, "moderation_unavailable", decision.retryAt);
+      await this.deps.commands.deferCommand(
+        commandId,
+        leaseToken,
+        "moderation_unavailable",
+        decision.retryAt,
+      );
       return;
     }
     if (decision.kind === "blocked") {
       logger.info("arch040.human_dispatcher.moderation_not_admitted", {
-        commandId, reasonCode: decision.failureCode.toLowerCase(),
+        commandId,
+        reasonCode: decision.failureCode.toLowerCase(),
       });
-      await this.rejectTerminal(commandId, leaseToken, decision.failureCode.toLowerCase());
+      await this.rejectTerminal(
+        commandId,
+        leaseToken,
+        decision.failureCode.toLowerCase(),
+      );
       return;
     }
 
-    if(multipartPrepared){
-      const engine=this.deps.multipart ?? (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine;
-      let outcome=await engine.continue(humanMultipartMessageId(commandId));
-      if(outcome==="absent" && commonPreparation && commonReceipt && engine.freeze){
-        const source=prepareFrozenCommonReply({preparation:commonPreparation,common:commonReceipt,messageId:humanMultipartMessageId(commandId),recoveryId:context.recoveryId,recipient:command.recipientSnapshot,sender:await (this.deps.senderIdentity??(()=>readRecoveryDispatchSender(command.conversationId,command.recipientSnapshot)))(),command:{id:commandId,leaseToken},now:this.deps.now()});
-        await engine.freeze(source);outcome=await engine.continue(source.messageId);
+    if (multipartPrepared) {
+      const engine =
+        this.deps.multipart ??
+        (await import("../recovery-multipart/runtime.js"))
+          .recoveryMultipartEngine;
+      let outcome = await engine.continue(humanMultipartMessageId(commandId));
+      if (
+        outcome === "absent" &&
+        commonPreparation &&
+        commonReceipt &&
+        engine.freeze
+      ) {
+        const source = prepareFrozenCommonReply({
+          preparation: commonPreparation,
+          common: commonReceipt,
+          messageId: humanMultipartMessageId(commandId),
+          recoveryId: context.recoveryId,
+          recipient: command.recipientSnapshot,
+          sender: await (
+            this.deps.senderIdentity ??
+            (() =>
+              readRecoveryDispatchSender(
+                command.conversationId,
+                command.recipientSnapshot,
+              ))
+          )(),
+          command: { id: commandId, leaseToken },
+          now: this.deps.now(),
+        });
+        await engine.freeze(source);
+        outcome = await engine.continue(source.messageId);
       }
-      if(outcome==="absent")await this.deps.commands.deferCommand(commandId,leaseToken,"multipart_root_not_prepared",new Date(this.deps.now().getTime()+5_000));
-      else if(outcome==="cancelled"||outcome==="failed")await this.rejectTerminal(commandId,leaseToken,"multipart_preparation_refused");
+      if (outcome === "absent")
+        await this.deps.commands.deferCommand(
+          commandId,
+          leaseToken,
+          "multipart_root_not_prepared",
+          new Date(this.deps.now().getTime() + 5_000),
+        );
+      else if (outcome === "cancelled" || outcome === "failed")
+        await this.rejectTerminal(
+          commandId,
+          leaseToken,
+          "multipart_preparation_refused",
+        );
       return; // Reader delegation only: never synthesize/flatten v2 content.
     }
 
@@ -338,14 +531,25 @@ export class HumanCommandDispatcherService {
       await this.deps.senderPreflight?.();
     } catch (error) {
       logger.error("arch040.human_dispatcher.sender_preflight_failed", {
-        commandId, reasonCode: "sender_configuration_unavailable",
+        commandId,
+        reasonCode: "sender_configuration_unavailable",
         errorType: error instanceof Error ? error.name : "unknown",
         errorMessage: error instanceof Error ? error.message : String(error),
         error: error,
       });
-      const deferred = await this.deps.commands.deferCommand(commandId, leaseToken,
-        "sender_configuration_unavailable", new Date(this.deps.now().getTime() + 120_000));
-      if (deferred) await this.reportIncident(commandId, command.shopId, error, "pre_dispatch");
+      const deferred = await this.deps.commands.deferCommand(
+        commandId,
+        leaseToken,
+        "sender_configuration_unavailable",
+        new Date(this.deps.now().getTime() + 120_000),
+      );
+      if (deferred)
+        await this.reportIncident(
+          commandId,
+          command.shopId,
+          error,
+          "pre_dispatch",
+        );
       return;
     }
 
@@ -354,53 +558,91 @@ export class HumanCommandDispatcherService {
     // frozen header/body/button values and registration are re-resolved from
     // BG001/BG004, not the merchant request or Meta's category GET API.
     let proactive: RecoveryMarketingPermit | undefined;
-    let preparedSend: Extract<Awaited<ReturnType<MerchantFollowUpTemplateService["resolve"]>>,
-      { kind: "prepared" }>["send"] | undefined;
+    let preparedSend:
+      | Extract<
+          Awaited<ReturnType<MerchantFollowUpTemplateService["resolve"]>>,
+          { kind: "prepared" }
+        >["send"]
+      | undefined;
     if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
       if (!this.deps.storedConsent || !this.deps.followUpTemplates) {
-        await this.rejectTerminal(commandId, leaseToken, "follow_up_unavailable");
+        await this.rejectTerminal(
+          commandId,
+          leaseToken,
+          "follow_up_unavailable",
+        );
         return;
       }
       const permission = await this.deps.storedConsent.preflight({
-        shopId: command.shopId, recoveryId: context.recoveryId,
+        shopId: command.shopId,
+        recoveryId: context.recoveryId,
         recipient: command.recipientSnapshot,
       });
       if (permission.kind !== "allowed") {
         await this.rejectTerminal(commandId, leaseToken, permission.reason);
         return;
       }
-      const selected = await this.deps.followUpTemplates.resolve(command, context.recoveryId);
+      const selected = await this.deps.followUpTemplates.resolve(
+        command,
+        context.recoveryId,
+      );
       if (selected.kind !== "prepared") {
         await this.rejectTerminal(commandId, leaseToken, selected.reason);
         return;
       }
       const registration = selected.send.templateRegistration;
       if (!registration) {
-        await this.rejectTerminal(commandId, leaseToken, "template_not_allowed");
+        await this.rejectTerminal(
+          commandId,
+          leaseToken,
+          "template_not_allowed",
+        );
         return;
       }
       preparedSend = selected.send;
       followUpOfferToken = selected.admissionToken;
       proactive = {
-        consent: permission.snapshot, verifiedCategory: "MARKETING",
+        consent: permission.snapshot,
+        verifiedCategory: "MARKETING",
         templateName: selected.send.templateName,
         languageCode: selected.send.languageCode,
         templateRegistration: registration,
-        ...(registration.commonLayout?{templateParameters:{header:selected.send.textHeader?[selected.send.textHeader]:[],body:selected.send.bodyParameters??[]}}:{}),
+        ...(registration.commonLayout
+          ? {
+              templateParameters: {
+                header: selected.send.textHeader
+                  ? [selected.send.textHeader]
+                  : [],
+                body: selected.send.bodyParameters ?? [],
+              },
+            }
+          : {}),
       };
     }
 
     let attemptId: string | null = null;
-    let credit: Awaited<ReturnType<RecoveryFollowUpBillingService["admitAndRevalidate"]>> | null = null;
+    let credit: Awaited<
+      ReturnType<RecoveryFollowUpBillingService["admitAndRevalidate"]>
+    > | null = null;
     if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
-      const claimed = await this.claimMerchantFollowUp(command, context.recoveryId, this.deps.now());
+      const claimed = await this.claimMerchantFollowUp(
+        command,
+        context.recoveryId,
+        this.deps.now(),
+      );
       if (!claimed) {
-        await this.rejectTerminal(commandId, leaseToken, "follow_up_unavailable");
+        await this.rejectTerminal(
+          commandId,
+          leaseToken,
+          "follow_up_unavailable",
+        );
         return;
       }
       attemptId = claimed;
       credit = await this.deps.billing.admitAndRevalidate({
-        shopId: command.shopId, recoveryId: context.recoveryId, sequenceTwoAttemptId: attemptId,
+        shopId: command.shopId,
+        recoveryId: context.recoveryId,
+        sequenceTwoAttemptId: attemptId,
       });
       if (credit.kind !== "admitted") {
         await this.defer(commandId, leaseToken, safeCode(credit.reason));
@@ -408,31 +650,69 @@ export class HumanCommandDispatcherService {
       }
     }
     // A stale ALLOW cannot survive a concurrent change to persisted text.
-    if (!(await moderation.requireCurrentAllowance({
-      subject, effectiveText, policyVersion: moderationConfig().policyVersion,
-    }))) {
-      if (credit?.kind === "admitted") await this.deps.billing.releaseBeforePermit(credit.admission);
+    if (
+      !(await moderation.requireCurrentAllowance({
+        subject,
+        effectiveText,
+        policyVersion: moderationConfig().policyVersion,
+      }))
+    ) {
+      if (credit?.kind === "admitted")
+        await this.deps.billing.releaseBeforePermit(credit.admission);
       await this.defer(commandId, leaseToken, "moderation_content_stale");
       return;
     }
-    if (followUpOfferToken && (!this.deps.followUpOfferAdmission ||
+    if (
+      followUpOfferToken &&
+      (!this.deps.followUpOfferAdmission ||
         !(await this.deps.followUpOfferAdmission.validateAdmission(
-          followUpOfferToken, AbortSignal.timeout(30_000))))) {
+          followUpOfferToken,
+          AbortSignal.timeout(30_000),
+        )))
+    ) {
       await this.rejectTerminal(commandId, leaseToken, "follow_up_unavailable");
       return;
     }
     // Final provider admission commits before Meta request. No HTTP call or
     // Redis admission is made inside its transaction.
-    if (frozenPlan?.kind === "BRAND_IMAGE" && !this.deps.provider.sendWhatsAppImage) { await this.rejectTerminal(commandId, leaseToken, "brand_media_unavailable"); return; }
-    if (frozenPlan && !(await (this.deps.mediaCurrent ?? frozenBrandPlanCurrent)(frozenPlan))) {
-      await this.rejectTerminal(commandId, leaseToken, "brand_media_stale"); return;
+    if (
+      frozenPlan?.kind === "BRAND_IMAGE" &&
+      !this.deps.provider.sendWhatsAppImage
+    ) {
+      await this.rejectTerminal(
+        commandId,
+        leaseToken,
+        "brand_media_unavailable",
+      );
+      return;
+    }
+    if (
+      frozenPlan &&
+      !(await (this.deps.mediaCurrent ?? frozenBrandPlanCurrent)(frozenPlan))
+    ) {
+      await this.rejectTerminal(commandId, leaseToken, "brand_media_stale");
+      return;
     }
     const permit = await this.deps.fence.admitFinalSend({
-      senderType: "HUMAN", conversationId: command.conversationId,
-      shopId: command.shopId, recoveryId: context.recoveryId,
+      senderType: "HUMAN",
+      conversationId: command.conversationId,
+      shopId: command.shopId,
+      recoveryId: context.recoveryId,
       expectedControlRevision: command.expectedControlRevision,
-      commandId, leaseToken, recipient: command.recipientSnapshot, now: this.deps.now(),
-      ...(frozenPlan ? {deliveryPlan: frozenPlan, deliveryKind: frozenPlan.kind === "TEXT" ? "TEXT" as const : "IMAGE" as const, expectedContent: frozenBody!} : {}),
+      commandId,
+      leaseToken,
+      recipient: command.recipientSnapshot,
+      now: this.deps.now(),
+      ...(frozenPlan
+        ? {
+            deliveryPlan: frozenPlan,
+            deliveryKind:
+              frozenPlan.kind === "TEXT"
+                ? ("TEXT" as const)
+                : ("IMAGE" as const),
+            expectedContent: frozenBody!,
+          }
+        : {}),
       ...(proactive ? { proactive } : {}),
     });
     if (permit.kind !== "admitted") {
@@ -445,48 +725,86 @@ export class HumanCommandDispatcherService {
     // The text sent after this irrevocable permit MUST be the content returned
     // from the committed ConversationMessage INSERT, never command.textBody.
     // If the permit is corrupt, record UNKNOWN without attempting Meta.
-    if (command.kind === "HUMAN_TEXT" && (!permit.messageContent ||
+    if (
+      command.kind === "HUMAN_TEXT" &&
+      (!permit.messageContent ||
         permit.messageContent !== frozenBody ||
-        canonicalJson(permit.deliveryPlan ?? null) !== canonicalJson(frozenPlan ?? null) ||
-        createHash("sha256").update(permit.messageContent, "utf8").digest("hex") !==
-          createHash("sha256").update(effectiveText, "utf8").digest("hex"))) {
-      logger.error("arch047.human_dispatcher.admitted_content_mismatch", { commandId });
-      await this.deps.reconciliation.recordProviderUnknown({ commandId, leaseToken });
+        canonicalJson(permit.deliveryPlan ?? null) !==
+          canonicalJson(frozenPlan ?? null) ||
+        createHash("sha256")
+          .update(permit.messageContent, "utf8")
+          .digest("hex") !==
+          createHash("sha256").update(effectiveText, "utf8").digest("hex"))
+    ) {
+      logger.error("arch047.human_dispatcher.admitted_content_mismatch", {
+        commandId,
+      });
+      await this.deps.reconciliation.recordProviderUnknown({
+        commandId,
+        leaseToken,
+      });
       return;
     }
     // From here onwards there is NO safe automatic retry—even if the worker
     // crashes before receiving an HTTP reply. Reconciliation owns UNKNOWN.
     try {
-      const response = command.kind === "HUMAN_TEXT"
-        ? permit.deliveryPlan?.kind === "BRAND_IMAGE" ? await this.deps.provider.sendWhatsAppImage!({to: command.recipientSnapshot, link: permit.deliveryPlan.image.publicUrl, caption: permit.messageContent!, expectedSender: permit.sender}) : await this.deps.provider.sendWhatsAppText({
-            to: command.recipientSnapshot, text: permit.messageContent!, expectedSender: permit.sender,
-          })
-        : await this.deps.provider.sendWhatsAppTemplate({
-            to: command.recipientSnapshot,
-            ...preparedSend!, expectedSender: permit.sender,
-          });
+      const response =
+        command.kind === "HUMAN_TEXT"
+          ? permit.deliveryPlan?.kind === "BRAND_IMAGE"
+            ? await this.deps.provider.sendWhatsAppImage!({
+                to: command.recipientSnapshot,
+                link: permit.deliveryPlan.image.publicUrl,
+                caption: permit.messageContent!,
+                expectedSender: permit.sender,
+              })
+            : await this.deps.provider.sendWhatsAppText({
+                to: command.recipientSnapshot,
+                text: permit.messageContent!,
+                expectedSender: permit.sender,
+              })
+          : await this.deps.provider.sendWhatsAppTemplate({
+              to: command.recipientSnapshot,
+              ...preparedSend!,
+              expectedSender: permit.sender,
+            });
       const recorded = await this.deps.reconciliation.recordProviderAccepted({
-        commandId, leaseToken, providerMessageId: response.providerMessageId, providerVerified: true,
+        commandId,
+        leaseToken,
+        providerMessageId: response.providerMessageId,
+        providerVerified: true,
       });
-      if (recorded.kind !== "sent") throw new Error("Provider acknowledgment cannot be reconciled");
-      await changed(this.deps.database, `UPDATE "whatsapp"."Conversation"
-        SET "lastMessageAt"=statement_timestamp() WHERE "id"=$1`, command.conversationId);
+      if (recorded.kind !== "sent")
+        throw new Error("Provider acknowledgment cannot be reconciled");
+      await changed(
+        this.deps.database,
+        `UPDATE "whatsapp"."Conversation"
+        SET "lastMessageAt"=statement_timestamp() WHERE "id"=$1`,
+        command.conversationId,
+      );
       if (attemptId && credit?.kind === "admitted") {
         await this.deps.billing.onConfirmedProviderSend({
-          admission: credit.admission, recoveryId: context.recoveryId, occurredAt: new Date(),
+          admission: credit.admission,
+          recoveryId: context.recoveryId,
+          occurredAt: new Date(),
         });
         await this.deps.outreach.markWaitingAfterConfirmedSend(attemptId, {
-          sentAt: new Date(), outboundMessageId: recorded.messageId,
+          sentAt: new Date(),
+          outboundMessageId: recorded.messageId,
         });
       }
     } catch (error) {
       // Log the exception before reconciliation/compensation, which may itself
       // fail. Never log provider payloads, phone numbers or raw error messages.
-      const providerCode = error instanceof Error && error.name === "WhatsAppServiceError"
-        ? (error as Error & { code?: string }).code : undefined;
-      const definitive = providerCode === "provider-rejected" || providerCode === "configuration-missing";
+      const providerCode =
+        error instanceof Error && error.name === "WhatsAppServiceError"
+          ? (error as Error & { code?: string }).code
+          : undefined;
+      const definitive =
+        providerCode === "provider-rejected" ||
+        providerCode === "configuration-missing";
       logger.warn("arch040.human_dispatcher.provider_exception", {
-        commandId, errorType: error instanceof Error ? error.name : "unknown",
+        commandId,
+        errorType: error instanceof Error ? error.name : "unknown",
         providerFailureCode: definitive ? providerCode : "unknown",
         errorMessage: error instanceof Error ? error.message : String(error),
         error: error,
@@ -495,49 +813,84 @@ export class HumanCommandDispatcherService {
       let recordedOutcome: "unknown" | "definitive_failure" | null = null;
       if (definitive) {
         const outcome = await this.deps.reconciliation.recordDefinitiveFailure({
-          commandId, leaseToken,
-          reason: terminalRecipient && command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE"
-            ? "131026" : "provider_rejected",
+          commandId,
+          leaseToken,
+          reason:
+            terminalRecipient && command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE"
+              ? "131026"
+              : "provider_rejected",
           definitiveProviderEvidence: true,
         });
         if (outcome.kind === "definitive-failure") {
           recordedOutcome = "definitive_failure";
           if (credit?.kind === "admitted") {
-            await this.deps.billing.onDefinitiveProviderFailure({ admission: credit.admission, error });
-            if (terminalRecipient && command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE" && attemptId) {
-              await this.deps.recipientFailure?.afterPersistedRejection(outcome.messageId);
+            await this.deps.billing.onDefinitiveProviderFailure({
+              admission: credit.admission,
+              error,
+            });
+            if (
+              terminalRecipient &&
+              command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE" &&
+              attemptId
+            ) {
+              await this.deps.recipientFailure?.afterPersistedRejection(
+                outcome.messageId,
+              );
             }
           }
         }
       } else {
-        const outcome = await this.deps.reconciliation.recordProviderUnknown({ commandId, leaseToken });
+        const outcome = await this.deps.reconciliation.recordProviderUnknown({
+          commandId,
+          leaseToken,
+        });
         if (outcome.kind === "unknown") recordedOutcome = "unknown";
       }
       logger.warn("arch040.human_dispatcher.provider_outcome", {
-        commandId, outcome: definitive ? "definitive_failure" : "unknown",
+        commandId,
+        outcome: definitive ? "definitive_failure" : "unknown",
         errorType: error instanceof Error ? error.name : "unknown",
         errorMessage: error instanceof Error ? error.message : String(error),
         error: error,
       });
       // Incidents are reported only after the durable command disposition is recorded.
       // Failure of the support pipeline cannot change that disposition or re-send to Meta.
-      if (recordedOutcome && (recordedOutcome === "unknown" ||
-          (error instanceof Error && error.name === "WhatsAppServiceError" &&
-            (error as Error & { code?: string }).code === "configuration-missing"))) {
-        await this.reportIncident(commandId, command.shopId, error, recordedOutcome);
+      if (
+        recordedOutcome &&
+        (recordedOutcome === "unknown" ||
+          (error instanceof Error &&
+            error.name === "WhatsAppServiceError" &&
+            (error as Error & { code?: string }).code ===
+              "configuration-missing"))
+      ) {
+        await this.reportIncident(
+          commandId,
+          command.shopId,
+          error,
+          recordedOutcome,
+        );
       }
     }
   }
 
-  private async reportIncident(commandId: string, shopId: string, error: unknown,
-    outcome: "pre_dispatch" | "unknown" | "definitive_failure"): Promise<void> {
+  private async reportIncident(
+    commandId: string,
+    shopId: string,
+    error: unknown,
+    outcome: "pre_dispatch" | "unknown" | "definitive_failure",
+  ): Promise<void> {
     if (!this.deps.incidents) return;
     try {
       await this.deps.incidents.record({ commandId, shopId, error, outcome });
     } catch (incidentError) {
       logger.error("arch040.human_dispatcher.incident_report_failed", {
-        commandId, errorType: incidentError instanceof Error ? incidentError.name : "unknown",
-        errorMessage: incidentError instanceof Error ? incidentError.message : String(incidentError),
+        commandId,
+        errorType:
+          incidentError instanceof Error ? incidentError.name : "unknown",
+        errorMessage:
+          incidentError instanceof Error
+            ? incidentError.message
+            : String(incidentError),
         error: incidentError,
       });
     }
@@ -546,51 +899,101 @@ export class HumanCommandDispatcherService {
   /** All terminal pre-provider denials share one application-owned path.
    * Ordinary HUMAN_TEXT retains its established command-only cancellation.
    */
-  private async rejectTerminal(commandId: string, leaseToken: string, reason: string,
-    integrityError?: FollowUpClaimKeyIntegrityError): Promise<void> {
+  private async rejectTerminal(
+    commandId: string,
+    leaseToken: string,
+    reason: string,
+    integrityError?: FollowUpClaimKeyIntegrityError,
+  ): Promise<void> {
     const failureCode = safeCode(reason);
     const outcome = integrityError
-      ? await this.deps.followUpCancellations.cancelClaimed(commandId, leaseToken, failureCode, integrityError)
-      : await this.deps.followUpCancellations.cancelClaimed(commandId, leaseToken, failureCode);
+      ? await this.deps.followUpCancellations.cancelClaimed(
+          commandId,
+          leaseToken,
+          failureCode,
+          integrityError,
+        )
+      : await this.deps.followUpCancellations.cancelClaimed(
+          commandId,
+          leaseToken,
+          failureCode,
+        );
     if (outcome === "not-follow-up") {
-      await this.deps.commands.rejectCommand(commandId, leaseToken, failureCode);
+      await this.deps.commands.rejectCommand(
+        commandId,
+        leaseToken,
+        failureCode,
+      );
     } else if (outcome === "released" || outcome === "held") {
-      logger.info("arch040.follow_up_claim_cancellation", { commandId, outcome, reasonCode: failureCode });
+      logger.info("arch040.follow_up_claim_cancellation", {
+        commandId,
+        outcome,
+        reasonCode: failureCode,
+      });
     }
   }
 
-  private async claimMerchantFollowUp(command: HumanCommand, recoveryId: string, now: Date): Promise<string | null> {
-    if (typeof command.followUpClaimKey !== "string" || !command.followUpClaimKey.trim()) {
+  private async claimMerchantFollowUp(
+    command: HumanCommand,
+    recoveryId: string,
+    now: Date,
+  ): Promise<string | null> {
+    if (
+      typeof command.followUpClaimKey !== "string" ||
+      !command.followUpClaimKey.trim()
+    ) {
       throw new FollowUpClaimKeyIntegrityError(command.id);
     }
     const followUpClaimKey = command.followUpClaimKey;
     const claim = await this.deps.followUps.claimSequenceTwo({
-      initiator: "merchant_post_window", recoveryId, initiationKey: followUpClaimKey,
-      recipient: command.recipientSnapshot, expectedRevision: command.expectedControlRevision, now,
+      initiator: "merchant_post_window",
+      recoveryId,
+      initiationKey: followUpClaimKey,
+      recipient: command.recipientSnapshot,
+      expectedRevision: command.expectedControlRevision,
+      now,
     });
     let attemptId: string | undefined;
     if (claim.kind === "claimed") attemptId = claim.attemptId;
-    if (!attemptId && claim.kind === "suppressed" && claim.reason === "already-claimed") {
+    if (
+      !attemptId &&
+      claim.kind === "suppressed" &&
+      claim.reason === "already-claimed"
+    ) {
       // Restart-safe replay of the SAME merchant command: not another claim.
-      const existing = await first<{ id: string }>(this.deps.database, `
+      const existing = await first<{ id: string }>(
+        this.deps.database,
+        `
         SELECT "id" FROM "commerce"."RecoveryOutreachAttempt"
         WHERE "checkoutRecoveryId"=$1 AND "sequence"=2
           AND "initiatedBy"='HUMAN' AND "initiationKey"=$2
-          AND "outboundMessageId" IS NULL AND "status"='PENDING'`, recoveryId, followUpClaimKey);
+          AND "outboundMessageId" IS NULL AND "status"='PENDING'`,
+        recoveryId,
+        followUpClaimKey,
+      );
       attemptId = existing?.id;
     }
     // DATABASE-001 makes the command's attempt FK immutable. Both producers
     // must supply this already; the dispatcher must never rewrite it.
-    return attemptId && command.recoveryOutreachAttemptId === attemptId ? attemptId : null;
+    return attemptId && command.recoveryOutreachAttemptId === attemptId
+      ? attemptId
+      : null;
   }
 
   private defer(commandId: string, token: string, reason: string) {
-    return this.deps.commands.deferCommand(commandId, token, safeCode(reason),
-      new Date(this.deps.now().getTime() + 30_000));
+    return this.deps.commands.deferCommand(
+      commandId,
+      token,
+      safeCode(reason),
+      new Date(this.deps.now().getTime() + 30_000),
+    );
   }
 }
 
 function safeCode(value: string): string {
-  const bounded = value.toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 64);
+  const bounded = value
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "_")
+    .slice(0, 64);
   return /^[a-z]/.test(bounded) ? bounded : "policy_denied";
 }

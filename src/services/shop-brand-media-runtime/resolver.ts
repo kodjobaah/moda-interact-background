@@ -1,11 +1,17 @@
-import { ConversationPreparedBrandImageSchema, type ConversationPreparedBrandImage } from "@modainteract/moda-interact-shared/commerce/presentation";
+import {
+  ConversationPreparedBrandImageSchema,
+  type ConversationPreparedBrandImage,
+} from "@modainteract/moda-interact-shared/commerce/presentation";
 import { readShopBrandPublicMediaConfiguration } from "../platform-configuration/consumers.js";
 import { normalizeShopBrandDomain } from "../shop-brand-media/contracts.js";
 import type {
-  BrandMediaResolver, ReadyBrandMedia,
+  BrandMediaResolver,
+  ReadyBrandMedia,
 } from "../recovery-template-preparation/recovery-template.types.js";
 import {
-  isShopBrandMediaRole, type ShopBrandMediaReader, type ShopBrandMediaRole,
+  isShopBrandMediaRole,
+  type ShopBrandMediaReader,
+  type ShopBrandMediaRole,
 } from "./contracts.js";
 import { PrismaShopBrandMediaReader } from "./repository.js";
 
@@ -23,12 +29,20 @@ export function verifiedPublicMediaOrigin(value: unknown): URL {
     throw new Error("SHOPBRAND_PUBLIC_ORIGIN_INVALID");
   }
   const origin = new URL(value);
-  if (origin.protocol !== "https:" || !origin.hostname.includes(".") ||
-      origin.username || origin.password || origin.search || origin.hash ||
-      origin.pathname !== "/" || origin.href !== `${origin.origin}/` ||
-      origin.port || origin.hostname.startsWith("[") ||
-      /^\d+(?:\.\d+){3}$/.test(origin.hostname) ||
-      /\.(?:test|local|localhost|invalid|example|internal)$/.test(origin.hostname)) {
+  if (
+    origin.protocol !== "https:" ||
+    !origin.hostname.includes(".") ||
+    origin.username ||
+    origin.password ||
+    origin.search ||
+    origin.hash ||
+    origin.pathname !== "/" ||
+    origin.href !== `${origin.origin}/` ||
+    origin.port ||
+    origin.hostname.startsWith("[") ||
+    /^\d+(?:\.\d+){3}$/.test(origin.hostname) ||
+    /\.(?:test|local|localhost|invalid|example|internal)$/.test(origin.hostname)
+  ) {
     throw new Error("SHOPBRAND_PUBLIC_ORIGIN_INVALID");
   }
   return origin;
@@ -40,54 +54,120 @@ export function verifiedPublicMediaOrigin(value: unknown): URL {
  * This function is pure: it does no provider, HEAD, image or R2 operations.
  */
 export function verifiedReadyMedia(input: {
-  shopId: string; domain: string; role: ShopBrandMediaRole; whatsAppMedia: unknown; publicOrigin: URL;
+  shopId: string;
+  domain: string;
+  role: ShopBrandMediaRole;
+  whatsAppMedia: unknown;
+  publicOrigin: URL;
 }): ReadyBrandMedia | null {
   const { shopId, domain, role, whatsAppMedia, publicOrigin } = input;
   const domainSegment = normalizeShopBrandDomain(domain);
-  if (!SHOP_ID.test(shopId) || !isShopBrandMediaRole(role) ||
-      !domainSegment ||
-      publicOrigin.protocol !== "https:" || publicOrigin.pathname !== "/" ||
-      publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash ||
-      !isRecord(whatsAppMedia) || whatsAppMedia.schemaVersion !== 1 ||
-      !isRecord(whatsAppMedia.roles) || !Object.hasOwn(whatsAppMedia.roles, role)) return null;
+  if (
+    !SHOP_ID.test(shopId) ||
+    !isShopBrandMediaRole(role) ||
+    !domainSegment ||
+    publicOrigin.protocol !== "https:" ||
+    publicOrigin.pathname !== "/" ||
+    publicOrigin.username ||
+    publicOrigin.password ||
+    publicOrigin.search ||
+    publicOrigin.hash ||
+    !isRecord(whatsAppMedia) ||
+    whatsAppMedia.schemaVersion !== 1 ||
+    !isRecord(whatsAppMedia.roles) ||
+    !Object.hasOwn(whatsAppMedia.roles, role)
+  )
+    return null;
   const slot = whatsAppMedia.roles[role];
-  if (!isRecord(slot) || !isRecord(slot.source) || !isRecord(slot.work) ||
-      !isRecord(slot.ready)) return null;
+  if (
+    !isRecord(slot) ||
+    !isRecord(slot.source) ||
+    !isRecord(slot.work) ||
+    !isRecord(slot.ready)
+  )
+    return null;
   const { source, work, ready } = slot;
-  if (work.status !== "READY" || typeof source.url !== "string" || !source.url.trim() ||
-      !Number.isSafeInteger(source.generation) || (source.generation as number) < 1 ||
-      typeof source.fingerprint !== "string" || !FINGERPRINT.test(source.fingerprint) ||
-      ready.sourceGeneration !== source.generation || ready.sourceFingerprint !== source.fingerprint ||
-      (ready.contentType !== "image/jpeg" && ready.contentType !== "image/png") ||
-      ready.width !== CANVAS.width || ready.height !== CANVAS.height ||
-      !Number.isSafeInteger(ready.sizeBytes) || (ready.sizeBytes as number) <= 0 ||
-      (ready.sizeBytes as number) >= OUTPUT_LIMIT ||
-      typeof ready.contentSha256 !== "string" || !DIGEST.test(ready.contentSha256) ||
-      typeof ready.verifiedAt !== "string" || !Number.isFinite(Date.parse(ready.verifiedAt))) return null;
+  if (
+    work.status !== "READY" ||
+    typeof source.url !== "string" ||
+    !source.url.trim() ||
+    !Number.isSafeInteger(source.generation) ||
+    (source.generation as number) < 1 ||
+    typeof source.fingerprint !== "string" ||
+    !FINGERPRINT.test(source.fingerprint) ||
+    ready.sourceGeneration !== source.generation ||
+    ready.sourceFingerprint !== source.fingerprint ||
+    (ready.contentType !== "image/jpeg" && ready.contentType !== "image/png") ||
+    ready.width !== CANVAS.width ||
+    ready.height !== CANVAS.height ||
+    !Number.isSafeInteger(ready.sizeBytes) ||
+    (ready.sizeBytes as number) <= 0 ||
+    (ready.sizeBytes as number) >= OUTPUT_LIMIT ||
+    typeof ready.contentSha256 !== "string" ||
+    !DIGEST.test(ready.contentSha256) ||
+    typeof ready.verifiedAt !== "string" ||
+    !Number.isFinite(Date.parse(ready.verifiedAt))
+  )
+    return null;
 
   const extension = ready.contentType === "image/jpeg" ? "jpg" : "png";
   const objectKey = `shop-brands/${domainSegment}/${role.toLowerCase()}/sha256-${ready.contentSha256}.${extension}`;
   if (ready.objectKey !== objectKey) return null;
   // Exact key, not URL interpolation from merchant fields; cannot escape publicOrigin.
   const url = new URL(objectKey, publicOrigin);
-  if (url.origin !== publicOrigin.origin || url.search || url.hash ||
-      !url.pathname.startsWith("/shop-brands/")) return null;
-  return { shopId, role, status: "READY", kind: "R2_DERIVATIVE", httpsUrl: url.href };
+  if (
+    url.origin !== publicOrigin.origin ||
+    url.search ||
+    url.hash ||
+    !url.pathname.startsWith("/shop-brands/")
+  )
+    return null;
+  return {
+    shopId,
+    role,
+    status: "READY",
+    kind: "R2_DERIVATIVE",
+    httpsUrl: url.href,
+  };
 }
 
 /** Same current-generation proof as templates, carrying the public Shared conversation provenance. */
-export function verifiedReadyConversationBrandImage(input: Parameters<typeof verifiedReadyMedia>[0]): ConversationPreparedBrandImage | null {
-  if (input.role === "COVER_IMAGE" || !verifiedReadyMedia(input) || !isRecord(input.whatsAppMedia) || !isRecord(input.whatsAppMedia.roles)) return null;
+export function verifiedReadyConversationBrandImage(
+  input: Parameters<typeof verifiedReadyMedia>[0],
+): ConversationPreparedBrandImage | null {
+  if (
+    input.role === "COVER_IMAGE" ||
+    !verifiedReadyMedia(input) ||
+    !isRecord(input.whatsAppMedia) ||
+    !isRecord(input.whatsAppMedia.roles)
+  )
+    return null;
   const slot = input.whatsAppMedia.roles[input.role];
-  if (!isRecord(slot) || !isRecord(slot.source) || !isRecord(slot.ready)) return null;
-  const domain = normalizeShopBrandDomain(input.domain); if (!domain) return null;
-  const parsed = ConversationPreparedBrandImageSchema.safeParse({ schemaVersion: 1,
-    origin: {kind: "SHOP_BRAND", shopId: input.shopId, shopDomain: domain, role: input.role,
-      sourceGeneration: slot.source.generation, sourceFingerprint: slot.source.fingerprint},
-    status: "READY", kind: "R2_DERIVATIVE", publicOrigin: input.publicOrigin.origin,
+  if (!isRecord(slot) || !isRecord(slot.source) || !isRecord(slot.ready))
+    return null;
+  const domain = normalizeShopBrandDomain(input.domain);
+  if (!domain) return null;
+  const parsed = ConversationPreparedBrandImageSchema.safeParse({
+    schemaVersion: 1,
+    origin: {
+      kind: "SHOP_BRAND",
+      shopId: input.shopId,
+      shopDomain: domain,
+      role: input.role,
+      sourceGeneration: slot.source.generation,
+      sourceFingerprint: slot.source.fingerprint,
+    },
+    status: "READY",
+    kind: "R2_DERIVATIVE",
+    publicOrigin: input.publicOrigin.origin,
     publicUrl: new URL(String(slot.ready.objectKey), input.publicOrigin).href,
-    objectKey: slot.ready.objectKey, contentSha256: slot.ready.contentSha256, contentType: slot.ready.contentType,
-    width: slot.ready.width, height: slot.ready.height, sizeBytes: slot.ready.sizeBytes, verifiedAt: slot.ready.verifiedAt,
+    objectKey: slot.ready.objectKey,
+    contentSha256: slot.ready.contentSha256,
+    contentType: slot.ready.contentType,
+    width: slot.ready.width,
+    height: slot.ready.height,
+    sizeBytes: slot.ready.sizeBytes,
+    verifiedAt: slot.ready.verifiedAt,
   });
   return parsed.success ? parsed.data : null;
 }
@@ -99,13 +179,15 @@ export class ShopBrandReadyMediaAdapter {
 
   constructor(
     private readonly repository: ShopBrandMediaReader = new PrismaShopBrandMediaReader(),
-    private readonly readSettings: () => Promise<{ publicOrigin: string }> =
-      readShopBrandPublicMediaConfiguration,
+    private readonly readSettings: () => Promise<{
+      publicOrigin: string;
+    }> = readShopBrandPublicMediaConfiguration,
   ) {}
 
   private origin(): Promise<URL> {
     this.originPromise ??= this.readSettings().then((settings) =>
-      verifiedPublicMediaOrigin(settings.publicOrigin));
+      verifiedPublicMediaOrigin(settings.publicOrigin),
+    );
     return this.originPromise;
   }
 
@@ -114,19 +196,36 @@ export class ShopBrandReadyMediaAdapter {
     if (!SHOP_ID.test(shopId) || !isShopBrandMediaRole(role)) return null;
     const origin = await this.origin();
     const brand = await this.repository.readForShop(shopId);
-    if (!brand || brand.shopId !== shopId || typeof brand.domain !== "string") return null;
-    return verifiedReadyMedia({ shopId, domain: brand.domain, role,
-      whatsAppMedia: brand.whatsAppMedia, publicOrigin: origin });
+    if (!brand || brand.shopId !== shopId || typeof brand.domain !== "string")
+      return null;
+    return verifiedReadyMedia({
+      shopId,
+      domain: brand.domain,
+      role,
+      whatsAppMedia: brand.whatsAppMedia,
+      publicOrigin: origin,
+    });
   };
 
   /** New preparation only: current logo first, square fallback; never cover art or raw source URLs. */
-  readonly resolveConversationLogo = async (shopId: string, selectedRole?: "LOGO" | "SQUARE_LOGO"): Promise<ConversationPreparedBrandImage | null> => {
+  readonly resolveConversationLogo = async (
+    shopId: string,
+    selectedRole?: "LOGO" | "SQUARE_LOGO",
+  ): Promise<ConversationPreparedBrandImage | null> => {
     if (!SHOP_ID.test(shopId)) return null;
     const publicOrigin = await this.origin();
     const brand = await this.repository.readForShop(shopId);
     if (!brand || brand.shopId !== shopId) return null;
-    for (const role of selectedRole ? [selectedRole] : ["LOGO", "SQUARE_LOGO"] as const) {
-      const image = verifiedReadyConversationBrandImage({shopId, domain: brand.domain, role, whatsAppMedia: brand.whatsAppMedia, publicOrigin});
+    for (const role of selectedRole
+      ? [selectedRole]
+      : (["LOGO", "SQUARE_LOGO"] as const)) {
+      const image = verifiedReadyConversationBrandImage({
+        shopId,
+        domain: brand.domain,
+        role,
+        whatsAppMedia: brand.whatsAppMedia,
+        publicOrigin,
+      });
       if (image) return image;
     }
     return null;

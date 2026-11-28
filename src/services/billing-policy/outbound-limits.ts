@@ -7,7 +7,10 @@ export function resolveOutboundLimits(
   platformSoft: number,
   platformDefaultHard: number,
   absoluteHard: number,
-  override: { outboundSoftLimit: number | null; outboundHardLimit: number | null } | null,
+  override: {
+    outboundSoftLimit: number | null;
+    outboundHardLimit: number | null;
+  } | null,
   invalidConfiguration: InvalidConfigurationFactory,
 ): { soft: number; hard: number } {
   const validatedPlatformSoft = validateMinimumInteger(
@@ -32,16 +35,31 @@ export function resolveOutboundLimits(
     invalidConfiguration,
   );
   if (validatedPlatformSoft > validatedPlatformHard) {
-    throw invalidConfiguration(shopId, "platform soft limit exceeds platform hard limit");
+    throw invalidConfiguration(
+      shopId,
+      "platform soft limit exceeds platform hard limit",
+    );
   }
 
   const overrideHard = override?.outboundHardLimit;
   const overrideSoft = override?.outboundSoftLimit;
   if (overrideHard !== null && overrideHard !== undefined) {
-    validateMinimumInteger(shopId, "shop hard limit", overrideHard, 2, invalidConfiguration);
+    validateMinimumInteger(
+      shopId,
+      "shop hard limit",
+      overrideHard,
+      2,
+      invalidConfiguration,
+    );
   }
   if (overrideSoft !== null && overrideSoft !== undefined) {
-    validateMinimumInteger(shopId, "shop soft limit", overrideSoft, 1, invalidConfiguration);
+    validateMinimumInteger(
+      shopId,
+      "shop soft limit",
+      overrideSoft,
+      1,
+      invalidConfiguration,
+    );
   }
   if (
     overrideSoft !== null &&
@@ -50,7 +68,10 @@ export function resolveOutboundLimits(
     overrideHard !== undefined &&
     overrideSoft > overrideHard
   ) {
-    throw invalidConfiguration(shopId, "shop soft limit exceeds shop hard limit");
+    throw invalidConfiguration(
+      shopId,
+      "shop soft limit exceeds shop hard limit",
+    );
   }
 
   const requestedHardLimit = overrideHard ?? validatedPlatformHard;
@@ -71,7 +92,10 @@ function validateMinimumInteger(
   invalidConfiguration: InvalidConfigurationFactory,
 ): number {
   if (!Number.isSafeInteger(value) || value < minimum) {
-    throw invalidConfiguration(shopId, `${label} must be a finite integer of at least ${minimum}`);
+    throw invalidConfiguration(
+      shopId,
+      `${label} must be a finite integer of at least ${minimum}`,
+    );
   }
   return value;
 }
@@ -82,7 +106,11 @@ export function validateTerminalMessageReservedSlots(
   effectiveHardLimit: number,
   invalidConfiguration: InvalidConfigurationFactory,
 ): number {
-  if (!Number.isSafeInteger(value) || value < 1 || value >= effectiveHardLimit) {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value >= effectiveHardLimit
+  ) {
     throw invalidConfiguration(
       shopId,
       "terminalMessageReservedSlots must be at least 1 and less than the effective hard limit",

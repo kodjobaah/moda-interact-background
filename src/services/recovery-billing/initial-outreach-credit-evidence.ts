@@ -77,24 +77,35 @@ export async function readInitialAttemptIdentity(
       },
     },
   });
-  requireLineage(attempt && attempt.id === input.outreachAttemptId &&
-    attempt.checkoutRecoveryId === input.recoveryId &&
-    attempt.checkoutRecovery.id === input.recoveryId &&
-    attempt.checkoutRecovery.shopId === input.shopId &&
-    (!attempt.checkoutRecovery.conversation?.shopId ||
-      attempt.checkoutRecovery.conversation.shopId === input.shopId) &&
-    attempt.trigger === "INITIAL" &&
-    (attempt.sequence === 1 && !attempt.id.startsWith("retry_") || attempt.sequence >= 3),
-  "initial attempt/recovery/Shop identity mismatch");
+  requireLineage(
+    attempt &&
+      attempt.id === input.outreachAttemptId &&
+      attempt.checkoutRecoveryId === input.recoveryId &&
+      attempt.checkoutRecovery.id === input.recoveryId &&
+      attempt.checkoutRecovery.shopId === input.shopId &&
+      (!attempt.checkoutRecovery.conversation?.shopId ||
+        attempt.checkoutRecovery.conversation.shopId === input.shopId) &&
+      attempt.trigger === "INITIAL" &&
+      ((attempt.sequence === 1 && !attempt.id.startsWith("retry_")) ||
+        attempt.sequence >= 3),
+    "initial attempt/recovery/Shop identity mismatch",
+  );
   return attempt;
 }
 
-export async function readInitialAttempt(tx: Transaction, input: InitialOutreachCreditIdentity): Promise<InitialAttemptEvidence> {
+export async function readInitialAttempt(
+  tx: Transaction,
+  input: InitialOutreachCreditIdentity,
+): Promise<InitialAttemptEvidence> {
   const attempt = await readInitialAttemptIdentity(tx, input);
   if (attempt.sequence >= 3) {
     const conversationId = attempt.checkoutRecovery.conversation?.id;
     requireLineage(conversationId, "initial retry conversation missing");
-    await readRetryFundingLineage(tx, { recoveryId: input.recoveryId, conversationId, attemptId: attempt.id });
+    await readRetryFundingLineage(tx, {
+      recoveryId: input.recoveryId,
+      conversationId,
+      attemptId: attempt.id,
+    });
   }
   return attempt;
 }
@@ -140,17 +151,25 @@ export async function validateInitialMessageIdentity(
   message: InitialMessageEvidence,
   requireUsage: boolean,
 ): Promise<AutomatedUsage | null> {
-  requireLineage(message.direction === "OUTBOUND" && message.senderType === "AUTOMATION" &&
-    message.conversation.id === attempt.checkoutRecovery.conversation?.id &&
-    message.conversation.checkoutRecovery?.id === input.recoveryId &&
-    message.conversation.checkoutRecovery.shopId === input.shopId &&
-    (!message.conversation.shopId || message.conversation.shopId === input.shopId),
-  "initial message ownership mismatch");
-  requireLineage(!attempt.outboundMessageId || attempt.outboundMessageId === message.id,
-    "initial attempt links another message");
-  requireLineage(!message.recoveryOutreachAttempt ||
-    message.recoveryOutreachAttempt.id === attempt.id,
-  "message links another outreach attempt");
+  requireLineage(
+    message.direction === "OUTBOUND" &&
+      message.senderType === "AUTOMATION" &&
+      message.conversation.id === attempt.checkoutRecovery.conversation?.id &&
+      message.conversation.checkoutRecovery?.id === input.recoveryId &&
+      message.conversation.checkoutRecovery.shopId === input.shopId &&
+      (!message.conversation.shopId ||
+        message.conversation.shopId === input.shopId),
+    "initial message ownership mismatch",
+  );
+  requireLineage(
+    !attempt.outboundMessageId || attempt.outboundMessageId === message.id,
+    "initial attempt links another message",
+  );
+  requireLineage(
+    !message.recoveryOutreachAttempt ||
+      message.recoveryOutreachAttempt.id === attempt.id,
+    "message links another outreach attempt",
+  );
 
   const command = await tx.merchantConversationSendCommand.findFirst({
     where: {
@@ -161,33 +180,50 @@ export async function validateInitialMessageIdentity(
     },
     select: { id: true },
   });
-  requireLineage(!command && !message.merchantSendCommand,
-    "automated initial message has a merchant command");
+  requireLineage(
+    !command && !message.merchantSendCommand,
+    "automated initial message has a merchant command",
+  );
 
   const linkedAttempt = await tx.recoveryOutreachAttempt.findUnique({
     where: { outboundMessageId: message.id },
     select: { id: true, sequence: true, trigger: true },
   });
-  requireLineage(!linkedAttempt || (linkedAttempt.id === attempt.id &&
-    linkedAttempt.sequence === attempt.sequence && linkedAttempt.trigger === "INITIAL"),
-  "initial message has a conflicting attempt claim");
+  requireLineage(
+    !linkedAttempt ||
+      (linkedAttempt.id === attempt.id &&
+        linkedAttempt.sequence === attempt.sequence &&
+        linkedAttempt.trigger === "INITIAL"),
+    "initial message has a conflicting attempt claim",
+  );
 
   const usage = await readExactAutomatedUsage(tx, input.shopId, message.id);
   const canonicalUsage = await tx.usageEvent.findUnique({
     where: { idempotencyKey: `recovery-outreach:${attempt.id}` },
-    select: { id: true, shopId: true, sourceId: true, sourceType: true, metric: true },
+    select: {
+      id: true,
+      shopId: true,
+      sourceId: true,
+      sourceType: true,
+      metric: true,
+    },
   });
-  requireLineage(!canonicalUsage || (canonicalUsage.shopId === input.shopId &&
-    canonicalUsage.sourceId === message.id &&
-    canonicalUsage.sourceType === "OUTBOUND_AUTOMATED_MESSAGE" &&
-    canonicalUsage.metric === "OUTBOUND_AUTOMATED_MESSAGE" &&
-    canonicalUsage.id === usage?.id),
-  "canonical automated-message usage identity mismatch");
+  requireLineage(
+    !canonicalUsage ||
+      (canonicalUsage.shopId === input.shopId &&
+        canonicalUsage.sourceId === message.id &&
+        canonicalUsage.sourceType === "OUTBOUND_AUTOMATED_MESSAGE" &&
+        canonicalUsage.metric === "OUTBOUND_AUTOMATED_MESSAGE" &&
+        canonicalUsage.id === usage?.id),
+    "canonical automated-message usage identity mismatch",
+  );
   if (requireUsage || !attempt.outboundMessageId || usage || canonicalUsage) {
-    requireLineage(usage?.sourceType === "OUTBOUND_AUTOMATED_MESSAGE" &&
-      usage.idempotencyKey === `recovery-outreach:${attempt.id}` &&
-      canonicalUsage?.id === usage.id,
-    "initial automated-message usage identity mismatch");
+    requireLineage(
+      usage?.sourceType === "OUTBOUND_AUTOMATED_MESSAGE" &&
+        usage.idempotencyKey === `recovery-outreach:${attempt.id}` &&
+        canonicalUsage?.id === usage.id,
+      "initial automated-message usage identity mismatch",
+    );
   }
   return usage;
 }
@@ -198,21 +234,28 @@ export async function assertNoInitialMessageEvidence(
   attempt: InitialAttemptEvidence,
   historicalMessageIds: readonly string[] = [],
 ): Promise<void> {
-  requireLineage((attempt.status === "PENDING" || attempt.status === "CAPACITY_BLOCKED") &&
-    attempt.outboundMessageId === null && attempt.sentAt === null &&
-    attempt.failureCode === null,
-  "initial attempt has existing message or send evidence");
+  requireLineage(
+    (attempt.status === "PENDING" || attempt.status === "CAPACITY_BLOCKED") &&
+      attempt.outboundMessageId === null &&
+      attempt.sentAt === null &&
+      attempt.failureCode === null,
+    "initial attempt has existing message or send evidence",
+  );
   const [linkedMessage, canonicalUsage, linkedCommand] = await Promise.all([
     tx.conversationMessage.findFirst({
-      where: { OR: [
-        { recoveryOutreachAttempt: { is: { id: attempt.id } } },
-        {
-          conversation: { is: { checkoutRecoveryId: input.recoveryId } },
-          direction: "OUTBOUND",
-          senderType: "AUTOMATION",
-          ...(historicalMessageIds.length ? { id: { notIn: [...historicalMessageIds] } } : {}),
-        },
-      ] },
+      where: {
+        OR: [
+          { recoveryOutreachAttempt: { is: { id: attempt.id } } },
+          {
+            conversation: { is: { checkoutRecoveryId: input.recoveryId } },
+            direction: "OUTBOUND",
+            senderType: "AUTOMATION",
+            ...(historicalMessageIds.length
+              ? { id: { notIn: [...historicalMessageIds] } }
+              : {}),
+          },
+        ],
+      },
       select: { id: true },
     }),
     tx.usageEvent.findUnique({
@@ -224,6 +267,8 @@ export async function assertNoInitialMessageEvidence(
       select: { id: true },
     }),
   ]);
-  requireLineage(!linkedMessage && !canonicalUsage && !linkedCommand,
-    "initial attempt has a discoverable message, command or automated usage event");
+  requireLineage(
+    !linkedMessage && !canonicalUsage && !linkedCommand,
+    "initial attempt has a discoverable message, command or automated usage event",
+  );
 }

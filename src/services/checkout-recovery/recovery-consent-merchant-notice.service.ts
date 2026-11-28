@@ -1,6 +1,12 @@
-import { MerchantSupportMessageKind, MerchantSupportMessageState } from "@prisma/client";
+import {
+  MerchantSupportMessageKind,
+  MerchantSupportMessageState,
+} from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import type {
@@ -16,7 +22,8 @@ import {
 type NoticeDatabase = Pick<PrismaClient, "$transaction">;
 type NoticeLogger = Pick<StructuredLogger, "info" | "error">;
 const defaultLogger = createLogger({
-  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
 });
 
 /** Single transactional Support writer for Shopify and Woo recovery-consent notices. */
@@ -27,7 +34,9 @@ export class RecoveryConsentMerchantNoticeService implements RecoveryConsentMerc
     private readonly logger: NoticeLogger = defaultLogger,
   ) {}
 
-  async notify(input: RecoveryConsentNoticeInput): Promise<RecoveryConsentNoticeResult> {
+  async notify(
+    input: RecoveryConsentNoticeInput,
+  ): Promise<RecoveryConsentNoticeResult> {
     let validated = false;
     try {
       // Validate and prepare every byte before acquiring a DB transaction.
@@ -51,17 +60,19 @@ export class RecoveryConsentMerchantNoticeService implements RecoveryConsentMerc
         });
         const inserted = await tx.merchantSupportMessage.createMany({
           skipDuplicates: true,
-          data: [{
-            threadId: thread.id,
-            kind: MerchantSupportMessageKind.SYSTEM,
-            state: MerchantSupportMessageState.AVAILABLE,
-            originalBody: body,
-            sourceLanguageTag: "en-GB",
-            systemCode: "RECOVERY_CONSENT_ADMISSION",
-            systemVersion: "1",
-            sourceKey,
-            availableAt: at,
-          }],
+          data: [
+            {
+              threadId: thread.id,
+              kind: MerchantSupportMessageKind.SYSTEM,
+              state: MerchantSupportMessageState.AVAILABLE,
+              originalBody: body,
+              sourceLanguageTag: "en-GB",
+              systemCode: "RECOVERY_CONSENT_ADMISSION",
+              systemVersion: "1",
+              sourceKey,
+              availableAt: at,
+            },
+          ],
         });
         if (inserted.count === 1) {
           // A later insert, or a caller whose clock is behind, must not regress
@@ -75,25 +86,46 @@ export class RecoveryConsentMerchantNoticeService implements RecoveryConsentMerc
           });
           return "created" as const;
         }
-        if (inserted.count !== 0) throw new Error("Unexpected merchant Support insert count");
-        const existing = await tx.merchantSupportMessage.findUnique({ where: { sourceKey } });
-        if (!existing || existing.threadId !== thread.id ||
-            existing.kind !== MerchantSupportMessageKind.SYSTEM ||
-            existing.systemCode !== "RECOVERY_CONSENT_ADMISSION" || existing.systemVersion !== "1") {
-          throw new Error("Recovery consent notice deduplication invariant failed");
+        if (inserted.count !== 0)
+          throw new Error("Unexpected merchant Support insert count");
+        const existing = await tx.merchantSupportMessage.findUnique({
+          where: { sourceKey },
+        });
+        if (
+          !existing ||
+          existing.threadId !== thread.id ||
+          existing.kind !== MerchantSupportMessageKind.SYSTEM ||
+          existing.systemCode !== "RECOVERY_CONSENT_ADMISSION" ||
+          existing.systemVersion !== "1"
+        ) {
+          throw new Error(
+            "Recovery consent notice deduplication invariant failed",
+          );
         }
         return "duplicate" as const;
       });
       this.logSafely("recovery.consent_notice." + result, {
-        shopId: input.shopId, platform: input.platform, reasonCode: input.reason,
-        blockedOperation: input.blockedOperation, result,
+        shopId: input.shopId,
+        platform: input.platform,
+        reasonCode: input.reason,
+        blockedOperation: input.blockedOperation,
+        result,
       });
       return result;
     } catch (error) {
-      this.logSafely("recovery.consent_notice.failed", validated ? {
-        shopId: input.shopId, platform: input.platform, reasonCode: input.reason,
-        blockedOperation: input.blockedOperation, result: "failed", errorCategory: "PERSISTENCE_FAILURE",
-      } : { result: "failed", errorCategory: "INVALID_INPUT_OR_FORMAT" });
+      this.logSafely(
+        "recovery.consent_notice.failed",
+        validated
+          ? {
+              shopId: input.shopId,
+              platform: input.platform,
+              reasonCode: input.reason,
+              blockedOperation: input.blockedOperation,
+              result: "failed",
+              errorCategory: "PERSISTENCE_FAILURE",
+            }
+          : { result: "failed", errorCategory: "INVALID_INPUT_OR_FORMAT" },
+      );
       // Never transform a Prisma/formatter failure into a positive/duplicate notice.
       throw error;
     }
@@ -104,8 +136,11 @@ export class RecoveryConsentMerchantNoticeService implements RecoveryConsentMerc
     try {
       if (event.endsWith(".failed")) this.logger.error(event, fields);
       else this.logger.info(event, fields);
-    } catch { /* Observability is never a correctness dependency. */ }
+    } catch {
+      /* Observability is never a correctness dependency. */
+    }
   }
 }
 
-export const recoveryConsentMerchantNoticeService = new RecoveryConsentMerchantNoticeService();
+export const recoveryConsentMerchantNoticeService =
+  new RecoveryConsentMerchantNoticeService();

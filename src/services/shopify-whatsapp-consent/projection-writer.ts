@@ -1,7 +1,14 @@
 import type { PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import type { ShopifyConsentRecipientResolver } from "./recipient.js";
-import { notAuthorised, unavailable, type Failure, type ScopedCustomer, type InvalidationResult, type RefreshResult } from "./types.js";
+import {
+  notAuthorised,
+  unavailable,
+  type Failure,
+  type ScopedCustomer,
+  type InvalidationResult,
+  type RefreshResult,
+} from "./types.js";
 
 /** Persists native consent with revision CAS, leaving local STOP state untouched. */
 export class ShopifyConsentProjectionWriter {
@@ -25,22 +32,34 @@ export class ShopifyConsentProjectionWriter {
         // ordering fence on retries, even after the native source is cleared.
         OR: [
           { whatsappConsentSource: "SHOPIFY_NATIVE" },
-          { whatsappConsentSource: null, whatsappConsentProviderObservedAt: { not: null } },
+          {
+            whatsappConsentSource: null,
+            whatsappConsentProviderObservedAt: { not: null },
+          },
         ],
       },
     });
     let hasNewerDisplacedObservation = false;
     for (const phone of phones) {
       const local = this.recipient.canonical(phone.phone, scoped.shop);
-      const stillDefault = authoritativeCanonical !== null && local !== null &&
-        local === authoritativeCanonical && phone.whatsappCanonicalPhone === local.slice(1);
+      const stillDefault =
+        authoritativeCanonical !== null &&
+        local !== null &&
+        local === authoritativeCanonical &&
+        phone.whatsappCanonicalPhone === local.slice(1);
       if (stillDefault) continue;
-      if (phone.whatsappConsentProviderObservedAt &&
-          phone.whatsappConsentProviderObservedAt >= observedAt) {
+      if (
+        phone.whatsappConsentProviderObservedAt &&
+        phone.whatsappConsentProviderObservedAt >= observedAt
+      ) {
         hasNewerDisplacedObservation = true;
       }
       if (phone.whatsappConsentDecision !== "GRANTED") continue;
-      const failure = await this.invalidateDisplacedGrant(scoped, phone.id, authoritativeCanonical);
+      const failure = await this.invalidateDisplacedGrant(
+        scoped,
+        phone.id,
+        authoritativeCanonical,
+      );
       if (failure) return { failure, hasNewerDisplacedObservation };
     }
     return { failure: null, hasNewerDisplacedObservation };
@@ -69,18 +88,27 @@ export class ShopifyConsentProjectionWriter {
           endedAt: null,
           customer: {
             shopId: scoped.shop.id,
-            shopifyCustomerId: { in: [scoped.identity.numericId, scoped.identity.gid] },
+            shopifyCustomerId: {
+              in: [scoped.identity.numericId, scoped.identity.gid],
+            },
             shop: { platform: "SHOPIFY", status: "ACTIVE" },
           },
         },
       });
       if (!phone) return notAuthorised("ACTIVE_RECIPIENT_CHANGED");
-      if (phone.whatsappConsentSource !== "SHOPIFY_NATIVE" || phone.whatsappConsentDecision !== "GRANTED") {
+      if (
+        phone.whatsappConsentSource !== "SHOPIFY_NATIVE" ||
+        phone.whatsappConsentDecision !== "GRANTED"
+      ) {
         return null;
       }
       const local = this.recipient.canonical(phone.phone, scoped.shop);
-      if (authoritativeCanonical !== null && local !== null &&
-          local === authoritativeCanonical && phone.whatsappCanonicalPhone === local.slice(1)) {
+      if (
+        authoritativeCanonical !== null &&
+        local !== null &&
+        local === authoritativeCanonical &&
+        phone.whatsappCanonicalPhone === local.slice(1)
+      ) {
         return null;
       }
       try {
@@ -94,11 +122,15 @@ export class ShopifyConsentProjectionWriter {
             whatsappConsentSource: "SHOPIFY_NATIVE",
             whatsappConsentDecision: "GRANTED",
             whatsappConsentRevision: phone.whatsappConsentRevision,
-            whatsappConsentDecisionSequence: phone.whatsappConsentDecisionSequence,
-            whatsappConsentProviderObservedAt: phone.whatsappConsentProviderObservedAt,
+            whatsappConsentDecisionSequence:
+              phone.whatsappConsentDecisionSequence,
+            whatsappConsentProviderObservedAt:
+              phone.whatsappConsentProviderObservedAt,
             customer: {
               shopId: scoped.shop.id,
-              shopifyCustomerId: { in: [scoped.identity.numericId, scoped.identity.gid] },
+              shopifyCustomerId: {
+                in: [scoped.identity.numericId, scoped.identity.gid],
+              },
               shop: { platform: "SHOPIFY", status: "ACTIVE" },
             },
           },
@@ -111,7 +143,8 @@ export class ShopifyConsentProjectionWriter {
         });
         if (updated.count === 1) {
           this.logger.info("shopify.whatsapp_consent.sync", {
-            shopId: scoped.shop.id, outcome: "displaced_recipient_invalidated",
+            shopId: scoped.shop.id,
+            outcome: "displaced_recipient_invalidated",
           });
           return null;
         }
@@ -142,33 +175,50 @@ export class ShopifyConsentProjectionWriter {
   ): Promise<RefreshResult> {
     for (let attempt = 0; attempt < 5; attempt++) {
       const phone = await this.database.customerPhone.findFirst({
-        where: { id: phoneId, customerId: scoped.customerId, endedAt: null, customer: {
-          shopId: scoped.shop.id, shopifyCustomerId: { in: [scoped.identity.numericId, scoped.identity.gid] },
-          shop: { platform: "SHOPIFY", status: "ACTIVE" },
-        } },
+        where: {
+          id: phoneId,
+          customerId: scoped.customerId,
+          endedAt: null,
+          customer: {
+            shopId: scoped.shop.id,
+            shopifyCustomerId: {
+              in: [scoped.identity.numericId, scoped.identity.gid],
+            },
+            shop: { platform: "SHOPIFY", status: "ACTIVE" },
+          },
+        },
       });
       if (!phone) return notAuthorised("ACTIVE_RECIPIENT_CHANGED");
       if (decision === "GRANTED" && phone.whatsappNoContact) {
         return notAuthorised("LOCAL_NO_CONTACT");
       }
       const actual = this.recipient.canonical(phone.phone, scoped.shop);
-      if (canonical !== actual) return notAuthorised("ACTIVE_RECIPIENT_CHANGED");
-      if (decision === "GRANTED" &&
-          (!canonical || (phone.whatsappCanonicalPhone !== null && phone.whatsappCanonicalPhone !== canonical.slice(1)))) {
+      if (canonical !== actual)
+        return notAuthorised("ACTIVE_RECIPIENT_CHANGED");
+      if (
+        decision === "GRANTED" &&
+        (!canonical ||
+          (phone.whatsappCanonicalPhone !== null &&
+            phone.whatsappCanonicalPhone !== canonical.slice(1)))
+      ) {
         return notAuthorised("CANONICAL_RECIPIENT_CHANGED");
       }
       // A later provider observation wins even if its HTTP response arrived first.
       const previous = phone.whatsappConsentProviderObservedAt;
       if (previous && observedAt <= previous) {
-        if (previous.getTime() === observedAt.getTime() &&
-            phone.whatsappConsentDecision === decision &&
-            phone.whatsappConsentSource === "SHOPIFY_NATIVE" &&
-            (decision !== "GRANTED" || phone.whatsappCanonicalPhone === canonical?.slice(1))) {
+        if (
+          previous.getTime() === observedAt.getTime() &&
+          phone.whatsappConsentDecision === decision &&
+          phone.whatsappConsentSource === "SHOPIFY_NATIVE" &&
+          (decision !== "GRANTED" ||
+            phone.whatsappCanonicalPhone === canonical?.slice(1))
+        ) {
           return { status: "UNCHANGED", customerPhoneId: phone.id };
         }
         return unavailable("STALE_OR_CONFLICTING_OBSERVATION");
       }
-      if (decision === "GRANTED" && !canonical) return notAuthorised("INVALID_RECIPIENT");
+      if (decision === "GRANTED" && !canonical)
+        return notAuthorised("INVALID_RECIPIENT");
       // Only write consent-owned fields. In particular, never write the local
       // whatsappNoContact flag/reason/at/revision or its clearance timestamp.
       let updated: { count: number };
@@ -181,16 +231,23 @@ export class ShopifyConsentProjectionWriter {
             phone: phone.phone,
             whatsappCanonicalPhone: phone.whatsappCanonicalPhone,
             whatsappConsentRevision: phone.whatsappConsentRevision,
-            whatsappConsentDecisionSequence: phone.whatsappConsentDecisionSequence,
+            whatsappConsentDecisionSequence:
+              phone.whatsappConsentDecisionSequence,
             ...(decision === "GRANTED" ? { whatsappNoContact: false } : {}),
             customer: {
-              shopId: scoped.shop.id, shopifyCustomerId: { in: [scoped.identity.numericId, scoped.identity.gid] },
+              shopId: scoped.shop.id,
+              shopifyCustomerId: {
+                in: [scoped.identity.numericId, scoped.identity.gid],
+              },
               shop: { platform: "SHOPIFY", status: "ACTIVE" },
             },
           },
           data: {
-            whatsappCanonicalPhone: canonical?.slice(1) ?? phone.whatsappCanonicalPhone,
-            whatsappPhoneVerifiedAt: canonical ? verifiedAt : phone.whatsappPhoneVerifiedAt,
+            whatsappCanonicalPhone:
+              canonical?.slice(1) ?? phone.whatsappCanonicalPhone,
+            whatsappPhoneVerifiedAt: canonical
+              ? verifiedAt
+              : phone.whatsappPhoneVerifiedAt,
             whatsappConsentPurpose: "WHATSAPP_CHECKOUT_RECOVERY",
             whatsappConsentDecision: decision,
             whatsappConsentSource: "SHOPIFY_NATIVE",
@@ -213,7 +270,11 @@ export class ShopifyConsentProjectionWriter {
         return unavailable("CONSENT_WRITE_FAILURE", error);
       }
       if (updated.count === 1) {
-        this.logger.info("shopify.whatsapp_consent.sync", { shopId: scoped.shop.id, outcome: "updated", decision });
+        this.logger.info("shopify.whatsapp_consent.sync", {
+          shopId: scoped.shop.id,
+          outcome: "updated",
+          decision,
+        });
         return { status: "UPDATED", customerPhoneId: phone.id };
       }
       // A competing STOP or revision may have committed; re-read, never blindly

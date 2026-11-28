@@ -1,4 +1,8 @@
-import { checkDispatchSender, readDispatchSenderSnapshot, type DispatchSenderSnapshot } from "./recovery-sender-pool/dispatch-sender.js";
+import {
+  checkDispatchSender,
+  readDispatchSenderSnapshot,
+  type DispatchSenderSnapshot,
+} from "./recovery-sender-pool/dispatch-sender.js";
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
@@ -19,18 +23,23 @@ const identify =
   "This number sends messages for different stores. For help with a basket, find the message from that store and use WhatsApp's Reply option on that message. Then type your question or send a voice note (up to 2 minutes).";
 export const routingGuidanceText: Record<RoutingGuidanceReason, string> = {
   MULTIPLE_RECOVERIES: identify,
-  NO_RECOVERY:
-    `${identify} If you cannot find the message, contact the store directly.`,
-  INVALID_REFERENCE:
-    `${identify} If you cannot find the message, contact the store directly.`,
+  NO_RECOVERY: `${identify} If you cannot find the message, contact the store directly.`,
+  INVALID_REFERENCE: `${identify} If you cannot find the message, contact the store directly.`,
   SHOP_UNAVAILABLE:
     "Please contact the store directly for help with your basket.",
 };
 
 export type RoutingGuidanceOutcome =
   | { kind: "sent" }
-  | { kind: "suppressed"; reason: "DUPLICATE" | "NO_CONTACT" | "INVALID_SENDER" | "UNSUPPORTED" }
-  | { kind: "failed"; reason: "CACHE_UNAVAILABLE" | "DB_ADMISSION_FAILED" | "PROVIDER_SEND_FAILED" };
+  | {
+      kind: "suppressed";
+      reason: "DUPLICATE" | "NO_CONTACT" | "INVALID_SENDER" | "UNSUPPORTED";
+    }
+  | {
+      kind: "failed";
+      reason:
+        "CACHE_UNAVAILABLE" | "DB_ADMISSION_FAILED" | "PROVIDER_SEND_FAILED";
+    };
 
 type GuidanceDependencies = {
   database?: Pick<PrismaClient, "$transaction">;
@@ -49,10 +58,17 @@ const MAX_ERROR_LOG_CHARS = 512;
 
 function safeErrorField(value: unknown, key: string): unknown {
   if (typeof value !== "object" || value === null) return undefined;
-  try { return (value as Record<string, unknown>)[key]; } catch { return undefined; }
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
 }
 
-function redactDiagnosticMessage(value: unknown, event: WhatsAppInboundEvent): string | undefined {
+function redactDiagnosticMessage(
+  value: unknown,
+  event: WhatsAppInboundEvent,
+): string | undefined {
   if (typeof value !== "string" || !value) return undefined;
   let message = value.slice(0, MAX_ERROR_SOURCE_CHARS);
   const privateValues = [
@@ -66,38 +82,69 @@ function redactDiagnosticMessage(value: unknown, event: WhatsAppInboundEvent): s
     message = message.replaceAll(privateValue, "[redacted]");
   }
   const redacted = message
-    .replace(/\b(?:postgres(?:ql)?|https?|redis(?:s)?|amqps?|mysql):\/\/[^\s"'<>]+/giu, "[redacted-url]")
+    .replace(
+      /\b(?:postgres(?:ql)?|https?|redis(?:s)?|amqps?|mysql):\/\/[^\s"'<>]+/giu,
+      "[redacted-url]",
+    )
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/giu, "$1 [redacted]")
-    .replace(/\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{6,}|ghp_[A-Za-z0-9_]{6,}|xox[baprs]-[^\s"']{6,})/giu, "[redacted-credential]")
-    .replace(/\b((?:api[\s_-]?key|access[_-]?token|password|secret|authorization|client[_-]?secret|token)\s*[:=]\s*)\S+/giu, "$1[redacted]")
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu, "[redacted-email]")
+    .replace(
+      /\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{6,}|ghp_[A-Za-z0-9_]{6,}|xox[baprs]-[^\s"']{6,})/giu,
+      "[redacted-credential]",
+    )
+    .replace(
+      /\b((?:api[\s_-]?key|access[_-]?token|password|secret|authorization|client[_-]?secret|token)\s*[:=]\s*)\S+/giu,
+      "$1[redacted]",
+    )
+    .replace(
+      /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu,
+      "[redacted-email]",
+    )
     .replace(/\+?\d[\d\s().-]{7,}\d/gu, "[redacted-number]");
   const cleanMessage = Array.from(redacted, (character) => {
     const code = character.charCodeAt(0);
     return code < 32 || code === 127 ? " " : character;
-  }).join("").trim();
+  })
+    .join("")
+    .trim();
   if (!cleanMessage) return undefined;
   return cleanMessage.length > MAX_ERROR_LOG_CHARS
     ? `${cleanMessage.slice(0, MAX_ERROR_LOG_CHARS - 3)}...`
     : cleanMessage;
 }
 
-function safeErrorDiagnostic(error: unknown, event: WhatsAppInboundEvent): Record<string, string> {
+function safeErrorDiagnostic(
+  error: unknown,
+  event: WhatsAppInboundEvent,
+): Record<string, string> {
   const name = safeErrorField(error, "name");
-  const message = safeErrorField(error, "message") ?? (typeof error === "string" ? error : undefined);
+  const message =
+    safeErrorField(error, "message") ??
+    (typeof error === "string" ? error : undefined);
   const cause = safeErrorField(error, "cause");
-  const causeMessage = safeErrorField(cause, "message") ?? (typeof cause === "string" ? cause : undefined);
+  const causeMessage =
+    safeErrorField(cause, "message") ??
+    (typeof cause === "string" ? cause : undefined);
   const code = safeErrorField(error, "code");
   const status = safeErrorField(error, "status");
-  const errorName = typeof name === "string" && /^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(name)
-    ? name
-    : error instanceof Error ? "Error" : "NonErrorThrownValue";
+  const errorName =
+    typeof name === "string" && /^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(name)
+      ? name
+      : error instanceof Error
+        ? "Error"
+        : "NonErrorThrownValue";
   const sourceMessage = redactDiagnosticMessage(message, event);
   const sourceCause = redactDiagnosticMessage(causeMessage, event);
-  const errorCode = typeof code === "string" && /^[A-Za-z0-9_-]{1,64}$/u.test(code) ? code : undefined;
-  const statusCode = typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
-    ? String(status)
-    : undefined;
+  const errorCode =
+    typeof code === "string" && /^[A-Za-z0-9_-]{1,64}$/u.test(code)
+      ? code
+      : undefined;
+  const statusCode =
+    typeof status === "number" &&
+    Number.isInteger(status) &&
+    status >= 100 &&
+    status <= 599
+      ? String(status)
+      : undefined;
   return {
     errorName,
     ...(sourceMessage ? { errorMessage: sourceMessage } : {}),
@@ -113,7 +160,10 @@ function logSuppressed(
   reason: Extract<RoutingGuidanceOutcome, { kind: "suppressed" }>["reason"],
 ): void {
   log.info("whatsapp.inbound.guidance_suppressed", {
-    messageDigest: createHash("sha256").update(event.providerMessageId).digest("hex").slice(0, 16),
+    messageDigest: createHash("sha256")
+      .update(event.providerMessageId)
+      .digest("hex")
+      .slice(0, 16),
     reason,
   });
 }
@@ -126,7 +176,10 @@ function logFailure(
   error: unknown,
 ): void {
   log.error("whatsapp.inbound.guidance_failed", {
-    messageDigest: createHash("sha256").update(event.providerMessageId).digest("hex").slice(0, 16),
+    messageDigest: createHash("sha256")
+      .update(event.providerMessageId)
+      .digest("hex")
+      .slice(0, 16),
     operation,
     reason,
     ...safeErrorDiagnostic(error, event),
@@ -172,7 +225,9 @@ export async function sendRoutingGuidance(
     logSuppressed(log, event, "NO_CONTACT");
     return { kind: "suppressed", reason: "NO_CONTACT" };
   }
-  const digest = createHash("sha256").update(event.providerMessageId).digest("hex");
+  const digest = createHash("sha256")
+    .update(event.providerMessageId)
+    .digest("hex");
   const key = `moda:${resolveDeploymentEnvironmentName()}:whatsapp:clarification:${digest}`;
   try {
     if ((await cache.set(key, "1", "EX", 86400, "NX")) !== "OK") {
@@ -188,12 +243,23 @@ export async function sendRoutingGuidance(
   try {
     // There is no merchant conversation/Shop to use as a final fence. A short
     // PostgreSQL transaction acquires the same canonical recipient lock as STOP.
-    admitted = await database.$transaction(async (tx) => {
-      const permittedSender = await checkDispatchSender(tx, {snapshot: senderSnapshot, conversationId: "", recipient: event.customerPhone, recovery: false, expectedSender: sender});
-      if (!permittedSender) return false;
-      await lockWhatsAppStopRecipient(tx, canonical);
-      return !(await hasLocalNoContact(tx, { recipient: event.customerPhone }));
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    admitted = await database.$transaction(
+      async (tx) => {
+        const permittedSender = await checkDispatchSender(tx, {
+          snapshot: senderSnapshot,
+          conversationId: "",
+          recipient: event.customerPhone,
+          recovery: false,
+          expectedSender: sender,
+        });
+        if (!permittedSender) return false;
+        await lockWhatsAppStopRecipient(tx, canonical);
+        return !(await hasLocalNoContact(tx, {
+          recipient: event.customerPhone,
+        }));
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+    );
   } catch (error) {
     logFailure(log, event, "database-admission", "DB_ADMISSION_FAILED", error);
     return { kind: "failed", reason: "DB_ADMISSION_FAILED" };
@@ -205,7 +271,11 @@ export async function sendRoutingGuidance(
 
   try {
     await provider.sendWhatsAppText(
-      { to: event.customerPhone, text: routingGuidanceText[reason], expectedSender: sender },
+      {
+        to: event.customerPhone,
+        text: routingGuidanceText[reason],
+        expectedSender: sender,
+      },
       AbortSignal.timeout(10_000),
     );
     return { kind: "sent" };

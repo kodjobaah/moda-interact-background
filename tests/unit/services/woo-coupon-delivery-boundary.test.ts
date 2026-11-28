@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WhatsAppService, WhatsAppServiceError } from "../../../src/services/whatsapp.service.js";
+import {
+  WhatsAppService,
+  WhatsAppServiceError,
+} from "../../../src/services/whatsapp.service.js";
 import { RecoveryOutreachAttemptService } from "../../../src/services/recovery-outreach-attempt.service.js";
 
 vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
@@ -8,7 +11,11 @@ vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
 vi.mock("../../../src/services/platform-configuration/consumers.js", () => ({
   platformConsumerConfiguration: {
     read: vi.fn(async () => ({
-      value: { accessToken: "test-only-not-a-real-token", businessAccountId: "business-test", phoneNumberId: "phone-test" },
+      value: {
+        accessToken: "test-only-not-a-real-token",
+        businessAccountId: "business-test",
+        phoneNumberId: "phone-test",
+      },
     })),
   },
 }));
@@ -39,7 +46,11 @@ function captureProvider(httpStatus = 200) {
   const fetcher: typeof fetch = vi.fn<typeof fetch>(async (_url, init) => {
     payloads.push(JSON.parse(String(init?.body)));
     return new Response(
-      JSON.stringify(httpStatus === 200 ? { messages: [{ id: "wamid.mock" }] } : { error: { code: 131008 } }),
+      JSON.stringify(
+        httpStatus === 200
+          ? { messages: [{ id: "wamid.mock" }] }
+          : { error: { code: 131008 } },
+      ),
       { status: httpStatus, headers: { "content-type": "application/json" } },
     );
   });
@@ -55,18 +66,28 @@ function requestBody(captured: unknown): string {
 describe("ARCH-036 BACKGROUND-005 downstream Woo coupon code boundaries", () => {
   it("passes a >255-character Woo code through the real recovery snapshot persistence input", async () => {
     const code = "W".repeat(300);
-    const upsert = vi.fn(async ({ create }: { create: Record<string, unknown> }) => create);
+    const upsert = vi.fn(
+      async ({ create }: { create: Record<string, unknown> }) => create,
+    );
     const storage = new RecoveryOutreachAttemptService({
       recoveryOutreachAttempt: { upsert },
     } as never);
     const saved = await storage.getOrCreate({
-      recoveryId: "recovery-test", sequence: 1, recipient: "+447000000000",
+      recoveryId: "recovery-test",
+      sequence: 1,
+      recipient: "+447000000000",
       policy: {
-        recoveryOfferMode: "FIXED", fixedShopifyDiscountId: "discount-test",
-        offerSnapshot: { singleRedeemCode: code, shopifyDiscountNodeId: "woo:coupon:123" },
+        recoveryOfferMode: "FIXED",
+        fixedShopifyDiscountId: "discount-test",
+        offerSnapshot: {
+          singleRedeemCode: code,
+          shopifyDiscountNodeId: "woo:coupon:123",
+        },
       } as never,
     });
-    const snapshot = saved.offerSnapshot as unknown as { singleRedeemCode: string };
+    const snapshot = saved.offerSnapshot as unknown as {
+      singleRedeemCode: string;
+    };
     expect(snapshot.singleRedeemCode).toBe(code);
     expect(JSON.parse(JSON.stringify(snapshot)).singleRedeemCode).toBe(code);
     expect(upsert).toHaveBeenCalledOnce();
@@ -77,8 +98,9 @@ describe("ARCH-036 BACKGROUND-005 downstream Woo coupon code boundaries", () => 
     const { service, payloads } = captureProvider();
     for (const length of [300, WHATSAPP_TEXT_BODY_MAX_CHARACTERS]) {
       const message = "W".repeat(length);
-      await expect(service.sendWhatsAppText({ to: "+447000000000", text: message }))
-        .resolves.toEqual({ providerMessageId: "wamid.mock" });
+      await expect(
+        service.sendWhatsAppText({ to: "+447000000000", text: message }),
+      ).resolves.toEqual({ providerMessageId: "wamid.mock" });
       expect(requestBody(payloads.at(-1))).toBe(message);
     }
     expect(payloads).toHaveLength(2);

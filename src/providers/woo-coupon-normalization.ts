@@ -21,7 +21,8 @@ export interface NormalizedWooCoupon {
   providerSnapshot: Record<string, unknown>;
 }
 
-export type WooCouponIssueReason = "code_not_deliverable" | "optional_field_ignored";
+export type WooCouponIssueReason =
+  "code_not_deliverable" | "optional_field_ignored";
 export interface WooCouponIssue {
   couponId: number;
   field: string;
@@ -38,7 +39,8 @@ function identityInvalid(): never {
 
 function providerId(coupon: Record<string, unknown>): number {
   const id = coupon.id;
-  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) identityInvalid();
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)
+    identityInvalid();
   return id;
 }
 
@@ -51,23 +53,39 @@ function containsControlCharacter(value: string): boolean {
 
 /** Codes are deliberately not truncated or constrained to 255 characters. */
 export function deliverableWooCode(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0 && !containsControlCharacter(value);
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    !containsControlCharacter(value)
+  );
 }
 
 function optionalString(value: unknown): string | null {
-  if (typeof value === "string" && value.length <= MAX_ATTRIBUTE_LENGTH &&
-      !containsControlCharacter(value)) return value;
+  if (
+    typeof value === "string" &&
+    value.length <= MAX_ATTRIBUTE_LENGTH &&
+    !containsControlCharacter(value)
+  )
+    return value;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return null;
 }
 
 function optionalCount(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
 }
 
 function optionalIds(value: unknown): number[] | null {
-  if (!Array.isArray(value) || value.length > MAX_RESTRICTION_IDS ||
-      value.some((id) => typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)) return null;
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_RESTRICTION_IDS ||
+    value.some(
+      (id) => typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0,
+    )
+  )
+    return null;
   return value;
 }
 
@@ -76,13 +94,22 @@ function optionalBoolean(value: unknown): boolean | null {
 }
 
 function restrictionPresence(
-  coupon: Record<string, unknown>, field: string, isValidItem: ((item: unknown) => boolean) | null,
+  coupon: Record<string, unknown>,
+  field: string,
+  isValidItem: ((item: unknown) => boolean) | null,
   report: (field: string, reason: WooCouponIssueReason) => void,
 ): boolean | null {
-  if (!Object.prototype.hasOwnProperty.call(coupon, field) || coupon[field] === undefined) return null;
+  if (
+    !Object.prototype.hasOwnProperty.call(coupon, field) ||
+    coupon[field] === undefined
+  )
+    return null;
   const value = coupon[field];
-  if (!Array.isArray(value) || value.length > MAX_RESTRICTION_IDS ||
-      (isValidItem !== null && value.some((item: unknown) => !isValidItem(item)))) {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_RESTRICTION_IDS ||
+    (isValidItem !== null && value.some((item: unknown) => !isValidItem(item)))
+  ) {
     report(field, "optional_field_ignored");
     return null;
   }
@@ -91,22 +118,33 @@ function restrictionPresence(
 
 /** Never infer Woo's store timezone from the local-time date_expires field. */
 function utcExpiry(value: unknown): Date | null {
-  if (typeof value !== "string" ||
-      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)?$/.test(value)) return null;
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)?$/.test(
+      value,
+    )
+  )
+    return null;
   const utc = /(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`;
   const date = new Date(utc);
   return Number.isFinite(date.getTime()) ? date : null;
 }
 
 function normalise(
-  coupon: Record<string, unknown>, now: Date, report: (field: string, reason: WooCouponIssueReason) => void,
+  coupon: Record<string, unknown>,
+  now: Date,
+  report: (field: string, reason: WooCouponIssueReason) => void,
 ): NormalizedWooCoupon {
   const id = providerId(coupon);
-  if (!Number.isFinite(now.getTime())) throw new RangeError("Invalid Woo coupon scan time");
+  if (!Number.isFinite(now.getTime()))
+    throw new RangeError("Invalid Woo coupon scan time");
 
   const code = deliverableWooCode(coupon.code) ? coupon.code : null;
   if (code === null) report("code", "code_not_deliverable");
-  const optional = <T>(field: string, convert: (raw: unknown) => T | null): T | null => {
+  const optional = <T>(
+    field: string,
+    convert: (raw: unknown) => T | null,
+  ): T | null => {
     const raw = coupon[field];
     if (raw === null || raw === undefined || raw === "") return null;
     const result = convert(raw);
@@ -126,25 +164,51 @@ function normalise(
   const productIds = optional("product_ids", optionalIds);
   const excludedProductIds = optional("excluded_product_ids", optionalIds);
   const productCategories = optional("product_categories", optionalIds);
-  const excludedProductCategories = optional("excluded_product_categories", optionalIds);
+  const excludedProductCategories = optional(
+    "excluded_product_categories",
+    optionalIds,
+  );
   const individualUse = optional("individual_use", optionalBoolean);
   const excludeSaleItems = optional("exclude_sale_items", optionalBoolean);
   const emailRestrictionsPresent = restrictionPresence(
-    coupon, "email_restrictions", (item) => typeof item === "string", report,
+    coupon,
+    "email_restrictions",
+    (item) => typeof item === "string",
+    report,
   );
-  const uninspectedMetadataPresent = restrictionPresence(coupon, "meta_data", null, report);
+  const uninspectedMetadataPresent = restrictionPresence(
+    coupon,
+    "meta_data",
+    null,
+    report,
+  );
 
   // Fixed internal marker fits VARCHAR(128). Retain the real provider-defined
   // discount type in the bounded, explicit snapshot instead of an allowlist.
   const snapshot: Record<string, unknown> = {
-    provider: "WOOCOMMERCE", couponId: id,
-    discountType, amount: value, freeShipping,
-    usageLimit, usageCount, usageLimitPerUser, maximumUsageItems,
-    productIds, excludedProductIds, productCategories, excludedProductCategories,
-    individualUse, excludeSaleItems, minimumAmount, maximumAmount,
-    emailRestrictionsPresent, uninspectedMetadataPresent,
+    provider: "WOOCOMMERCE",
+    couponId: id,
+    discountType,
+    amount: value,
+    freeShipping,
+    usageLimit,
+    usageCount,
+    usageLimitPerUser,
+    maximumUsageItems,
+    productIds,
+    excludedProductIds,
+    productCategories,
+    excludedProductCategories,
+    individualUse,
+    excludeSaleItems,
+    minimumAmount,
+    maximumAmount,
+    emailRestrictionsPresent,
+    uninspectedMetadataPresent,
     dateExpiresGmt: endsAt?.toISOString() ?? null,
-    expiryUnverified: endsAt === null && (coupon.date_expires_gmt != null || coupon.date_expires != null),
+    expiryUnverified:
+      endsAt === null &&
+      (coupon.date_expires_gmt != null || coupon.date_expires != null),
     codeDeliverable: code !== null,
   };
   if (code !== null) snapshot.code = code;
@@ -155,8 +219,13 @@ function normalise(
     method: "CODE",
     providerStatus: code === null ? "UNDELIVERABLE" : "ACTIVE",
     title: code ?? `WooCommerce coupon #${id}`,
-    summary: code === null ? "Coupon code unavailable" :
-      `${discountType ?? "WooCommerce coupon"}: ${value ?? "amount unspecified"}${freeShipping ? "; free shipping" : ""}`.slice(0, 256),
+    summary:
+      code === null
+        ? "Coupon code unavailable"
+        : `${discountType ?? "WooCommerce coupon"}: ${value ?? "amount unspecified"}${freeShipping ? "; free shipping" : ""}`.slice(
+            0,
+            256,
+          ),
     startsAt: null,
     endsAt,
     codeCount: code === null ? 0 : 1,
@@ -166,7 +235,10 @@ function normalise(
   };
 }
 
-export function normalizeWooCoupon(coupon: Record<string, unknown>, now: Date): NormalizedWooCoupon {
+export function normalizeWooCoupon(
+  coupon: Record<string, unknown>,
+  now: Date,
+): NormalizedWooCoupon {
   return normalise(coupon, now, () => {});
 }
 
@@ -178,26 +250,33 @@ export interface WooCouponNormalizationBatch {
 }
 
 export function normalizeWooCouponBatch(
-  coupons: readonly Record<string, unknown>[], now: Date,
+  coupons: readonly Record<string, unknown>[],
+  now: Date,
 ): WooCouponNormalizationBatch {
-  if (!Number.isFinite(now.getTime())) throw new RangeError("Invalid Woo coupon scan time");
+  if (!Number.isFinite(now.getTime()))
+    throw new RangeError("Invalid Woo coupon scan time");
   const seen = new Set<number>();
   // Validate ALL provider identities before accepting any per-item projections.
   // Duplicates/ambiguous IDs make absence accounting untrustworthy.
   for (const coupon of coupons) {
-    if (!coupon || typeof coupon !== "object" || Array.isArray(coupon)) identityInvalid();
+    if (!coupon || typeof coupon !== "object" || Array.isArray(coupon))
+      identityInvalid();
     const id = providerId(coupon);
     if (seen.has(id)) identityInvalid();
     seen.add(id);
   }
   const result: WooCouponNormalizationBatch = {
-    observed: [], issueCount: 0, codeUnavailableCount: 0, issues: [],
+    observed: [],
+    issueCount: 0,
+    codeUnavailableCount: 0,
+    issues: [],
   };
   for (const coupon of coupons) {
     const id = providerId(coupon);
     const item = normalise(coupon, now, (field, reason) => {
       result.issueCount++;
-      if (result.issues.length < MAX_REPORTED_ISSUES) result.issues.push({ couponId: id, field, reason });
+      if (result.issues.length < MAX_REPORTED_ISSUES)
+        result.issues.push({ couponId: id, field, reason });
     });
     result.observed.push(item);
     if (item.singleRedeemCode === null) result.codeUnavailableCount++;
@@ -206,7 +285,8 @@ export function normalizeWooCouponBatch(
 }
 
 export function normalizeWooCoupons(
-  coupons: readonly Record<string, unknown>[], now: Date,
+  coupons: readonly Record<string, unknown>[],
+  now: Date,
 ): NormalizedWooCoupon[] {
   return normalizeWooCouponBatch(coupons, now).observed;
 }

@@ -119,7 +119,8 @@ export function buildMerchantPricingPublicationPayload(input: {
       !expectedItem ||
       translated.has(key) ||
       item.status !== "AVAILABLE" ||
-      item.sourceLanguageTag !== MERCHANT_PRICING_PUBLICATION_SOURCE_LANGUAGE_TAG ||
+      item.sourceLanguageTag !==
+        MERCHANT_PRICING_PUBLICATION_SOURCE_LANGUAGE_TAG ||
       item.sourceText.trim() !== expectedItem.sourceText
     ) {
       return null;
@@ -133,7 +134,8 @@ export function buildMerchantPricingPublicationPayload(input: {
     );
     if (!validated) return null;
     if (
-      expectedItem.locale === MERCHANT_PRICING_PUBLICATION_SOURCE_LANGUAGE_TAG &&
+      expectedItem.locale ===
+        MERCHANT_PRICING_PUBLICATION_SOURCE_LANGUAGE_TAG &&
       validated !== expectedItem.sourceText
     ) {
       return null;
@@ -152,7 +154,9 @@ export function buildMerchantPricingPublicationPayload(input: {
       }),
     );
     if (!value) {
-      throw new Error("Validated Merchant Pricing plan translations became incomplete");
+      throw new Error(
+        "Validated Merchant Pricing plan translations became incomplete",
+      );
     }
     return { id: randomUUID(), locale, merchantDescription: value };
   });
@@ -176,7 +180,9 @@ export function buildMerchantPricingPublicationPayload(input: {
         }),
       );
       if (!title || !description) {
-        throw new Error("Validated Merchant Pricing highlight translations became incomplete");
+        throw new Error(
+          "Validated Merchant Pricing highlight translations became incomplete",
+        );
       }
       return {
         id: randomUUID(),

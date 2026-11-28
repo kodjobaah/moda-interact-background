@@ -2,7 +2,11 @@ import type { PrismaClient } from "@prisma/client";
 import type { RecoveryAgentContext } from "../../agents/types.js";
 import type { conversationService } from "../conversation.service.js";
 import { loadCommerceHistory } from "../../commerce/history.js";
-import { recoveryRecipientAttemptsSelect, recoveryRecipientCustomerSelect, resolveRecoveryRecipient } from "../recovery-recipient-ownership.js";
+import {
+  recoveryRecipientAttemptsSelect,
+  recoveryRecipientCustomerSelect,
+  resolveRecoveryRecipient,
+} from "../recovery-recipient-ownership.js";
 
 export interface RecoveryAgentContextInput {
   checkoutRecoveryId: string;
@@ -11,7 +15,10 @@ export interface RecoveryAgentContextInput {
 }
 
 type RecoveryContextDatabase = Pick<PrismaClient, "checkoutRecovery">;
-type ConversationSnapshotPort = Pick<typeof conversationService, "getAgentSnapshot">;
+type ConversationSnapshotPort = Pick<
+  typeof conversationService,
+  "getAgentSnapshot"
+>;
 type CommerceHistoryLoader = typeof loadCommerceHistory;
 
 export class RecoveryAgentContextService {

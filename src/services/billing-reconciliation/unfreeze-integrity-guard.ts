@@ -15,26 +15,37 @@ const SOURCE_ACCOUNTING_ERRORS = [
   "PRE_CLOSE_USAGE_FLUSH_FAILED",
 ] as const;
 
-export function isUnresolvedUnfreezeAccountingError(code: string | null): boolean {
-  return code !== null && (
-    SOURCE_ACCOUNTING_ERRORS.some((error) => error === code)
-    || UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS.some((error) => error === code)
+export function isUnresolvedUnfreezeAccountingError(
+  code: string | null,
+): boolean {
+  return (
+    code !== null &&
+    (SOURCE_ACCOUNTING_ERRORS.some((error) => error === code) ||
+      UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS.some((error) => error === code))
   );
 }
 
 export function unfreezeAccountingErrorCode(code: string): string {
-  return UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS.find((error) => error === code)
-    ?? (SOURCE_ACCOUNTING_ERRORS.some((error) => error === code) ? `UNFREEZE_${code}` : code);
+  return (
+    UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS.find((error) => error === code) ??
+    (SOURCE_ACCOUNTING_ERRORS.some((error) => error === code)
+      ? `UNFREEZE_${code}`
+      : code)
+  );
 }
 
 export function isBlockedUnfreezeAccountingState(subscription: {
   status: SubscriptionProjectionStatus;
   lastSyncErrorCode: string | null;
 }): boolean {
-  return (subscription.status === SubscriptionProjectionStatus.SYNC_ERROR
-    || subscription.status === SubscriptionProjectionStatus.FROZEN)
-    && subscription.lastSyncErrorCode !== null
-    && UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS.some((code) => code === subscription.lastSyncErrorCode);
+  return (
+    (subscription.status === SubscriptionProjectionStatus.SYNC_ERROR ||
+      subscription.status === SubscriptionProjectionStatus.FROZEN) &&
+    subscription.lastSyncErrorCode !== null &&
+    UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS.some(
+      (code) => code === subscription.lastSyncErrorCode,
+    )
+  );
 }
 
 /** A prior UNFROZEN accounting failure is durable evidence of the attempted
@@ -44,10 +55,16 @@ export function isBlockedUnfreezeAccountingState(subscription: {
  * state never qualifies and no other accounting error is auto-cleared.
  */
 export function canRevalidateRepairedUnfreezePeriod(
-  subscription: { status: SubscriptionProjectionStatus; lastSyncErrorCode: string | null },
+  subscription: {
+    status: SubscriptionProjectionStatus;
+    lastSyncErrorCode: string | null;
+  },
   lifecycleState: string,
 ): boolean {
-  return subscription.status === SubscriptionProjectionStatus.SYNC_ERROR
-    && subscription.lastSyncErrorCode === "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT"
-    && ["UPDATED", "CREATED", "CANCELLATION_SCHEDULED"].includes(lifecycleState);
+  return (
+    subscription.status === SubscriptionProjectionStatus.SYNC_ERROR &&
+    subscription.lastSyncErrorCode ===
+      "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT" &&
+    ["UPDATED", "CREATED", "CANCELLATION_SCHEDULED"].includes(lifecycleState)
+  );
 }

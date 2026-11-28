@@ -24,9 +24,11 @@ export async function replaceMerchantPricingTranslations(
     )
   `);
 
-  const planValues = input.payload.planTranslations.map((translation) => Prisma.sql`
+  const planValues = input.payload.planTranslations.map(
+    (translation) => Prisma.sql`
     (${translation.id}, ${input.planId}, ${translation.locale}, ${translation.merchantDescription}, NOW(), NOW())
-  `);
+  `,
+  );
   await transaction.$executeRaw(Prisma.sql`
     INSERT INTO "billing"."MerchantPricingPlanTranslation" (
       "id", "merchantPricingPlanId", "locale", "merchantDescription", "createdAt", "updatedAt"
@@ -34,17 +36,21 @@ export async function replaceMerchantPricingTranslations(
   `);
 
   if (input.payload.highlightTranslations.length === 0) return;
-  const highlightValues = input.payload.highlightTranslations.map((translation) => {
-    const highlightId = input.highlightIdByContentKey.get(
-      translation.contentKey.toLowerCase(),
-    );
-    if (!highlightId) {
-      throw new Error("Merchant Pricing highlight disappeared during finalisation");
-    }
-    return Prisma.sql`
+  const highlightValues = input.payload.highlightTranslations.map(
+    (translation) => {
+      const highlightId = input.highlightIdByContentKey.get(
+        translation.contentKey.toLowerCase(),
+      );
+      if (!highlightId) {
+        throw new Error(
+          "Merchant Pricing highlight disappeared during finalisation",
+        );
+      }
+      return Prisma.sql`
       (${translation.id}, ${highlightId}, ${translation.locale}, ${translation.merchantTitle}, ${translation.merchantDescription}, NOW(), NOW())
     `;
-  });
+    },
+  );
   await transaction.$executeRaw(Prisma.sql`
     INSERT INTO "billing"."MerchantPricingPlanHighlightTranslation" (
       "id", "merchantPricingPlanHighlightId", "locale", "merchantTitle",

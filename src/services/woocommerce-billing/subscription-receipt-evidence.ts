@@ -37,28 +37,44 @@ export function parseWooSubscriptionEvidence(
   normalizedPayload: unknown,
 ): WooSubscriptionEvidence {
   const topic = topicValue as WooSubscriptionTopic;
-  if (!isTopic(topic)) throw new PermanentSubscriptionEvidenceError("UNSUPPORTED_SUBSCRIPTION_TOPIC");
+  if (!isTopic(topic))
+    throw new PermanentSubscriptionEvidenceError(
+      "UNSUPPORTED_SUBSCRIPTION_TOPIC",
+    );
   const root = asObject(normalizedPayload);
   const contract = asObject(root.subscription);
-  if (contract.id !== expectedContractId || typeof contract.status !== "string") {
-    throw new PermanentSubscriptionEvidenceError("INVALID_SUBSCRIPTION_ENVELOPE");
+  if (
+    contract.id !== expectedContractId ||
+    typeof contract.status !== "string"
+  ) {
+    throw new PermanentSubscriptionEvidenceError(
+      "INVALID_SUBSCRIPTION_ENVELOPE",
+    );
   }
   const status = contract.status.toLowerCase();
   if (!statusMatchesTopic(topic, status)) {
-    throw new PermanentSubscriptionEvidenceError("INCOHERENT_SUBSCRIPTION_STATUS");
+    throw new PermanentSubscriptionEvidenceError(
+      "INCOHERENT_SUBSCRIPTION_STATUS",
+    );
   }
 
-  const intents = Array.isArray(contract.billing_intents) ? contract.billing_intents : [];
+  const intents = Array.isArray(contract.billing_intents)
+    ? contract.billing_intents
+    : [];
   const intentRows = intents.filter(isObject).map((intent) => ({
     id: scalarId(intent.id),
     status: intent.status,
     updatedAt: parseProviderDate(intent.updated_at),
   }));
-  const completedIntentIds = new Set(intentRows
-    .filter(({ status }) => status === "completed")
-    .map(({ id }) => id)
-    .filter((id): id is string => id !== null));
-  const completedPayments = (Array.isArray(contract.transactions) ? contract.transactions : [])
+  const completedIntentIds = new Set(
+    intentRows
+      .filter(({ status }) => status === "completed")
+      .map(({ id }) => id)
+      .filter((id): id is string => id !== null),
+  );
+  const completedPayments = (
+    Array.isArray(contract.transactions) ? contract.transactions : []
+  )
     .filter(isObject)
     .filter((transaction) => {
       const intentId = scalarId(transaction.billing_intent_id);
@@ -69,46 +85,72 @@ export function parseWooSubscriptionEvidence(
       id: scalarId(transaction.id),
       intentId: scalarId(transaction.billing_intent_id),
     }))
-    .filter((payment): payment is { at: Date; id: string | null; intentId: string | null } => payment.at !== null);
+    .filter(
+      (
+        payment,
+      ): payment is { at: Date; id: string | null; intentId: string | null } =>
+        payment.at !== null,
+    );
 
   const providerModifiedAt = parseProviderDate(contract.date_modified);
   const nextPaymentAt = parseProviderDate(contract.next_payment_date);
-  const activationAt = topic === "saas_billing_contract.activated"
-    ? earliest(completedPayments.map(({ at }) => at))
-    : null;
+  const activationAt =
+    topic === "saas_billing_contract.activated"
+      ? earliest(completedPayments.map(({ at }) => at))
+      : null;
   if (topic === "saas_billing_contract.activated" && !activationAt) {
-    throw new PermanentSubscriptionEvidenceError("ACTIVATION_PAYMENT_EVIDENCE_MISSING");
+    throw new PermanentSubscriptionEvidenceError(
+      "ACTIVATION_PAYMENT_EVIDENCE_MISSING",
+    );
   }
 
-  const financialTopic = topic === "saas_billing_contract.activated"
-    || topic === "saas_billing_contract.updated"
-    || topic === "saas_billing_contract.renewed"
-    || topic === "saas_billing_contract.paused";
+  const financialTopic =
+    topic === "saas_billing_contract.activated" ||
+    topic === "saas_billing_contract.updated" ||
+    topic === "saas_billing_contract.renewed" ||
+    topic === "saas_billing_contract.paused";
   const paymentAt = latest(completedPayments.map(({ at }) => at));
-  const renewalPayment = topic === "saas_billing_contract.renewed"
-    ? latestCompletedBillingIntentPayment(intentRows, completedPayments)
-    : null;
+  const renewalPayment =
+    topic === "saas_billing_contract.renewed"
+      ? latestCompletedBillingIntentPayment(intentRows, completedPayments)
+      : null;
   if (topic === "saas_billing_contract.renewed" && !renewalPayment) {
-    throw new PermanentSubscriptionEvidenceError("RENEWAL_PAYMENT_EVIDENCE_MISSING");
+    throw new PermanentSubscriptionEvidenceError(
+      "RENEWAL_PAYMENT_EVIDENCE_MISSING",
+    );
   }
-  const providerAt = topic === "saas_billing_contract.paused"
-    ? latest(intents
-      .filter((value): value is JsonObject => isObject(value) && value.status === "failed")
-      .map((intent) => parseProviderDate(intent.updated_at))
-      .filter((value): value is Date => value !== null))
-    : topic === "saas_billing_contract.renewed"
-      ? renewalPayment!.at
-      : topic === "saas_billing_contract.activated"
-        ? activationAt
-        : providerModifiedAt ?? paymentAt;
-  if (financialTopic && (!providerAt || topic !== "saas_billing_contract.paused" && !nextPaymentAt)) {
-    throw new PermanentSubscriptionEvidenceError("FINANCIAL_EVIDENCE_INCOMPLETE");
+  const providerAt =
+    topic === "saas_billing_contract.paused"
+      ? latest(
+          intents
+            .filter(
+              (value): value is JsonObject =>
+                isObject(value) && value.status === "failed",
+            )
+            .map((intent) => parseProviderDate(intent.updated_at))
+            .filter((value): value is Date => value !== null),
+        )
+      : topic === "saas_billing_contract.renewed"
+        ? renewalPayment!.at
+        : topic === "saas_billing_contract.activated"
+          ? activationAt
+          : (providerModifiedAt ?? paymentAt);
+  if (
+    financialTopic &&
+    (!providerAt ||
+      (topic !== "saas_billing_contract.paused" && !nextPaymentAt))
+  ) {
+    throw new PermanentSubscriptionEvidenceError(
+      "FINANCIAL_EVIDENCE_INCOMPLETE",
+    );
   }
 
-  const termTopic = topic === "saas_billing_contract.canceled"
-    || topic === "saas_billing_contract.prepaid_term_ended";
+  const termTopic =
+    topic === "saas_billing_contract.canceled" ||
+    topic === "saas_billing_contract.prepaid_term_ended";
   const termEndAt = termTopic ? parseProviderDate(contract.end_date) : null;
-  if (termTopic && !termEndAt) throw new PermanentSubscriptionEvidenceError("TERM_END_EVIDENCE_MISSING");
+  if (termTopic && !termEndAt)
+    throw new PermanentSubscriptionEvidenceError("TERM_END_EVIDENCE_MISSING");
 
   const price = parsePriceMinor(contract.price);
   return {
@@ -117,14 +159,21 @@ export function parseWooSubscriptionEvidence(
     status,
     financial: financialTopic
       ? {
-          health: topic === "saas_billing_contract.paused" ? "PAUSED" : "ACTIVE",
+          health:
+            topic === "saas_billing_contract.paused" ? "PAUSED" : "ACTIVE",
           providerAt: providerAt!,
-          coverageEndAt: topic === "saas_billing_contract.paused" ? null : nextPaymentAt,
-          paymentId: topic === "saas_billing_contract.renewed"
-            ? renewalPayment!.id
-            : topic === "saas_billing_contract.activated"
-              ? completedPayments.find(({ at }) => at.getTime() === activationAt?.getTime())?.id ?? null
-              : completedPayments.find(({ at }) => at.getTime() === paymentAt?.getTime())?.id ?? null,
+          coverageEndAt:
+            topic === "saas_billing_contract.paused" ? null : nextPaymentAt,
+          paymentId:
+            topic === "saas_billing_contract.renewed"
+              ? renewalPayment!.id
+              : topic === "saas_billing_contract.activated"
+                ? (completedPayments.find(
+                    ({ at }) => at.getTime() === activationAt?.getTime(),
+                  )?.id ?? null)
+                : (completedPayments.find(
+                    ({ at }) => at.getTime() === paymentAt?.getTime(),
+                  )?.id ?? null),
         }
       : null,
     activationAt,
@@ -138,22 +187,42 @@ export function parseWooSubscriptionEvidence(
 
 function isTopic(value: string): value is WooSubscriptionTopic {
   return [
-    "saas_billing_contract.activated", "saas_billing_contract.updated",
-    "saas_billing_contract.renewed", "saas_billing_contract.paused",
-    "saas_billing_contract.canceled", "saas_billing_contract.prepaid_term_ended",
+    "saas_billing_contract.activated",
+    "saas_billing_contract.updated",
+    "saas_billing_contract.renewed",
+    "saas_billing_contract.paused",
+    "saas_billing_contract.canceled",
+    "saas_billing_contract.prepaid_term_ended",
     "saas_billing_contract.refunded",
   ].includes(value);
 }
 
-function statusMatchesTopic(topic: WooSubscriptionTopic, status: string): boolean {
-  if (["saas_billing_contract.activated", "saas_billing_contract.updated", "saas_billing_contract.renewed"].includes(topic)) return status === "active";
+function statusMatchesTopic(
+  topic: WooSubscriptionTopic,
+  status: string,
+): boolean {
+  if (
+    [
+      "saas_billing_contract.activated",
+      "saas_billing_contract.updated",
+      "saas_billing_contract.renewed",
+    ].includes(topic)
+  )
+    return status === "active";
   if (topic === "saas_billing_contract.paused") return status === "paused";
-  if (topic === "saas_billing_contract.canceled" || topic === "saas_billing_contract.prepaid_term_ended") return ["canceled", "cancelled", "expired"].includes(status);
+  if (
+    topic === "saas_billing_contract.canceled" ||
+    topic === "saas_billing_contract.prepaid_term_ended"
+  )
+    return ["canceled", "cancelled", "expired"].includes(status);
   return true;
 }
 
 function asObject(value: unknown): JsonObject {
-  if (!isObject(value)) throw new PermanentSubscriptionEvidenceError("INVALID_SUBSCRIPTION_ENVELOPE");
+  if (!isObject(value))
+    throw new PermanentSubscriptionEvidenceError(
+      "INVALID_SUBSCRIPTION_ENVELOPE",
+    );
   return value;
 }
 
@@ -162,7 +231,8 @@ function isObject(value: unknown): value is JsonObject {
 }
 
 function scalarId(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 || typeof value === "number" && Number.isSafeInteger(value)
+  return (typeof value === "string" && value.length > 0) ||
+    (typeof value === "number" && Number.isSafeInteger(value))
     ? String(value)
     : null;
 }
@@ -177,17 +247,23 @@ function parseProviderDate(value: unknown): Date | null {
 }
 
 function parsePriceMinor(value: unknown): number | null {
-  const text = typeof value === "number" && Number.isFinite(value) ? String(value) : value;
-  if (typeof text !== "string" || !/^\d+(?:\.\d{1,2})?$/.test(text)) return null;
+  const text =
+    typeof value === "number" && Number.isFinite(value) ? String(value) : value;
+  if (typeof text !== "string" || !/^\d+(?:\.\d{1,2})?$/.test(text))
+    return null;
   const [whole, fraction = ""] = text.split(".");
   const minor = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
   return Number.isSafeInteger(minor) ? minor : null;
 }
 
 function earliest(values: readonly Date[]): Date | null {
-  return values.length ? new Date(Math.min(...values.map((value) => value.getTime()))) : null;
+  return values.length
+    ? new Date(Math.min(...values.map((value) => value.getTime())))
+    : null;
 }
 
 function latest(values: readonly Date[]): Date | null {
-  return values.length ? new Date(Math.max(...values.map((value) => value.getTime()))) : null;
+  return values.length
+    ? new Date(Math.max(...values.map((value) => value.getTime())))
+    : null;
 }

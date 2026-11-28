@@ -1,27 +1,55 @@
 import { randomUUID, createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import prisma from "../../lib/db.js";
-import { parseTemplateTranslationSnapshot, type TemplateSourceSnapshot, type KeyedTranslationResult, templateTranslationContentHash } from "./segment-codec.js";
+import {
+  parseTemplateTranslationSnapshot,
+  type TemplateSourceSnapshot,
+  type KeyedTranslationResult,
+  templateTranslationContentHash,
+} from "./segment-codec.js";
 import { translationItemRetryDisposition } from "../translation-batch-runtime/item-retry.js";
 
-export type TemplateTranslationDatabase = Pick<typeof prisma, "$queryRaw" | "$executeRaw" | "$transaction">;
-type SqlTransaction = { $queryRaw<T>(query: Prisma.Sql): Promise<T>; $executeRaw(query: Prisma.Sql): Promise<number> };
+export type TemplateTranslationDatabase = Pick<
+  typeof prisma,
+  "$queryRaw" | "$executeRaw" | "$transaction"
+>;
+type SqlTransaction = {
+  $queryRaw<T>(query: Prisma.Sql): Promise<T>;
+  $executeRaw(query: Prisma.Sql): Promise<number>;
+};
 
 export type TemplateRunRecord = {
-  id: string; definitionId: string; status: string; sourceHash: string;
-  sourceSchemaVersion: number; sourceSnapshot: unknown; definitionSourceHash: string;
-  sourceLanguageTag: string; provider: string; providerModelId: string;
+  id: string;
+  definitionId: string;
+  status: string;
+  sourceHash: string;
+  sourceSchemaVersion: number;
+  sourceSnapshot: unknown;
+  definitionSourceHash: string;
+  sourceLanguageTag: string;
+  provider: string;
+  providerModelId: string;
   environment: string;
 };
 export type TemplateBatchRecord = TemplateRunRecord & {
-  batchId: string; batchStatus: string; providerBatchId: string | null;
-  inputFileId: string | null; outputFileId: string | null; errorFileId: string | null;
-  pollSequence: number; submitAttemptCount: number;
-  submittedAt: Date | null; submissionStartedAt: Date | null;
+  batchId: string;
+  batchStatus: string;
+  providerBatchId: string | null;
+  inputFileId: string | null;
+  outputFileId: string | null;
+  errorFileId: string | null;
+  pollSequence: number;
+  submitAttemptCount: number;
+  submittedAt: Date | null;
+  submissionStartedAt: Date | null;
 };
 type ItemMembership = {
-  translationItemId: string; providerCustomId: string; targetLanguageTag: string;
-  currentBatchId: string | null; status: string; retryCount: number;
+  translationItemId: string;
+  providerCustomId: string;
+  targetLanguageTag: string;
+  currentBatchId: string | null;
+  status: string;
+  retryCount: number;
 };
 
 export class TemplateTranslationRepository {
@@ -61,22 +89,28 @@ export class TemplateTranslationRepository {
   }
 
   assertRunSnapshot(run: TemplateRunRecord): TemplateSourceSnapshot {
-    if (run.sourceHash !== run.definitionSourceHash) throw new Error("STALE_TEMPLATE_DEFINITION_HASH");
+    if (run.sourceHash !== run.definitionSourceHash)
+      throw new Error("STALE_TEMPLATE_DEFINITION_HASH");
     return parseTemplateTranslationSnapshot(run.sourceSnapshot, {
-      definitionId: run.definitionId, sourceHash: run.sourceHash,
+      definitionId: run.definitionId,
+      sourceHash: run.sourceHash,
       sourceLanguageTag: run.sourceLanguageTag,
       sourceSchemaVersion: run.sourceSchemaVersion,
     });
   }
 
   /** One row-locked run protects the entire item-to-Batch assignment. */
-  async assemble(runId: string, limit: number): Promise<{ batchId: string; itemCount: number } | null> {
+  async assemble(
+    runId: string,
+    limit: number,
+  ): Promise<{ batchId: string; itemCount: number } | null> {
     return this.db.$transaction(async (tx) => {
       const runs = await tx.$queryRaw<Array<{ status: string }>>(Prisma.sql`
         SELECT "status" FROM "whatsapp"."WhatsAppTemplateTranslationRun"
         WHERE "id" = ${runId} FOR UPDATE
       `);
-      if (!runs[0] || !["PENDING", "PROCESSING"].includes(runs[0].status)) return null;
+      if (!runs[0] || !["PENDING", "PROCESSING"].includes(runs[0].status))
+        return null;
       const run = await this.loadRunForTransaction(tx, runId);
       if (!run) throw new Error("TEMPLATE_RUN_NOT_FOUND");
       this.assertRunSnapshot(run);
@@ -104,7 +138,9 @@ export class TemplateTranslationRepository {
       `);
       for (const candidate of candidates) {
         // Provider identity bounded to 255 chars even when source IDs are unbounded.
-        const providerCustomId = `wt-${createHash("sha256").update(candidate.id + ":" + batchId).digest("hex")}`;
+        const providerCustomId = `wt-${createHash("sha256")
+          .update(candidate.id + ":" + batchId)
+          .digest("hex")}`;
         await tx.$executeRaw(Prisma.sql`
           INSERT INTO "whatsapp"."WhatsAppTemplateTranslationBatchItem"
             ("id", "batchId", "translationItemId", "providerCustomId")
@@ -121,7 +157,10 @@ export class TemplateTranslationRepository {
     });
   }
 
-  private async loadRunForTransaction(tx: SqlTransaction, runId: string): Promise<TemplateRunRecord | null> {
+  private async loadRunForTransaction(
+    tx: SqlTransaction,
+    runId: string,
+  ): Promise<TemplateRunRecord | null> {
     const rows = await tx.$queryRaw<TemplateRunRecord[]>(Prisma.sql`
       SELECT r."id", r."definitionId", r."status", r."sourceHash", r."sourceSchemaVersion",
         r."sourceSnapshot", d."sourceHash" AS "definitionSourceHash",
@@ -184,7 +223,12 @@ export class TemplateTranslationRepository {
     if (count !== 1) throw new Error("STALE_TEMPLATE_BATCH_INPUT_WRITE");
   }
 
-  async persistSubmitted(batchId: string, providerBatchId: string, inputFileId: string, pollSeconds: number): Promise<void> {
+  async persistSubmitted(
+    batchId: string,
+    providerBatchId: string,
+    inputFileId: string,
+    pollSeconds: number,
+  ): Promise<void> {
     const count = await this.db.$executeRaw(Prisma.sql`
       UPDATE "whatsapp"."WhatsAppTemplateTranslationBatch"
       SET "status" = 'SUBMITTED', "providerBatchId" = ${providerBatchId},
@@ -193,24 +237,41 @@ export class TemplateTranslationRepository {
         "failureCode" = NULL, "updatedAt" = NOW()
       WHERE "id" = ${batchId} AND "status" = 'SUBMITTING'
     `);
-    if (count !== 1) throw Object.assign(new Error("AMBIGUOUS_TEMPLATE_BATCH_ACCEPTANCE"), { classification: "AMBIGUOUS_CREATE" });
+    if (count !== 1)
+      throw Object.assign(new Error("AMBIGUOUS_TEMPLATE_BATCH_ACCEPTANCE"), {
+        classification: "AMBIGUOUS_CREATE",
+      });
   }
 
-  async advanceRun(tx: SqlTransaction, runId: string): Promise<"processing" | "completed" | "failed"> {
-    const counts = await tx.$queryRaw<Array<{ total: bigint; available: bigint; failed: bigint }>>(Prisma.sql`
+  async advanceRun(
+    tx: SqlTransaction,
+    runId: string,
+  ): Promise<"processing" | "completed" | "failed"> {
+    const counts = await tx.$queryRaw<
+      Array<{ total: bigint; available: bigint; failed: bigint }>
+    >(Prisma.sql`
       SELECT COUNT(*)::bigint AS "total", COUNT(*) FILTER (WHERE "status" = 'AVAILABLE')::bigint AS "available",
         COUNT(*) FILTER (WHERE "status" = 'FAILED')::bigint AS "failed"
       FROM "whatsapp"."WhatsAppTemplateTranslationItem" WHERE "runId" = ${runId}
     `);
-    const { total, available, failed } = counts[0] ?? { total: 0n, available: 0n, failed: 0n };
+    const { total, available, failed } = counts[0] ?? {
+      total: 0n,
+      available: 0n,
+      failed: 0n,
+    };
     // Empty runs are poisoned inputs, not perpetual PROCESSING rows.
     // Do not publish/Admin-finalise here. Only report keyed results ready.
-    const outcome = total === 0n || failed > 0n ? "failed" : available === total ? "completed" : "processing";
+    const outcome =
+      total === 0n || failed > 0n
+        ? "failed"
+        : available === total
+          ? "completed"
+          : "processing";
     if (outcome !== "processing") {
       await tx.$executeRaw(Prisma.sql`
         UPDATE "whatsapp"."WhatsAppTemplateTranslationRun"
         SET "status" = ${outcome === "completed" ? "COMPLETED" : "FAILED"},
-          "failureCode" = ${outcome === "failed" ? total === 0n ? "TRANSLATION_ITEMS_MISSING" : "TRANSLATION_ITEM_FAILED" : null},
+          "failureCode" = ${outcome === "failed" ? (total === 0n ? "TRANSLATION_ITEMS_MISSING" : "TRANSLATION_ITEM_FAILED") : null},
           "completedAt" = NOW(), "updatedAt" = NOW()
         WHERE "id" = ${runId} AND "status" = 'PROCESSING'
       `);
@@ -218,13 +279,19 @@ export class TemplateTranslationRepository {
     return outcome;
   }
 
-  async advanceRunState(runId: string): Promise<"processing" | "completed" | "failed"> {
+  async advanceRunState(
+    runId: string,
+  ): Promise<"processing" | "completed" | "failed"> {
     return this.db.$transaction((tx) => this.advanceRun(tx, runId));
   }
 
   async setResult(input: {
-    batchId: string; providerCustomId: string; translated: KeyedTranslationResult | null;
-    failureCode: string | null; maxRetries: number; retrySeconds: number;
+    batchId: string;
+    providerCustomId: string;
+    translated: KeyedTranslationResult | null;
+    failureCode: string | null;
+    maxRetries: number;
+    retrySeconds: number;
   }): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<ItemMembership[]>(Prisma.sql`
@@ -237,7 +304,8 @@ export class TemplateTranslationRepository {
       `);
       const item = rows[0];
       if (!item) throw new Error("UNKNOWN_PROVIDER_TEMPLATE_ITEM");
-      if (item.currentBatchId !== input.batchId || item.status !== "PENDING") return false;
+      if (item.currentBatchId !== input.batchId || item.status !== "PENDING")
+        return false;
       if (input.translated) {
         const json = JSON.stringify(input.translated);
         const hash = templateTranslationContentHash(input.translated);
@@ -251,10 +319,15 @@ export class TemplateTranslationRepository {
         `);
         return true;
       }
-      const code = (input.failureCode ?? "TRANSLATION_PROVIDER_FAILED").slice(0, 128);
+      const code = (input.failureCode ?? "TRANSLATION_PROVIDER_FAILED").slice(
+        0,
+        128,
+      );
       const retry = translationItemRetryDisposition({
-        failureCode: code, retryCount: item.retryCount,
-        maxAutoRetries: input.maxRetries, retryDelaySeconds: input.retrySeconds,
+        failureCode: code,
+        retryCount: item.retryCount,
+        maxAutoRetries: input.maxRetries,
+        retryDelaySeconds: input.retrySeconds,
       });
       await tx.$executeRaw(Prisma.sql`
         UPDATE "whatsapp"."WhatsAppTemplateTranslationItem"
@@ -267,7 +340,11 @@ export class TemplateTranslationRepository {
     });
   }
 
-  async markBatchTerminal(batch: TemplateBatchRecord, failureCode: string, retry: { maxRetries: number; retrySeconds: number }): Promise<void> {
+  async markBatchTerminal(
+    batch: TemplateBatchRecord,
+    failureCode: string,
+    retry: { maxRetries: number; retrySeconds: number },
+  ): Promise<void> {
     await this.db.$transaction(async (tx) => {
       const count = await tx.$executeRaw(Prisma.sql`
         UPDATE "whatsapp"."WhatsAppTemplateTranslationBatch"
@@ -276,14 +353,18 @@ export class TemplateTranslationRepository {
         WHERE "id" = ${batch.batchId} AND "status" IN ('SUBMITTING', 'SUBMISSION_UNKNOWN', 'SUBMITTED', 'PROVIDER_COMPLETED')
       `);
       if (!count) return;
-      const items = await tx.$queryRaw<Array<{ id: string; retryCount: number }>>(Prisma.sql`
+      const items = await tx.$queryRaw<
+        Array<{ id: string; retryCount: number }>
+      >(Prisma.sql`
         SELECT "id", "retryCount" FROM "whatsapp"."WhatsAppTemplateTranslationItem"
         WHERE "currentBatchId" = ${batch.batchId} AND "status" = 'PENDING' FOR UPDATE
       `);
       for (const item of items) {
         const disposition = translationItemRetryDisposition({
-          failureCode, retryCount: item.retryCount,
-          maxAutoRetries: retry.maxRetries, retryDelaySeconds: retry.retrySeconds,
+          failureCode,
+          retryCount: item.retryCount,
+          maxAutoRetries: retry.maxRetries,
+          retryDelaySeconds: retry.retrySeconds,
         });
         await tx.$executeRaw(Prisma.sql`
           UPDATE "whatsapp"."WhatsAppTemplateTranslationItem"

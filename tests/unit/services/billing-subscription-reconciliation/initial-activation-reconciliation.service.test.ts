@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { BillingPlanKind, BillingPeriodStatus, SubscriptionProjectionStatus } from "@prisma/client";
+import {
+  BillingPlanKind,
+  BillingPeriodStatus,
+  SubscriptionProjectionStatus,
+} from "@prisma/client";
 
 import { InitialActivationReconciliationService } from "../../../../src/services/billing-subscription-reconciliation/initial-activation-reconciliation.service.js";
 import { ReconciliationQueueService } from "../../../../src/services/billing-subscription-reconciliation/reconciliation-queue.service.js";
@@ -60,7 +64,11 @@ function harness({
       update: vi.fn().mockResolvedValue({}),
       updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
     },
-    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }] }) },
+    merchantPricingPlan: {
+      findUnique: vi.fn().mockResolvedValue({
+        usageEvents: [{ eventHandle: "recovery-meter" }],
+      }),
+    },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(currentPlan) },
     billingPeriod: {
       findUnique: vi.fn().mockResolvedValue(period),
@@ -78,17 +86,28 @@ function harness({
       upsert: vi.fn().mockResolvedValue({}),
     },
     platformBillingPolicy: {
-      findUnique: vi.fn().mockResolvedValue({ lifetimeFreeRecoveryAllowance: 7 }),
+      findUnique: vi
+        .fn()
+        .mockResolvedValue({ lifetimeFreeRecoveryAllowance: 7 }),
     },
     shop: { update: vi.fn().mockResolvedValue({}) },
     shopSettings: { update: vi.fn().mockResolvedValue({}) },
   };
   const database = {
-    subscription: { updateMany: vi.fn().mockResolvedValue({ count: updateCount }) },
-    $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)),
+    subscription: {
+      updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
+    },
+    $transaction: vi.fn(
+      async (callback: (value: typeof transaction) => unknown) =>
+        callback(transaction),
+    ),
   };
-  const reconciliationQueue = { publishNext: vi.fn().mockResolvedValue(undefined) };
-  const discountPublisher = { publishDiscountSync: vi.fn().mockResolvedValue(undefined) };
+  const reconciliationQueue = {
+    publishNext: vi.fn().mockResolvedValue(undefined),
+  };
+  const discountPublisher = {
+    publishDiscountSync: vi.fn().mockResolvedValue(undefined),
+  };
   const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
   const service = new InitialActivationReconciliationService(
     database as never,
@@ -97,7 +116,14 @@ function harness({
     logger as never,
     () => now,
   );
-  return { database, transaction, reconciliationQueue, discountPublisher, logger, service };
+  return {
+    database,
+    transaction,
+    reconciliationQueue,
+    discountPublisher,
+    logger,
+    service,
+  };
 }
 
 describe("InitialActivationReconciliationService", () => {
@@ -116,7 +142,9 @@ describe("InitialActivationReconciliationService", () => {
         pendingEffectiveAt: expected.pendingEffectiveAt,
         nextReconcileAt: expected.nextReconcileAt,
       },
-      data: expect.objectContaining({ status: SubscriptionProjectionStatus.NO_CONTRACT }),
+      data: expect.objectContaining({
+        status: SubscriptionProjectionStatus.NO_CONTRACT,
+      }),
     });
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledOnce();
   });
@@ -130,33 +158,72 @@ describe("InitialActivationReconciliationService", () => {
   });
 
   it.each([
-    ["missing cycle", { ...provider, currentPeriodStart: null }, paidPlan, "MISSING_BILLING_CYCLE"],
-    ["invalid allowance", provider, { ...paidPlan, includedRecoveryConversationAllowance: null }, "INVALID_INCLUDED_ALLOWANCE"],
-  ])("fails closed for a Paid activation with %s", async (_name, providerState, plan, errorCode) => {
-    const test = harness();
+    [
+      "missing cycle",
+      { ...provider, currentPeriodStart: null },
+      paidPlan,
+      "MISSING_BILLING_CYCLE",
+    ],
+    [
+      "invalid allowance",
+      provider,
+      { ...paidPlan, includedRecoveryConversationAllowance: null },
+      "INVALID_INCLUDED_ALLOWANCE",
+    ],
+  ])(
+    "fails closed for a Paid activation with %s",
+    async (_name, providerState, plan, errorCode) => {
+      const test = harness();
 
-    await test.service.completeVerifiedPaid("shop-1", expected.subscriptionId, providerState as never, plan as never, expected);
+      await test.service.completeVerifiedPaid(
+        "shop-1",
+        expected.subscriptionId,
+        providerState as never,
+        plan as never,
+        expected,
+      );
 
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ lastSyncErrorCode: errorCode, unmappedShopifyUsageEventHandles: expect.any(Array) }),
-    }));
-    expect(test.database.$transaction).toHaveBeenCalledOnce();
-  });
-
+      expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            lastSyncErrorCode: errorCode,
+            unmappedShopifyUsageEventHandles: expect.any(Array),
+          }),
+        }),
+      );
+      expect(test.database.$transaction).toHaveBeenCalledOnce();
+    },
+  );
 
   it("activates a Paid plan without the optional reporting handle and persists unmatched provider events", async () => {
     const test = harness();
-    const providerWithoutReportingEvent = { ...provider, usageEventHandles: ["provider-event-without-catalogue-entry"] };
-    const planWithoutReportingHandle = { ...paidPlan, shopifyUsageEventHandle: null };
+    const providerWithoutReportingEvent = {
+      ...provider,
+      usageEventHandles: ["provider-event-without-catalogue-entry"],
+    };
+    const planWithoutReportingHandle = {
+      ...paidPlan,
+      shopifyUsageEventHandle: null,
+    };
 
-    await test.service.completeVerifiedPaid("shop-1", expected.subscriptionId, providerWithoutReportingEvent as never, planWithoutReportingHandle as never, expected);
+    await test.service.completeVerifiedPaid(
+      "shop-1",
+      expected.subscriptionId,
+      providerWithoutReportingEvent as never,
+      planWithoutReportingHandle as never,
+      expected,
+    );
 
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status: SubscriptionProjectionStatus.ACTIVE,
-        unmappedShopifyUsageEventHandles: ["provider-event-without-catalogue-entry"],
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: SubscriptionProjectionStatus.ACTIVE,
+          unmappedShopifyUsageEventHandles: [
+            "provider-event-without-catalogue-entry",
+          ],
+        }),
       }),
-    }));
+    );
     expect(test.transaction.subscription.updateMany).not.toHaveBeenCalled();
   });
 
@@ -170,21 +237,40 @@ describe("InitialActivationReconciliationService", () => {
       currentPeriodEnd: null,
     };
 
-    await test.service.completeVerifiedPaid("shop-1", expected.subscriptionId, trialProvider as never, paidPlan, expected);
+    await test.service.completeVerifiedPaid(
+      "shop-1",
+      expected.subscriptionId,
+      trialProvider as never,
+      paidPlan,
+      expected,
+    );
 
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ lastSyncErrorCode: "UNSUPPORTED_PAID_TRIAL", nextReconcileAt: null, unmappedShopifyUsageEventHandles: expect.any(Array) }),
-    }));
-    expect(test.logger.warn).toHaveBeenCalledWith("billing.subscription_reconciliation.unsupported_paid_trial", {
-      shopId: "shop-1",
-      subscriptionId: expected.subscriptionId,
-    });
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          lastSyncErrorCode: "UNSUPPORTED_PAID_TRIAL",
+          nextReconcileAt: null,
+          unmappedShopifyUsageEventHandles: expect.any(Array),
+        }),
+      }),
+    );
+    expect(test.logger.warn).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.unsupported_paid_trial",
+      {
+        shopId: "shop-1",
+        subscriptionId: expected.subscriptionId,
+      },
+    );
     expect(test.database.$transaction).toHaveBeenCalledOnce();
   });
 
   it("commits Free activation, grants the lifetime counter once, and publishes post-commit work", async () => {
     const test = harness({ currentPlan: null });
-    const freeProvider = { ...provider, planHandle: "free-2026", usageEventHandles: [] };
+    const freeProvider = {
+      ...provider,
+      planHandle: "free-2026",
+      usageEventHandles: [],
+    };
 
     await test.service.completeVerifiedFree(
       "shop-1",
@@ -198,18 +284,39 @@ describe("InitialActivationReconciliationService", () => {
     );
 
     expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(3);
-    expect(test.transaction.$queryRaw.mock.calls.map(([query]) => (query as { sql: string }).sql.replace(/\s+/g, " ").trim())).toEqual([
+    expect(
+      test.transaction.$queryRaw.mock.calls.map(([query]) =>
+        (query as { sql: string }).sql.replace(/\s+/g, " ").trim(),
+      ),
+    ).toEqual([
       expect.stringContaining('FROM "commerce"."Shop"'),
       expect.stringContaining('FROM "shopify"."ShopSettings"'),
       expect.stringContaining('FROM "billing"."Subscription"'),
     ]);
-    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: { onboardingCompleted: true } });
-    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ planId: "plan-free", status: SubscriptionProjectionStatus.ACTIVE, billingPeriodId: "period-1" }),
-    }));
-    expect(test.transaction.shopEntitlementCounter.upsert).toHaveBeenCalledOnce();
-    expect(test.discountPublisher.publishDiscountSync).toHaveBeenCalledWith("shop-1", "SUBSCRIPTION_ACTIVATED");
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({
+      where: { id: "shop-1" },
+      data: { onboardingCompleted: true },
+    });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({
+      where: { shopId: "shop-1" },
+      data: { onboardingCompleted: true },
+    });
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          planId: "plan-free",
+          status: SubscriptionProjectionStatus.ACTIVE,
+          billingPeriodId: "period-1",
+        }),
+      }),
+    );
+    expect(
+      test.transaction.shopEntitlementCounter.upsert,
+    ).toHaveBeenCalledOnce();
+    expect(test.discountPublisher.publishDiscountSync).toHaveBeenCalledWith(
+      "shop-1",
+      "SUBSCRIPTION_ACTIVATED",
+    );
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledOnce();
   });
 
@@ -232,23 +339,53 @@ describe("InitialActivationReconciliationService", () => {
       reservedQuantity: 0,
       forfeitedQuantity: 0,
     };
-    const test = harness({ period: existingPeriod, periodCounter: existingCounter, lifetimeCounter: { id: "lifetime-counter" } });
+    const test = harness({
+      period: existingPeriod,
+      periodCounter: existingCounter,
+      lifetimeCounter: { id: "lifetime-counter" },
+    });
 
-    await test.service.completeVerifiedPaid("shop-1", expected.subscriptionId, provider as never, paidPlan, expected);
+    await test.service.completeVerifiedPaid(
+      "shop-1",
+      expected.subscriptionId,
+      provider as never,
+      paidPlan,
+      expected,
+    );
 
     expect(test.transaction.billingPeriod.create).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {} }));
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ planId: paidPlan.id, billingPeriodId: "period-1", status: SubscriptionProjectionStatus.ACTIVE }),
-    }));
-    expect(test.transaction.$queryRaw.mock.calls.map(([query]) => (query as { sql: string }).sql.replace(/\s+/g, " ").trim())).toEqual([
+    expect(
+      test.transaction.billingPeriodEntitlementCounter.create,
+    ).not.toHaveBeenCalled();
+    expect(
+      test.transaction.billingPeriodEntitlementCounter.upsert,
+    ).toHaveBeenCalledWith(expect.objectContaining({ update: {} }));
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          planId: paidPlan.id,
+          billingPeriodId: "period-1",
+          status: SubscriptionProjectionStatus.ACTIVE,
+        }),
+      }),
+    );
+    expect(
+      test.transaction.$queryRaw.mock.calls.map(([query]) =>
+        (query as { sql: string }).sql.replace(/\s+/g, " ").trim(),
+      ),
+    ).toEqual([
       expect.stringContaining('FROM "commerce"."Shop"'),
       expect.stringContaining('FROM "shopify"."ShopSettings"'),
       expect.stringContaining('FROM "billing"."Subscription"'),
     ]);
-    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: { onboardingCompleted: true } });
-    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({
+      where: { id: "shop-1" },
+      data: { onboardingCompleted: true },
+    });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({
+      where: { shopId: "shop-1" },
+      data: { onboardingCompleted: true },
+    });
     expect(test.discountPublisher.publishDiscountSync).toHaveBeenCalledOnce();
   });
 
@@ -263,7 +400,11 @@ describe("InitialActivationReconciliationService", () => {
       shopifyUsageEventHandle: null,
       includedRecoveryConversationAllowance: null,
     };
-    const otherProvider = { ...provider, planHandle: "other-free", usageEventHandles: [] };
+    const otherProvider = {
+      ...provider,
+      planHandle: "other-free",
+      usageEventHandles: [],
+    };
 
     await test.service.applyOtherCurrentPlan(
       "shop-1",
@@ -275,15 +416,23 @@ describe("InitialActivationReconciliationService", () => {
       expected,
     );
 
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ planId: freePlan.id, status: SubscriptionProjectionStatus.ACTIVE }),
-    }));
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          planId: freePlan.id,
+          status: SubscriptionProjectionStatus.ACTIVE,
+        }),
+      }),
+    );
   });
-
 
   it("projects an unknown local plan as UNMAPPED without a sync error or configuration retry", async () => {
     const test = harness({ currentPlan: null });
-    const unknownProvider = { ...provider, planHandle: "unknown-plan", usageEventHandles: ["provider-event"] };
+    const unknownProvider = {
+      ...provider,
+      planHandle: "unknown-plan",
+      usageEventHandles: ["provider-event"],
+    };
 
     await test.service.applyOtherCurrentPlan(
       "shop-1",
@@ -295,23 +444,27 @@ describe("InitialActivationReconciliationService", () => {
       expected,
     );
 
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        planId: null,
-        status: SubscriptionProjectionStatus.UNMAPPED,
-        observedShopifyPlanHandle: "unknown-plan",
-        unmappedShopifyUsageEventHandles: ["provider-event"],
-        lastSyncErrorCode: null,
-        lastSyncErrorAt: null,
-        nextReconcileAt: null,
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          planId: null,
+          status: SubscriptionProjectionStatus.UNMAPPED,
+          observedShopifyPlanHandle: "unknown-plan",
+          unmappedShopifyUsageEventHandles: ["provider-event"],
+          lastSyncErrorCode: null,
+          lastSyncErrorAt: null,
+          nextReconcileAt: null,
+        }),
       }),
-    }));
+    );
     expect(test.reconciliationQueue.publishNext).not.toHaveBeenCalled();
   });
 
   it("keeps activation committed when the post-commit queue publication fails", async () => {
     const test = harness({ lifetimeCounter: { id: "lifetime-counter" } });
-    const queue = { add: vi.fn().mockRejectedValue(new Error("queue unavailable")) };
+    const queue = {
+      add: vi.fn().mockRejectedValue(new Error("queue unavailable")),
+    };
     const reconciliationQueue = new ReconciliationQueueService(
       test.database as never,
       queue,
@@ -326,11 +479,21 @@ describe("InitialActivationReconciliationService", () => {
       () => now,
     );
 
-    await expect(service.completeVerifiedPaid("shop-1", expected.subscriptionId, provider as never, paidPlan, expected))
-      .resolves.toBeUndefined();
+    await expect(
+      service.completeVerifiedPaid(
+        "shop-1",
+        expected.subscriptionId,
+        provider as never,
+        paidPlan,
+        expected,
+      ),
+    ).resolves.toBeUndefined();
 
     expect(test.transaction.subscription.update).toHaveBeenCalledOnce();
-    expect(test.logger.error).toHaveBeenCalledWith("billing.subscription_reconciliation.enqueue_failed", expect.any(Object));
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.enqueue_failed",
+      expect.any(Object),
+    );
   });
 
   it("keeps FROZEN-shaped missing and alternate-plan calls non-throwing and non-mutating", async () => {
@@ -341,20 +504,27 @@ describe("InitialActivationReconciliationService", () => {
       nextReconcileAt: expected.nextReconcileAt,
     } as InitialActivationExpected;
     const test = harness({
-      current: { status: SubscriptionProjectionStatus.FROZEN, planId: "plan-current" } as never,
+      current: {
+        status: SubscriptionProjectionStatus.FROZEN,
+        planId: "plan-current",
+      } as never,
       updateCount: 0,
     });
 
-    await expect(test.service.recordMissingSubscription("shop-1", frozenExpected)).resolves.toBeUndefined();
-    await expect(test.service.applyOtherCurrentPlan(
-      "shop-1",
-      expected.subscriptionId,
-      provider as never,
-      null,
-      expected.pendingShopifyPlanHandle,
-      now.toISOString(),
-      frozenExpected,
-    )).resolves.toBeUndefined();
+    await expect(
+      test.service.recordMissingSubscription("shop-1", frozenExpected),
+    ).resolves.toBeUndefined();
+    await expect(
+      test.service.applyOtherCurrentPlan(
+        "shop-1",
+        expected.subscriptionId,
+        provider as never,
+        null,
+        expected.pendingShopifyPlanHandle,
+        now.toISOString(),
+        frozenExpected,
+      ),
+    ).resolves.toBeUndefined();
 
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.reconciliationQueue.publishNext).not.toHaveBeenCalled();

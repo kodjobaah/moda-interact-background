@@ -8,7 +8,9 @@ describe("chunkMerchantKnowledgeText", () => {
     const input = "a".repeat(2201);
     const chunks = chunkMerchantKnowledgeText(input);
 
-    expect(chunks.map(({ ordinal, content }) => [ordinal, content.length])).toEqual([
+    expect(
+      chunks.map(({ ordinal, content }) => [ordinal, content.length]),
+    ).toEqual([
       [0, 1200],
       [1, 1200],
       [2, 201],
@@ -22,7 +24,9 @@ describe("chunkMerchantKnowledgeText", () => {
     expect(chunks.map(({ contentUnits }) => contentUnits)).toEqual([300, 51]);
     expect(chunks[0]?.content).toBe("\u{1f9ed}".repeat(1200));
     expect(chunks[0]?.contentHash).toBe(
-      createHash("sha256").update(chunks[0]?.content ?? "", "utf8").digest("hex"),
+      createHash("sha256")
+        .update(chunks[0]?.content ?? "", "utf8")
+        .digest("hex"),
     );
   });
 

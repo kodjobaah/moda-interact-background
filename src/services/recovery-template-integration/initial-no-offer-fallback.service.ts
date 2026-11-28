@@ -1,13 +1,17 @@
-import { initialOutreachRecoveryStateAllowed, isInitialOutreachIdentity } from "../../domain/recovery-outreach-identity.js";
+import {
+  initialOutreachRecoveryStateAllowed,
+  isInitialOutreachIdentity,
+} from "../../domain/recovery-outreach-identity.js";
 import { fingerprintRecoveryPricingBasket } from "../recovery-pricing/price-comparison.js";
 import type { InitialOutreachRenderInput } from "@modainteract/moda-interact-shared/commerce/outreach";
 import type { PrismaClient } from "@prisma/client";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
-import {
-  formatCheckoutItemsSummary,
-} from "../recovery-template-preparation/recovery-template-items-summary.js";
+import { formatCheckoutItemsSummary } from "../recovery-template-preparation/recovery-template-items-summary.js";
 import {
   isCheckoutRecoveryWithinLifetime,
   PersistedCheckoutRecoveryLifetimeReader,
@@ -34,17 +38,21 @@ export type InitialFallbackResult =
   | Readonly<{
       kind: "PREPARED";
       expectedGeneration?: number;
-    expectedBasketFingerprint?: string;
-    outreachEvaluation?: InitialOutreachRenderInput["evaluation"];
-    trigger: InitialFallbackTrigger;
+      expectedBasketFingerprint?: string;
+      outreachEvaluation?: InitialOutreachRenderInput["evaluation"];
+      trigger: InitialFallbackTrigger;
       prepared: PreparedRecoveryTemplate;
       send: ReturnType<typeof templateSendFields>;
     }>
   | Readonly<{
       kind: "BLOCKED";
-      reason: "INELIGIBLE_RECOVERY" | "INVALID_ATTEMPT" |
-        "CHECKOUT_ITEMS_UNAVAILABLE" | "TEMPLATE_UNAPPROVED" |
-        "APPROVED_BINDING_UNAVAILABLE" | "MERCHANT_OR_SENDER_MISMATCH";
+      reason:
+        | "INELIGIBLE_RECOVERY"
+        | "INVALID_ATTEMPT"
+        | "CHECKOUT_ITEMS_UNAVAILABLE"
+        | "TEMPLATE_UNAPPROVED"
+        | "APPROVED_BINDING_UNAVAILABLE"
+        | "MERCHANT_OR_SENDER_MISMATCH";
     }>
   | Readonly<{
       kind: "RETRY";
@@ -52,20 +60,26 @@ export type InitialFallbackResult =
     }>;
 
 export interface InitialNoOfferFallbackPort {
-  prepare(input: Readonly<{
-    shopId: string;
-    recoveryId: string;
-    outreachAttemptId: string;
-    expectedGeneration?: number;
-    expectedBasketFingerprint?: string;
-    outreachEvaluation?: InitialOutreachRenderInput["evaluation"];
-    trigger: InitialFallbackTrigger;
-  }>): Promise<InitialFallbackResult>;
+  prepare(
+    input: Readonly<{
+      shopId: string;
+      recoveryId: string;
+      outreachAttemptId: string;
+      expectedGeneration?: number;
+      expectedBasketFingerprint?: string;
+      outreachEvaluation?: InitialOutreachRenderInput["evaluation"];
+      trigger: InitialFallbackTrigger;
+    }>,
+  ): Promise<InitialFallbackResult>;
 }
 
-type FallbackDatabase = Pick<PrismaClient,
-  "checkoutRecovery" | "recoveryOutreachAttempt" |
-  "backgroundRuntimeConfig" | "checkoutRecoveryStatusHistory">;
+type FallbackDatabase = Pick<
+  PrismaClient,
+  | "checkoutRecovery"
+  | "recoveryOutreachAttempt"
+  | "backgroundRuntimeConfig"
+  | "checkoutRecoveryStatusHistory"
+>;
 type FallbackPreparer = Pick<typeof recoveryTemplatePreparer, "prepare">;
 type FallbackSenderResolver = () => Promise<string | null>;
 
@@ -78,20 +92,41 @@ function approvedHosts(domain: string): string[] {
   const origin = domain.includes("://") ? domain : `https://${domain}`;
   if (!URL.canParse(origin)) return [];
   const parsed = new URL(origin);
-  if (!parsed.hostname.includes(".") || parsed.username || parsed.password ||
-      !["https:", "http:"].includes(parsed.protocol)) return [];
+  if (
+    !parsed.hostname.includes(".") ||
+    parsed.username ||
+    parsed.password ||
+    !["https:", "http:"].includes(parsed.protocol)
+  )
+    return [];
   return [parsed.hostname.toLowerCase()];
 }
 
 function unavailableTemplateReason(reason: string): InitialFallbackResult {
-  if (["SENDER_UNAVAILABLE", "SENDER_MISMATCH", "IDENTITY_MISMATCH", "SHOP_UNAVAILABLE"]
-    .includes(reason)) {
+  if (
+    [
+      "SENDER_UNAVAILABLE",
+      "SENDER_MISMATCH",
+      "IDENTITY_MISMATCH",
+      "SHOP_UNAVAILABLE",
+    ].includes(reason)
+  ) {
     return { kind: "BLOCKED", reason: "MERCHANT_OR_SENDER_MISMATCH" };
   }
-  if (["NO_APPROVED_ASSIGNMENT", "LEGACY_ASSIGNMENT", "AMBIGUOUS_ASSIGNMENT",
-    "REGISTRATION_UNAVAILABLE", "PROVIDER_UNAVAILABLE", "PROVIDER_DRIFT",
-    "DEFINITION_UNAVAILABLE", "LOCALE_UNAVAILABLE", "INVALID_LANGUAGE", "NO_LANGUAGE"]
-    .includes(reason)) {
+  if (
+    [
+      "NO_APPROVED_ASSIGNMENT",
+      "LEGACY_ASSIGNMENT",
+      "AMBIGUOUS_ASSIGNMENT",
+      "REGISTRATION_UNAVAILABLE",
+      "PROVIDER_UNAVAILABLE",
+      "PROVIDER_DRIFT",
+      "DEFINITION_UNAVAILABLE",
+      "LOCALE_UNAVAILABLE",
+      "INVALID_LANGUAGE",
+      "NO_LANGUAGE",
+    ].includes(reason)
+  ) {
     return { kind: "BLOCKED", reason: "TEMPLATE_UNAPPROVED" };
   }
   return { kind: "BLOCKED", reason: "APPROVED_BINDING_UNAVAILABLE" };
@@ -103,60 +138,102 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
   constructor(
     private readonly database: FallbackDatabase = prisma,
     private readonly preparer: FallbackPreparer = recoveryTemplatePreparer,
-    private readonly senderWaba: FallbackSenderResolver =
-      () => outboundWhatsAppAdmissionService.getProviderAccountId(),
+    private readonly senderWaba: FallbackSenderResolver = () =>
+      outboundWhatsAppAdmissionService.getProviderAccountId(),
     private readonly clock: () => Date = () => new Date(),
     private readonly log: Pick<StructuredLogger, "warn" | "error"> = logger,
     lifetimeReader?: CheckoutRecoveryLifetimeReader,
   ) {
-    this.lifetimeReader = lifetimeReader ?? new PersistedCheckoutRecoveryLifetimeReader(database);
+    this.lifetimeReader =
+      lifetimeReader ?? new PersistedCheckoutRecoveryLifetimeReader(database);
   }
 
-  async prepare(input: Readonly<{
-    shopId: string;
-    recoveryId: string;
-    outreachAttemptId: string;
-    expectedGeneration?: number;
-    expectedBasketFingerprint?: string;
-    outreachEvaluation?: InitialOutreachRenderInput["evaluation"];
-    trigger: InitialFallbackTrigger;
-  }>): Promise<InitialFallbackResult> {
+  async prepare(
+    input: Readonly<{
+      shopId: string;
+      recoveryId: string;
+      outreachAttemptId: string;
+      expectedGeneration?: number;
+      expectedBasketFingerprint?: string;
+      outreachEvaluation?: InitialOutreachRenderInput["evaluation"];
+      trigger: InitialFallbackTrigger;
+    }>,
+  ): Promise<InitialFallbackResult> {
     try {
       const [recovery, attempt] = await Promise.all([
         this.database.checkoutRecovery.findUnique({
           where: { id: input.recoveryId },
           select: {
-            id: true, shopId: true, generation: true, status: true, currency: true,
-            checkoutUrl: true, lineItems: true, lastExternalActivityAt: true,
-            expiredAt: true, customer: { select: { firstName: true } },
-            shop: { select: {
-              id: true, domain: true, platform: true, status: true, defaultLanguageTag: true,
-            } },
+            id: true,
+            shopId: true,
+            generation: true,
+            status: true,
+            currency: true,
+            checkoutUrl: true,
+            lineItems: true,
+            lastExternalActivityAt: true,
+            expiredAt: true,
+            customer: { select: { firstName: true } },
+            shop: {
+              select: {
+                id: true,
+                domain: true,
+                platform: true,
+                status: true,
+                defaultLanguageTag: true,
+              },
+            },
           },
         }),
         this.database.recoveryOutreachAttempt.findFirst({
-          where: { id: input.outreachAttemptId, checkoutRecoveryId: input.recoveryId },
+          where: {
+            id: input.outreachAttemptId,
+            checkoutRecoveryId: input.recoveryId,
+          },
           select: {
-            id: true, checkoutRecoveryId: true, sequence: true, trigger: true,
-            status: true, sentAt: true, outboundMessageId: true, followUpDueAt: true,
+            id: true,
+            checkoutRecoveryId: true,
+            sequence: true,
+            trigger: true,
+            status: true,
+            sentAt: true,
+            outboundMessageId: true,
+            followUpDueAt: true,
           },
         }),
       ]);
-      if (!recovery || recovery.shopId !== input.shopId || recovery.shop.id !== input.shopId ||
-          !["SHOPIFY", "WOOCOMMERCE"].includes(recovery.shop.platform) ||
-          recovery.shop.status !== "ACTIVE" || !initialOutreachRecoveryStateAllowed(input.outreachAttemptId, recovery.status) || recovery.expiredAt) {
+      if (
+        !recovery ||
+        recovery.shopId !== input.shopId ||
+        recovery.shop.id !== input.shopId ||
+        !["SHOPIFY", "WOOCOMMERCE"].includes(recovery.shop.platform) ||
+        recovery.shop.status !== "ACTIVE" ||
+        !initialOutreachRecoveryStateAllowed(
+          input.outreachAttemptId,
+          recovery.status,
+        ) ||
+        recovery.expiredAt
+      ) {
         return { kind: "BLOCKED", reason: "INELIGIBLE_RECOVERY" };
       }
-      if (!attempt || attempt.checkoutRecoveryId !== recovery.id || !isInitialOutreachIdentity(attempt) || !["PENDING", "CAPACITY_BLOCKED"].includes(attempt.status) ||
-          attempt.sentAt || attempt.outboundMessageId || attempt.followUpDueAt) {
+      if (
+        !attempt ||
+        attempt.checkoutRecoveryId !== recovery.id ||
+        !isInitialOutreachIdentity(attempt) ||
+        !["PENDING", "CAPACITY_BLOCKED"].includes(attempt.status) ||
+        attempt.sentAt ||
+        attempt.outboundMessageId ||
+        attempt.followUpDueAt
+      ) {
         return { kind: "BLOCKED", reason: "INVALID_ATTEMPT" };
       }
 
-      const progress = await outboundWhatsAppAdmissionService.inspectInitialOutreachAdmission({
-        shopId: input.shopId,
-        recoveryId: input.recoveryId,
-        outreachAttemptId: input.outreachAttemptId,
-      });
+      const progress =
+        await outboundWhatsAppAdmissionService.inspectInitialOutreachAdmission({
+          shopId: input.shopId,
+          recoveryId: input.recoveryId,
+          outreachAttemptId: input.outreachAttemptId,
+        });
       if (progress.kind === "failed") {
         return { kind: "BLOCKED", reason: "INVALID_ATTEMPT" };
       }
@@ -167,23 +244,42 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
       if (!recovery.checkoutUrl || typeof recovery.checkoutUrl !== "string") {
         return { kind: "BLOCKED", reason: "APPROVED_BINDING_UNAVAILABLE" };
       }
-      const summary = formatCheckoutItemsSummary(recovery.lineItems, recovery.shop.defaultLanguageTag ?? "en");
-      if (!summary) return { kind: "BLOCKED", reason: "CHECKOUT_ITEMS_UNAVAILABLE" };
+      const summary = formatCheckoutItemsSummary(
+        recovery.lineItems,
+        recovery.shop.defaultLanguageTag ?? "en",
+      );
+      if (!summary)
+        return { kind: "BLOCKED", reason: "CHECKOUT_ITEMS_UNAVAILABLE" };
 
       const lifetimeDays = await this.lifetimeReader.read();
       const now = this.clock();
-      if (!isCheckoutRecoveryWithinLifetime({
-        lastExternalActivityAt: recovery.lastExternalActivityAt,
-        now,
-        checkoutRecoveryLifetimeDays: lifetimeDays,
-      })) return { kind: "BLOCKED", reason: "INELIGIBLE_RECOVERY" };
+      if (
+        !isCheckoutRecoveryWithinLifetime({
+          lastExternalActivityAt: recovery.lastExternalActivityAt,
+          now,
+          checkoutRecoveryLifetimeDays: lifetimeDays,
+        })
+      )
+        return { kind: "BLOCKED", reason: "INELIGIBLE_RECOVERY" };
 
-      if (!input.outreachEvaluation || input.outreachEvaluation.shopId !== recovery.shopId ||
-          input.outreachEvaluation.runId !== attempt.id || input.expectedGeneration !== recovery.generation ||
-          input.expectedBasketFingerprint !== fingerprintRecoveryPricingBasket({ shopId: recovery.shopId, checkoutRecoveryId: recovery.id,
-            generation: recovery.generation, currency: recovery.currency, lineItems: recovery.lineItems })) return { kind: "BLOCKED", reason: "INVALID_ATTEMPT" };
+      if (
+        !input.outreachEvaluation ||
+        input.outreachEvaluation.shopId !== recovery.shopId ||
+        input.outreachEvaluation.runId !== attempt.id ||
+        input.expectedGeneration !== recovery.generation ||
+        input.expectedBasketFingerprint !==
+          fingerprintRecoveryPricingBasket({
+            shopId: recovery.shopId,
+            checkoutRecoveryId: recovery.id,
+            generation: recovery.generation,
+            currency: recovery.currency,
+            lineItems: recovery.lineItems,
+          })
+      )
+        return { kind: "BLOCKED", reason: "INVALID_ATTEMPT" };
       const senderWabaId = await this.senderWaba();
-      if (!senderWabaId) return { kind: "BLOCKED", reason: "MERCHANT_OR_SENDER_MISMATCH" };
+      if (!senderWabaId)
+        return { kind: "BLOCKED", reason: "MERCHANT_OR_SENDER_MISMATCH" };
       const prepared = await this.preparer.prepare({
         shopId: recovery.shopId,
         outreachEvaluation: input.outreachEvaluation,
@@ -204,11 +300,17 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
           expiresAt: recovery.expiredAt,
           approvedHosts: approvedHosts(recovery.shop.domain),
         },
-        checkoutItems: { shopId: recovery.shopId, lineItems: recovery.lineItems },
+        checkoutItems: {
+          shopId: recovery.shopId,
+          lineItems: recovery.lineItems,
+        },
       });
       if (prepared.outcome !== "prepared") {
         const blocked = unavailableTemplateReason(prepared.reason);
-        if (blocked.kind === "BLOCKED" && blocked.reason === "TEMPLATE_UNAPPROVED") {
+        if (
+          blocked.kind === "BLOCKED" &&
+          blocked.reason === "TEMPLATE_UNAPPROVED"
+        ) {
           await this.database.checkoutRecoveryStatusHistory.create({
             data: {
               checkoutRecoveryId: recovery.id,
@@ -225,12 +327,22 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
         }
         return blocked;
       }
-      if (prepared.shopId !== input.shopId || prepared.senderWabaId !== senderWabaId ||
-          prepared.purpose !== "INITIAL_NO_OFFER") {
+      if (
+        prepared.shopId !== input.shopId ||
+        prepared.senderWabaId !== senderWabaId ||
+        prepared.purpose !== "INITIAL_NO_OFFER"
+      ) {
         return { kind: "BLOCKED", reason: "MERCHANT_OR_SENDER_MISMATCH" };
       }
-      if (prepared.template.components.some(component => component.type === "header" &&
-          component.parameters.some(parameter => parameter.type === "image"))) {
+      if (
+        prepared.template.components.some(
+          (component) =>
+            component.type === "header" &&
+            component.parameters.some(
+              (parameter) => parameter.type === "image",
+            ),
+        )
+      ) {
         return { kind: "BLOCKED", reason: "APPROVED_BINDING_UNAVAILABLE" };
       }
       return {
@@ -258,4 +370,5 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
   }
 }
 
-export const initialNoOfferFallbackService = new InitialNoOfferFallbackService();
+export const initialNoOfferFallbackService =
+  new InitialNoOfferFallbackService();

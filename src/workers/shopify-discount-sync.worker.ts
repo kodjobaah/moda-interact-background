@@ -1,8 +1,14 @@
 import { Worker } from "bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
-import { parseShopifyDiscountSyncJob, SHOPIFY_WEBHOOK_QUEUE_CONTRACTS } from "@modainteract/moda-interact-shared/shopify";
+import {
+  parseShopifyDiscountSyncJob,
+  SHOPIFY_WEBHOOK_QUEUE_CONTRACTS,
+} from "@modainteract/moda-interact-shared/shopify";
 import { connectionRedis } from "../lib/redis.js";
-import { getShopifyDiscountFailureLogFields, isShopifyDiscountProviderError } from "../providers/shopify-discount.provider.js";
+import {
+  getShopifyDiscountFailureLogFields,
+  isShopifyDiscountProviderError,
+} from "../providers/shopify-discount.provider.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { shopifyDiscountCatalogueService } from "../services/shopify-discount-catalogue.service.js";
 
@@ -15,20 +21,26 @@ export function createShopifyDiscountSyncWorker() {
   const worker = new Worker(
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
     async (job) => {
-      let fields: {
-        jobId: string | number | null;
-        shopId: string | null;
-        reason: string;
-        requestedAt: string;
-        webhookTopic: string | null;
-      } | undefined;
+      let fields:
+        | {
+            jobId: string | number | null;
+            shopId: string | null;
+            reason: string;
+            requestedAt: string;
+            webhookTopic: string | null;
+          }
+        | undefined;
       try {
         const payload = parseShopifyDiscountSyncJob(job.data);
         const requestedAt = new Date(payload.requestedAt);
-        if (Number.isNaN(requestedAt.getTime())) throw new Error("Invalid Shopify discount sync requestedAt");
+        if (Number.isNaN(requestedAt.getTime()))
+          throw new Error("Invalid Shopify discount sync requestedAt");
 
         fields = {
-          jobId: typeof job.id === "string" ? job.id.slice(0, 192) : job.id ?? null,
+          jobId:
+            typeof job.id === "string"
+              ? job.id.slice(0, 192)
+              : (job.id ?? null),
           shopId: payload.shopId,
           reason: payload.reason,
           requestedAt: payload.requestedAt,
@@ -37,13 +49,25 @@ export function createShopifyDiscountSyncWorker() {
 
         logger.info("shopify.discount_sync.job_received", fields);
 
-        const outcome = await shopifyDiscountCatalogueService.reconcile(payload.shopId, requestedAt);
+        const outcome = await shopifyDiscountCatalogueService.reconcile(
+          payload.shopId,
+          requestedAt,
+        );
         if (outcome === "current") {
-          logger.info("shopify.discount_sync.completed", { ...fields, outcome });
+          logger.info("shopify.discount_sync.completed", {
+            ...fields,
+            outcome,
+          });
         } else if (outcome === "unavailable") {
-          logger.warn("shopify.discount_sync.unavailable", { ...fields, outcome });
+          logger.warn("shopify.discount_sync.unavailable", {
+            ...fields,
+            outcome,
+          });
         } else if (outcome === "superseded") {
-          logger.info("shopify.discount_sync.superseded", { ...fields, outcome });
+          logger.info("shopify.discount_sync.superseded", {
+            ...fields,
+            outcome,
+          });
         } else {
           logger.error("shopify.discount_sync.failed", { ...fields, outcome });
         }
@@ -51,7 +75,9 @@ export function createShopifyDiscountSyncWorker() {
         if (!isShopifyDiscountProviderError(error)) {
           logger.error("shopify.discount_sync.failed", {
             ...(fields ?? {}),
-            reasonCode: fields ? "SHOPIFY_DISCOUNT_SYNC_FAILED" : "SHOPIFY_DISCOUNT_SYNC_JOB_INVALID",
+            reasonCode: fields
+              ? "SHOPIFY_DISCOUNT_SYNC_FAILED"
+              : "SHOPIFY_DISCOUNT_SYNC_JOB_INVALID",
             ...getShopifyDiscountFailureLogFields(error, "internal"),
           });
         }
@@ -63,14 +89,16 @@ export function createShopifyDiscountSyncWorker() {
 
   worker.on("ready", () => {
     logger.info("shopify.discount_sync.worker_ready", {
-      queueName: SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
+      queueName:
+        SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
       concurrency: 4,
     });
   });
 
   worker.on("error", (error) => {
     logger.error("shopify.discount_sync.worker_error", {
-      queueName: SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
+      queueName:
+        SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
       reasonCode: "SHOPIFY_DISCOUNT_WORKER_ERROR",
       ...getShopifyDiscountFailureLogFields(error, "sdk_exception"),
     });

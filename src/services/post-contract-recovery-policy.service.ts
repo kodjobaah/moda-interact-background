@@ -24,9 +24,7 @@ export type PostContractRecoveryPolicy = {
 };
 
 export type PostContractRecoveryPolicyFailureReason =
-  | "CONTRACT_REQUIRED"
-  | "SHOP_UNAVAILABLE"
-  | "INVALID_CONFIGURATION";
+  "CONTRACT_REQUIRED" | "SHOP_UNAVAILABLE" | "INVALID_CONFIGURATION";
 
 export class PostContractRecoveryPolicyError extends Error {
   constructor(
@@ -101,7 +99,9 @@ export class PostContractRecoveryPolicyResolver {
     }
 
     const [platformPolicy, override] = await Promise.all([
-      this.client.platformBillingPolicy.findUnique({ where: { id: "default" } }),
+      this.client.platformBillingPolicy.findUnique({
+        where: { id: "default" },
+      }),
       this.client.shopBillingPolicyOverride.findUnique({ where: { shopId } }),
     ]);
 

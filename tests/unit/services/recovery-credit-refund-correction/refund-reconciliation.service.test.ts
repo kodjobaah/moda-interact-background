@@ -89,14 +89,18 @@ describe("RefundReconciliationService", () => {
       },
     });
 
-    await expect(test.service.reconcile(refund)).resolves.toBe("needs-attention");
+    await expect(test.service.reconcile(refund)).resolves.toBe(
+      "needs-attention",
+    );
     expect(test.providerState.read).not.toHaveBeenCalled();
-    expect(test.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: {
-        status: RecoveryCreditRefundStatus.NEEDS_ATTENTION,
-        reason: "automatic-correction-evidence-incomplete",
-      },
-    }));
+    expect(test.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          status: RecoveryCreditRefundStatus.NEEDS_ATTENTION,
+          reason: "automatic-correction-evidence-incomplete",
+        },
+      }),
+    );
   });
 
   it("propagates a linked provider NEEDS_ATTENTION state to the refund", async () => {
@@ -108,51 +112,64 @@ describe("RefundReconciliationService", () => {
       },
     });
 
-    await expect(test.service.reconcile(refund)).resolves.toBe("needs-attention");
+    await expect(test.service.reconcile(refund)).resolves.toBe(
+      "needs-attention",
+    );
     expect(test.providerState.read).not.toHaveBeenCalled();
-    expect(test.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        reason: "automatic-correction-provider-needs-attention",
+    expect(test.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reason: "automatic-correction-provider-needs-attention",
+        }),
       }),
-    }));
+    );
   });
 
   it.each([
     ShopifyReportState.PENDING,
     ShopifyReportState.IN_FLIGHT,
     ShopifyReportState.RETRYABLE,
-  ])("keeps %s correction reports REQUESTED without provider reconciliation", async (state) => {
-    const test = harness();
-    const refund = linkedRefund({
-      automaticCorrectionUsageEvent: {
-        ...linkedRefund().automaticCorrectionUsageEvent!,
-        shopifyReportState: state,
-      },
-    });
+  ])(
+    "keeps %s correction reports REQUESTED without provider reconciliation",
+    async (state) => {
+      const test = harness();
+      const refund = linkedRefund({
+        automaticCorrectionUsageEvent: {
+          ...linkedRefund().automaticCorrectionUsageEvent!,
+          shopifyReportState: state,
+        },
+      });
 
-    await expect(test.service.reconcile(refund)).resolves.toBe("reconciled");
-    expect(test.providerState.read).not.toHaveBeenCalled();
-    expect(test.updateMany).not.toHaveBeenCalled();
-  });
+      await expect(test.service.reconcile(refund)).resolves.toBe("reconciled");
+      expect(test.providerState.read).not.toHaveBeenCalled();
+      expect(test.updateMany).not.toHaveBeenCalled();
+    },
+  );
 
   it("moves unsafe provider proof to NEEDS_ATTENTION with a bounded reason", async () => {
     const test = harness();
     const reason = "x".repeat(1200);
     test.providerState.read.mockResolvedValue({ safe: false, reason });
 
-    await expect(test.service.reconcile(linkedRefund())).resolves.toBe("needs-attention");
-    expect(test.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: {
-        status: RecoveryCreditRefundStatus.NEEDS_ATTENTION,
-        reason: reason.slice(0, 1000),
-      },
-    }));
+    await expect(test.service.reconcile(linkedRefund())).resolves.toBe(
+      "needs-attention",
+    );
+    expect(test.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          status: RecoveryCreditRefundStatus.NEEDS_ATTENTION,
+          reason: reason.slice(0, 1000),
+        },
+      }),
+    );
   });
 
   it("treats the exact frozen BEFORE provider state as not caught up yet", async () => {
     const test = harness();
 
-    await expect(test.service.reconcile(linkedRefund())).resolves.toBe("reconciled");
+    await expect(test.service.reconcile(linkedRefund())).resolves.toBe(
+      "reconciled",
+    );
     expect(test.completion.complete).not.toHaveBeenCalled();
     expect(test.updateMany).not.toHaveBeenCalled();
   });
@@ -182,7 +199,9 @@ describe("RefundReconciliationService", () => {
     });
     test.completion.complete.mockResolvedValue(false);
 
-    await expect(test.service.reconcile(linkedRefund())).resolves.toBe("reconciled");
+    await expect(test.service.reconcile(linkedRefund())).resolves.toBe(
+      "reconciled",
+    );
     expect(test.updateMany).not.toHaveBeenCalled();
   });
 
@@ -190,22 +209,29 @@ describe("RefundReconciliationService", () => {
     ["quantity", "0.5", "0.50", "USD"],
     ["cost", "0", "0.50", "USD"],
     ["currency", "0", "0.00", "EUR"],
-  ])("marks a third provider %s state as a conflict", async (_kind, quantity, cost, currency) => {
-    const test = harness();
-    test.providerState.read.mockResolvedValue({
-      safe: true,
-      quantity: new Prisma.Decimal(quantity),
-      cost: new Prisma.Decimal(cost),
-      currency,
-    });
+  ])(
+    "marks a third provider %s state as a conflict",
+    async (_kind, quantity, cost, currency) => {
+      const test = harness();
+      test.providerState.read.mockResolvedValue({
+        safe: true,
+        quantity: new Prisma.Decimal(quantity),
+        cost: new Prisma.Decimal(cost),
+        currency,
+      });
 
-    await expect(test.service.reconcile(linkedRefund())).resolves.toBe("needs-attention");
-    expect(test.completion.complete).not.toHaveBeenCalled();
-    expect(test.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: {
-        status: RecoveryCreditRefundStatus.NEEDS_ATTENTION,
-        reason: "automatic-correction-provider-state-conflict",
-      },
-    }));
-  });
+      await expect(test.service.reconcile(linkedRefund())).resolves.toBe(
+        "needs-attention",
+      );
+      expect(test.completion.complete).not.toHaveBeenCalled();
+      expect(test.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: {
+            status: RecoveryCreditRefundStatus.NEEDS_ATTENTION,
+            reason: "automatic-correction-provider-state-conflict",
+          },
+        }),
+      );
+    },
+  );
 });

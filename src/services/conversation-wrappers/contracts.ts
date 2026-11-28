@@ -2,15 +2,48 @@ import type { BrandMediaPolicyRef } from "../conversation-brand-media.js";
 import type { RecoveryShopHeaderReceipt } from "./recovery-shop-header.js";
 export type { RecoveryShopHeaderReceipt };
 /** ARCH-047-BG005: Background-only runtime seam. No Admin AST imports. */
-import type { ConversationMediaDeliveryPlan, ConversationVerifiedProducts } from "@modainteract/moda-interact-shared/commerce/presentation";
+import type {
+  ConversationMediaDeliveryPlan,
+  ConversationVerifiedProducts,
+} from "@modainteract/moda-interact-shared/commerce/presentation";
 import type { CommerceFinalResponse } from "@modainteract/moda-interact-shared/commerce";
-import type { CommerceVerifiedPresentation, WrapperSource, WrapperAudience, WrapperVariable, PreparedToken, PreparedWrapper, VerifiedWrapperContext as SharedVerifiedWrapperContext, WrapperDefinition, WrapperSlot, WrapperRefusal } from "@modainteract/moda-interact-shared/commerce/presentation";
-export type { WrapperSource, WrapperAudience, WrapperVariable, PreparedToken, PreparedWrapper, WrapperDefinition, WrapperSlot, WrapperRefusal };
-export type VerifiedWrapperContext = SharedVerifiedWrapperContext & Readonly<{recoveryShopHeader?: RecoveryShopHeaderReceipt}>;
-export type CommercePresentationInput = Readonly<{ envelope: CommerceFinalResponse; verified: CommerceVerifiedPresentation; verifiedProducts?: ConversationVerifiedProducts; deadlineAt?: number; signal?: AbortSignal; productPairs?: readonly { productId: string; variantId: string | null }[] }>;
+import type {
+  CommerceVerifiedPresentation,
+  WrapperSource,
+  WrapperAudience,
+  WrapperVariable,
+  PreparedToken,
+  PreparedWrapper,
+  VerifiedWrapperContext as SharedVerifiedWrapperContext,
+  WrapperDefinition,
+  WrapperSlot,
+  WrapperRefusal,
+} from "@modainteract/moda-interact-shared/commerce/presentation";
+export type {
+  WrapperSource,
+  WrapperAudience,
+  WrapperVariable,
+  PreparedToken,
+  PreparedWrapper,
+  WrapperDefinition,
+  WrapperSlot,
+  WrapperRefusal,
+};
+export type VerifiedWrapperContext = SharedVerifiedWrapperContext &
+  Readonly<{ recoveryShopHeader?: RecoveryShopHeaderReceipt }>;
+export type CommercePresentationInput = Readonly<{
+  envelope: CommerceFinalResponse;
+  verified: CommerceVerifiedPresentation;
+  verifiedProducts?: ConversationVerifiedProducts;
+  deadlineAt?: number;
+  signal?: AbortSignal;
+  productPairs?: readonly { productId: string; variantId: string | null }[];
+}>;
 
 export type WrapperReadPort = Readonly<{
-  loadContext(conversationId: string): Promise<VerifiedWrapperContext | "TENANT_MISMATCH" | null>;
+  loadContext(
+    conversationId: string,
+  ): Promise<VerifiedWrapperContext | "TENANT_MISMATCH" | null>;
   loadSlots(): Promise<readonly WrapperSlot[]>;
 }>;
 
@@ -35,12 +68,26 @@ export type WrappedResult = Readonly<{
   /** Trusted runtime augmentation, bound into application provenance. */
   recoveryCheckoutUrl?: string;
   recoveryShopHeader?: RecoveryShopHeaderReceipt;
-  brandMediaPolicy?: BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
+  brandMediaPolicy?: BrandMediaPolicyRef;
+  deliveryPlan?: ConversationMediaDeliveryPlan;
   presentedPairs?: readonly { productId: string; variantId: string | null }[];
 }>;
 
-export type WrapperRenderResult = WrappedResult
-  | Readonly<{ kind: "no-wrapper"; body: string; reason: "NOT_CONFIGURED"; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryShopHeaderReceipt; brandMediaPolicy?: BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan; presentedPairs?: readonly { productId: string; variantId: string | null }[] }>
+export type WrapperRenderResult =
+  | WrappedResult
+  | Readonly<{
+      kind: "no-wrapper";
+      body: string;
+      reason: "NOT_CONFIGURED";
+      recoveryCheckoutUrl?: string;
+      recoveryShopHeader?: RecoveryShopHeaderReceipt;
+      brandMediaPolicy?: BrandMediaPolicyRef;
+      deliveryPlan?: ConversationMediaDeliveryPlan;
+      presentedPairs?: readonly {
+        productId: string;
+        variantId: string | null;
+      }[];
+    }>
   | Readonly<{ kind: "unavailable" | "rejected"; reason: WrapperRefusal }>;
 
 export type RenderConversationResponseInput = Readonly<{

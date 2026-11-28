@@ -3,7 +3,9 @@ import { classifyWhatsAppProviderFailure } from "../../../src/domain/whatsapp-re
 
 describe("classifyWhatsAppProviderFailure", () => {
   it("classifies only the exact terminal recipient provider code", () => {
-    expect(classifyWhatsAppProviderFailure("131026")).toBe("RECIPIENT_UNDELIVERABLE");
+    expect(classifyWhatsAppProviderFailure("131026")).toBe(
+      "RECIPIENT_UNDELIVERABLE",
+    );
     expect(classifyWhatsAppProviderFailure(" 131026 ")).toBeNull();
     expect(classifyWhatsAppProviderFailure("1310260")).toBeNull();
     expect(classifyWhatsAppProviderFailure("131047")).toBeNull();

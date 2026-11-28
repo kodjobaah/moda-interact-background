@@ -22,8 +22,9 @@ describe("reconciliation timing", () => {
   ])("uses the correct retry tier at age %i ms", (ageMs, delayMs) => {
     const pendingEffectiveAt = new Date(now.getTime() - ageMs);
 
-    expect(nextSubscriptionReconcileAt(pendingEffectiveAt, now))
-      .toEqual(new Date(now.getTime() + delayMs));
+    expect(nextSubscriptionReconcileAt(pendingEffectiveAt, now)).toEqual(
+      new Date(now.getTime() + delayMs),
+    );
   });
 
   it("stops retrying at the 24-hour expiry", () => {

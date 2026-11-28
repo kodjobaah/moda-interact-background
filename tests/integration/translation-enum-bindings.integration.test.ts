@@ -15,8 +15,10 @@ import { TranslationReconciliationService } from "../../src/services/translation
 import { backgroundRuntimeConfig } from "../helpers/background-runtime-config.js";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
-const disposableIntegrationEnabled = process.env.MODA_DISPOSABLE_INTEGRATION === "1";
-const describeWithDatabase = testDatabaseUrl && disposableIntegrationEnabled ? describe : describe.skip;
+const disposableIntegrationEnabled =
+  process.env.MODA_DISPOSABLE_INTEGRATION === "1";
+const describeWithDatabase =
+  testDatabaseUrl && disposableIntegrationEnabled ? describe : describe.skip;
 const runtimeConfig = {
   current: () =>
     backgroundRuntimeConfig({
@@ -93,14 +95,21 @@ async function seedBatch(
   return { shopId, batchId, translationId };
 }
 
-async function readStatus(database: PrismaClient, table: string, id: string): Promise<string> {
+async function readStatus(
+  database: PrismaClient,
+  table: string,
+  id: string,
+): Promise<string> {
   const rows = await database.$queryRaw<Array<{ status: string }>>(
     Prisma.sql`SELECT "status"::text AS "status" FROM ${Prisma.raw(table)} WHERE "id" = ${id}`,
   );
   return rows[0]!.status;
 }
 
-async function cleanup(database: PrismaClient, fixture: Fixture): Promise<void> {
+async function cleanup(
+  database: PrismaClient,
+  fixture: Fixture,
+): Promise<void> {
   await database.$executeRaw(Prisma.sql`
     DELETE FROM "support"."MerchantTranslationBatch" WHERE "id" = ${fixture.batchId}
   `);
@@ -119,7 +128,10 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
         database,
         provider: {
           prepareBatchInput: async () => {
-            throw new TranslationBatchSubmissionError("DEFINITE_TERMINAL_NOT_CREATED", "provider rejected input");
+            throw new TranslationBatchSubmissionError(
+              "DEFINITE_TERMINAL_NOT_CREATED",
+              "provider rejected input",
+            );
           },
         } as never,
         queue: { add: async () => undefined },
@@ -127,7 +139,13 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
       });
 
       await service.submit({ translationBatchId: fixture.batchId });
-      expect(await readStatus(database, '"support"."MerchantTranslationBatch"', fixture.batchId)).toBe("FAILED");
+      expect(
+        await readStatus(
+          database,
+          '"support"."MerchantTranslationBatch"',
+          fixture.batchId,
+        ),
+      ).toBe("FAILED");
     } finally {
       await cleanup(database, fixture);
       await database.$disconnect();
@@ -137,32 +155,51 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
   it("persists terminal poll Batch and translation statuses through real enum columns", async () => {
     process.env.DATABASE_URL = testDatabaseUrl;
     const database = new PrismaClient();
-    const fixture = await seedBatch(database, "SUBMITTED", { withTranslation: true });
+    const fixture = await seedBatch(database, "SUBMITTED", {
+      withTranslation: true,
+    });
     try {
       const service = new TranslationBatchPollService({
         database,
-        providerFactory: () => ({
-          retrieveBatch: async () => ({
-            provider: "openai" as const,
-            providerBatchId: "provider-batch",
-            logicalBatchId: fixture.batchId,
-            status: "failed" as const,
-            inputFileId: null,
-            outputFileId: null,
-            errorFileId: null,
-            failureCode: "invalid_request",
-            createdAt: null,
-            completedAt: null,
-          }),
-        }) as never,
+        providerFactory: () =>
+          ({
+            retrieveBatch: async () => ({
+              provider: "openai" as const,
+              providerBatchId: "provider-batch",
+              logicalBatchId: fixture.batchId,
+              status: "failed" as const,
+              inputFileId: null,
+              outputFileId: null,
+              errorFileId: null,
+              failureCode: "invalid_request",
+              createdAt: null,
+              completedAt: null,
+            }),
+          }) as never,
         credentialReader: async () => "integration-api-key",
         queue: { add: async () => undefined },
         runtimeConfig,
       });
 
-      await service.poll({ schemaVersion: 1, translationBatchId: fixture.batchId, pollSequence: 1 });
-      expect(await readStatus(database, '"support"."MerchantTranslationBatch"', fixture.batchId)).toBe("FAILED");
-      expect(await readStatus(database, '"support"."MerchantMessageTranslation"', fixture.translationId!)).toBe("FAILED");
+      await service.poll({
+        schemaVersion: 1,
+        translationBatchId: fixture.batchId,
+        pollSequence: 1,
+      });
+      expect(
+        await readStatus(
+          database,
+          '"support"."MerchantTranslationBatch"',
+          fixture.batchId,
+        ),
+      ).toBe("FAILED");
+      expect(
+        await readStatus(
+          database,
+          '"support"."MerchantMessageTranslation"',
+          fixture.translationId!,
+        ),
+      ).toBe("FAILED");
     } finally {
       await cleanup(database, fixture);
       await database.$disconnect();
@@ -172,24 +209,35 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
   it("persists failed provider results through the real translation enum column", async () => {
     process.env.DATABASE_URL = testDatabaseUrl;
     const database = new PrismaClient();
-    const fixture = await seedBatch(database, "PROVIDER_COMPLETED", { withTranslation: true });
+    const fixture = await seedBatch(database, "PROVIDER_COMPLETED", {
+      withTranslation: true,
+    });
     try {
       const service = new TranslationBatchResultsService({
         database,
-        providerFactory: () => ({
-          readOutputFile: async () => [{
-            providerCustomId: `custom-${fixture.translationId}`,
-            status: "failed" as const,
-            translatedText: null,
-            failureCode: "invalid_request",
-          }],
-        }) as never,
+        providerFactory: () =>
+          ({
+            readOutputFile: async () => [
+              {
+                providerCustomId: `custom-${fixture.translationId}`,
+                status: "failed" as const,
+                translatedText: null,
+                failureCode: "invalid_request",
+              },
+            ],
+          }) as never,
         credentialReader: async () => "integration-api-key",
         runtimeConfig,
       });
 
       await service.apply({ translationBatchId: fixture.batchId });
-      expect(await readStatus(database, '"support"."MerchantMessageTranslation"', fixture.translationId!)).toBe("FAILED");
+      expect(
+        await readStatus(
+          database,
+          '"support"."MerchantMessageTranslation"',
+          fixture.translationId!,
+        ),
+      ).toBe("FAILED");
     } finally {
       await cleanup(database, fixture);
       await database.$disconnect();
@@ -207,29 +255,36 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
           getJob: async () => undefined,
           add: async () => undefined,
         },
-        providerFactory: () => ({
-          findBatchByCorrelation: async () => ({
-            kind: "match" as const,
-            batch: {
-              provider: "openai" as const,
-              providerBatchId: "provider-recovered",
-              logicalBatchId: fixture.batchId,
-              status: "completed" as const,
-              inputFileId: "input-file",
-              outputFileId: "output-file",
-              errorFileId: null,
-              failureCode: null,
-              createdAt: null,
-              completedAt: null,
-            },
-          }),
-        }) as never,
+        providerFactory: () =>
+          ({
+            findBatchByCorrelation: async () => ({
+              kind: "match" as const,
+              batch: {
+                provider: "openai" as const,
+                providerBatchId: "provider-recovered",
+                logicalBatchId: fixture.batchId,
+                status: "completed" as const,
+                inputFileId: "input-file",
+                outputFileId: "output-file",
+                errorFileId: null,
+                failureCode: null,
+                createdAt: null,
+                completedAt: null,
+              },
+            }),
+          }) as never,
         credentialReader: async () => "integration-api-key",
         runtimeConfig,
       });
 
       await service.reconcile();
-      expect(await readStatus(database, '"support"."MerchantTranslationBatch"', fixture.batchId)).toBe("PROVIDER_COMPLETED");
+      expect(
+        await readStatus(
+          database,
+          '"support"."MerchantTranslationBatch"',
+          fixture.batchId,
+        ),
+      ).toBe("PROVIDER_COMPLETED");
     } finally {
       await cleanup(database, fixture);
       await database.$disconnect();

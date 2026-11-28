@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const metricMocks = vi.hoisted(() => {
   const queueWaitRecord = vi.fn();
   const transitionAdd = vi.fn();
-  const gaugeCallbacks: Array<(result: { observe: (value: number, attributes: Record<string, string>) => void }) => void> = [];
+  const gaugeCallbacks: Array<
+    (result: {
+      observe: (value: number, attributes: Record<string, string>) => void;
+    }) => void
+  > = [];
   const createObservableGauge = vi.fn(() => {
     const addCallback = vi.fn((callback) => gaugeCallbacks.push(callback));
     return { addCallback, removeCallback: vi.fn() };
@@ -14,7 +18,13 @@ const metricMocks = vi.hoisted(() => {
     createHistogram: vi.fn(() => ({ record: queueWaitRecord })),
   }));
 
-  return { createObservableGauge, gaugeCallbacks, getMeter, queueWaitRecord, transitionAdd };
+  return {
+    createObservableGauge,
+    gaugeCallbacks,
+    getMeter,
+    queueWaitRecord,
+    transitionAdd,
+  };
 });
 
 const bullMQMocks = vi.hoisted(() => {
@@ -31,7 +41,9 @@ const bullMQMocks = vi.hoisted(() => {
     name: string;
     constructor(name: string) {
       controls.queueConstructorCalls += 1;
-      if (controls.queueConstructorCalls === controls.throwOnQueueConstructorCall) {
+      if (
+        controls.queueConstructorCalls === controls.throwOnQueueConstructorCall
+      ) {
         throw new Error("queue setup failed");
       }
       this.name = name;
@@ -43,7 +55,9 @@ const bullMQMocks = vi.hoisted(() => {
     });
     getJobs = vi.fn(async () => [{ timestamp: 1_000, delay: 5_000 }]);
     on = vi.fn((event: string, handler: () => void) => {
-      if (event === "error") (this as unknown as { errorHandler: () => void }).errorHandler = handler;
+      if (event === "error")
+        (this as unknown as { errorHandler: () => void }).errorHandler =
+          handler;
       return this;
     });
     close = vi.fn(async () => undefined);
@@ -51,7 +65,10 @@ const bullMQMocks = vi.hoisted(() => {
   class QueueEvents {
     constructor(name: string) {
       controls.queueEventsConstructorCalls += 1;
-      if (controls.queueEventsConstructorCalls === controls.throwOnQueueEventsConstructorCall) {
+      if (
+        controls.queueEventsConstructorCalls ===
+        controls.throwOnQueueEventsConstructorCall
+      ) {
         throw new Error("queue events setup failed");
       }
       events.push(this as unknown as Record<string, unknown>);
@@ -59,7 +76,9 @@ const bullMQMocks = vi.hoisted(() => {
     }
     name: string;
     on = vi.fn((event: string, handler: () => void) => {
-      if (event === "error") (this as unknown as { errorHandler: () => void }).errorHandler = handler;
+      if (event === "error")
+        (this as unknown as { errorHandler: () => void }).errorHandler =
+          handler;
       return this;
     });
     close = vi.fn(async () => undefined);
@@ -68,12 +87,19 @@ const bullMQMocks = vi.hoisted(() => {
   return { Queue, QueueEvents, controls, events, queues };
 });
 
-vi.mock("@opentelemetry/api", () => ({ metrics: { getMeter: metricMocks.getMeter } }));
-vi.mock("bullmq", () => ({ Queue: bullMQMocks.Queue, QueueEvents: bullMQMocks.QueueEvents }));
+vi.mock("@opentelemetry/api", () => ({
+  metrics: { getMeter: metricMocks.getMeter },
+}));
+vi.mock("bullmq", () => ({
+  Queue: bullMQMocks.Queue,
+  QueueEvents: bullMQMocks.QueueEvents,
+}));
 
-const { recordQueueEligibility, recordQueueWait, startQueuePerformanceTelemetry } = await import(
-  "../../../src/observability/queue-performance.js"
-);
+const {
+  recordQueueEligibility,
+  recordQueueWait,
+  startQueuePerformanceTelemetry,
+} = await import("../../../src/observability/queue-performance.js");
 
 describe("queue performance telemetry", () => {
   beforeEach(() => {
@@ -91,7 +117,11 @@ describe("queue performance telemetry", () => {
   });
 
   it("measures queue wait from eligibility and clamps early processing", () => {
-    recordQueueEligibility("pending-recovery-candidates", "recovery-job", 6_000);
+    recordQueueEligibility(
+      "pending-recovery-candidates",
+      "recovery-job",
+      6_000,
+    );
     recordQueueEligibility("checkout-events", "checkout-job", 2_000);
     recordQueueWait("pending-recovery-candidates", {
       id: "recovery-job",
@@ -102,16 +132,12 @@ describe("queue performance telemetry", () => {
       processedOn: 1_500,
     });
 
-    expect(metricMocks.queueWaitRecord).toHaveBeenNthCalledWith(
-      1,
-      250,
-      { "bullmq.queue.name": "pending-recovery-candidates" },
-    );
-    expect(metricMocks.queueWaitRecord).toHaveBeenNthCalledWith(
-      2,
-      0,
-      { "bullmq.queue.name": "checkout-events" },
-    );
+    expect(metricMocks.queueWaitRecord).toHaveBeenNthCalledWith(1, 250, {
+      "bullmq.queue.name": "pending-recovery-candidates",
+    });
+    expect(metricMocks.queueWaitRecord).toHaveBeenNthCalledWith(2, 0, {
+      "bullmq.queue.name": "checkout-events",
+    });
   });
 
   it("does not emit a queue-wait sample when eligibility was not observed", () => {
@@ -124,17 +150,24 @@ describe("queue performance telemetry", () => {
   });
 
   it("uses the latest observed eligibility after a reschedule", () => {
-    recordQueueEligibility("pending-recovery-candidates", "rescheduled-job", 1_000);
-    recordQueueEligibility("pending-recovery-candidates", "rescheduled-job", 9_000);
+    recordQueueEligibility(
+      "pending-recovery-candidates",
+      "rescheduled-job",
+      1_000,
+    );
+    recordQueueEligibility(
+      "pending-recovery-candidates",
+      "rescheduled-job",
+      9_000,
+    );
     recordQueueWait("pending-recovery-candidates", {
       id: "rescheduled-job",
       processedOn: 9_250,
     });
 
-    expect(metricMocks.queueWaitRecord).toHaveBeenCalledWith(
-      250,
-      { "bullmq.queue.name": "pending-recovery-candidates" },
-    );
+    expect(metricMocks.queueWaitRecord).toHaveBeenCalledWith(250, {
+      "bullmq.queue.name": "pending-recovery-candidates",
+    });
   });
 
   it("creates one bounded observer per queue and closes all resources", async () => {
@@ -177,9 +210,14 @@ describe("queue performance telemetry", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(bullMQMocks.queues).toHaveLength(1);
     expect(bullMQMocks.events).toHaveLength(1);
-    expect((bullMQMocks.queues[0] as { name: string }).name).toBe("woo-coupon-sync");
+    expect((bullMQMocks.queues[0] as { name: string }).name).toBe(
+      "woo-coupon-sync",
+    );
     expect(bullMQMocks.queues[0]?.getJobCounts).toHaveBeenCalledWith(
-      "waiting", "active", "delayed", "failed",
+      "waiting",
+      "active",
+      "delayed",
+      "failed",
     );
 
     await close();
@@ -205,8 +243,12 @@ describe("queue performance telemetry", () => {
       queueNames: ["checkout-events"],
     });
 
-    expect(() => (bullMQMocks.queues[0] as { errorHandler: () => void }).errorHandler()).not.toThrow();
-    expect(() => (bullMQMocks.events[0] as { errorHandler: () => void }).errorHandler()).not.toThrow();
+    expect(() =>
+      (bullMQMocks.queues[0] as { errorHandler: () => void }).errorHandler(),
+    ).not.toThrow();
+    expect(() =>
+      (bullMQMocks.events[0] as { errorHandler: () => void }).errorHandler(),
+    ).not.toThrow();
     await close();
   });
 
@@ -219,13 +261,17 @@ describe("queue performance telemetry", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     const observations: number[] = [];
-    metricMocks.gaugeCallbacks[0]?.({ observe: (value) => observations.push(value) });
+    metricMocks.gaugeCallbacks[0]?.({
+      observe: (value) => observations.push(value),
+    });
     expect(observations).toContain(2);
 
     bullMQMocks.controls.rejectSampling = true;
     await new Promise((resolve) => setTimeout(resolve, 5));
     const refreshedObservations: number[] = [];
-    metricMocks.gaugeCallbacks[0]?.({ observe: (value) => refreshedObservations.push(value) });
+    metricMocks.gaugeCallbacks[0]?.({
+      observe: (value) => refreshedObservations.push(value),
+    });
     expect(refreshedObservations).not.toContain(2);
     await close();
   });

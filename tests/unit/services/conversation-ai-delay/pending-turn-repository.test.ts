@@ -18,7 +18,9 @@ function makeTransaction(overrides: Record<string, unknown> = {}) {
     recoveryShopId: "recovery-shop-authority",
     ...overrides,
   };
-  const update = vi.fn().mockResolvedValue({ inboundVersion: state.inboundVersion + 1 });
+  const update = vi
+    .fn()
+    .mockResolvedValue({ inboundVersion: state.inboundVersion + 1 });
   const findUnique = vi.fn().mockResolvedValue({ aiResponseDelayMinutes: 7 });
   const tx = {
     $queryRaw: vi.fn().mockResolvedValue([state]),
@@ -32,8 +34,9 @@ describe("recordProcessableInbound", () => {
   it("captures the recovery-shop delay and control revision only when opening an AI turn", async () => {
     const { tx, update, findUnique } = makeTransaction();
 
-    await expect(recordProcessableInbound(tx as never, "conversation-1", pendingStartedAt))
-      .resolves.toEqual({ version: 5, scheduleAi: true });
+    await expect(
+      recordProcessableInbound(tx as never, "conversation-1", pendingStartedAt),
+    ).resolves.toEqual({ version: 5, scheduleAi: true });
 
     expect(findUnique).toHaveBeenCalledWith({
       where: { shopId: "recovery-shop-authority" },
@@ -56,25 +59,39 @@ describe("recordProcessableInbound", () => {
     const { tx, update, findUnique } = makeTransaction();
     findUnique.mockResolvedValue(null);
 
-    await recordProcessableInbound(tx as never, "conversation-1", pendingStartedAt);
+    await recordProcessableInbound(
+      tx as never,
+      "conversation-1",
+      pendingStartedAt,
+    );
 
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        pendingAiNotBeforeAt: pendingStartedAt,
-        pendingAiDelayMinutes: 0,
-        pendingAiControlRevision: 7,
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          pendingAiNotBeforeAt: pendingStartedAt,
+          pendingAiDelayMinutes: 0,
+          pendingAiControlRevision: 7,
+        }),
       }),
-    }));
+    );
   });
 
-  it.each([-1, 31, 1.5, "7", null])("rejects corrupt persisted delay %s", async (delayMinutes) => {
-    const { tx, update, findUnique } = makeTransaction();
-    findUnique.mockResolvedValue({ aiResponseDelayMinutes: delayMinutes });
+  it.each([-1, 31, 1.5, "7", null])(
+    "rejects corrupt persisted delay %s",
+    async (delayMinutes) => {
+      const { tx, update, findUnique } = makeTransaction();
+      findUnique.mockResolvedValue({ aiResponseDelayMinutes: delayMinutes });
 
-    await expect(recordProcessableInbound(tx as never, "conversation-1", pendingStartedAt))
-      .rejects.toThrow(RangeError);
-    expect(update).not.toHaveBeenCalled();
-  });
+      await expect(
+        recordProcessableInbound(
+          tx as never,
+          "conversation-1",
+          pendingStartedAt,
+        ),
+      ).rejects.toThrow(RangeError);
+      expect(update).not.toHaveBeenCalled();
+    },
+  );
 
   it("leaves the first pending snapshot unchanged for later inbound fragments", async () => {
     const originalStart = new Date("2026-10-31T11:58:00.000Z");
@@ -84,7 +101,11 @@ describe("recordProcessableInbound", () => {
       pendingTurnStartedAt: originalStart,
     });
 
-    await recordProcessableInbound(tx as never, "conversation-1", pendingStartedAt);
+    await recordProcessableInbound(
+      tx as never,
+      "conversation-1",
+      pendingStartedAt,
+    );
 
     expect(findUnique).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith({
@@ -95,10 +116,13 @@ describe("recordProcessableInbound", () => {
   });
 
   it("advances the processed watermark and creates no AI deadline in HUMAN mode", async () => {
-    const { tx, update, findUnique } = makeTransaction({ controlMode: "HUMAN" });
+    const { tx, update, findUnique } = makeTransaction({
+      controlMode: "HUMAN",
+    });
 
-    await expect(recordProcessableInbound(tx as never, "conversation-1", pendingStartedAt))
-      .resolves.toEqual({ version: 5, scheduleAi: false });
+    await expect(
+      recordProcessableInbound(tx as never, "conversation-1", pendingStartedAt),
+    ).resolves.toEqual({ version: 5, scheduleAi: false });
 
     expect(findUnique).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith({
@@ -125,15 +149,23 @@ describe("recordProcessableInbound", () => {
       recoveryShopId: null,
     });
 
-    await recordProcessableInbound(tx as never, "conversation-1", pendingStartedAt);
+    await recordProcessableInbound(
+      tx as never,
+      "conversation-1",
+      pendingStartedAt,
+    );
 
     expect(findUnique).not.toHaveBeenCalled();
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        pendingTurnStartedAt: pendingStartedAt,
-        inboundVersion: { increment: 1 },
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          pendingTurnStartedAt: pendingStartedAt,
+          inboundVersion: { increment: 1 },
+        }),
       }),
-    }));
-    expect(update.mock.calls[0]?.[0].data).not.toHaveProperty("pendingAiNotBeforeAt");
+    );
+    expect(update.mock.calls[0]?.[0].data).not.toHaveProperty(
+      "pendingAiNotBeforeAt",
+    );
   });
 });

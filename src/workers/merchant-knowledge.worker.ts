@@ -13,7 +13,8 @@ import { connectionRedis } from "../lib/redis.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
 
 const logger = createLogger({
-  serviceName: "moda-merchant-knowledge-worker", environment: resolveDeploymentEnvironmentName(),
+  serviceName: "moda-merchant-knowledge-worker",
+  environment: resolveDeploymentEnvironmentName(),
 });
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-merchant-knowledge-worker",
@@ -67,8 +68,8 @@ export function createMerchantKnowledgeWorker(
         } catch (error) {
           const maxAttempts = job.opts.attempts ?? 1;
           if (
-            processor.markTerminalFailure
-            && job.attemptsMade + 1 >= maxAttempts
+            processor.markTerminalFailure &&
+            job.attemptsMade + 1 >= maxAttempts
           ) {
             await processor.markTerminalFailure({
               job: parsed,
@@ -95,7 +96,8 @@ export function createMerchantKnowledgeWorker(
   });
   worker.on("error", (error) => {
     logger.error("merchant_knowledge.worker.error", {
-      errorMessage: error.message, error,
+      errorMessage: error.message,
+      error,
     });
   });
   return worker;

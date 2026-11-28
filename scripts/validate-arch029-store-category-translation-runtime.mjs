@@ -15,7 +15,10 @@ const files = [
   "src/workers/store-category-translation-batch-results.worker.ts",
 ];
 
-const sources = files.map((file) => [file, fs.readFileSync(path.join(root, file), "utf8")]);
+const sources = files.map((file) => [
+  file,
+  fs.readFileSync(path.join(root, file), "utf8"),
+]);
 const combined = sources.map(([, source]) => source).join("\n");
 
 const required = [
@@ -30,7 +33,8 @@ const required = [
   "requestCounts",
 ];
 for (const token of required) {
-  if (!combined.includes(token)) throw new Error(`ARCH-029 B01 missing required runtime token: ${token}`);
+  if (!combined.includes(token))
+    throw new Error(`ARCH-029 B01 missing required runtime token: ${token}`);
 }
 
 const forbidden = [
@@ -41,27 +45,49 @@ const forbidden = [
   '"commerce"."CommerceStoreCategoryTaxonomyMappingTranslation"',
 ];
 for (const token of forbidden) {
-  if (combined.includes(token)) throw new Error(`ARCH-029 B01 crossed a persistence boundary: ${token}`);
+  if (combined.includes(token))
+    throw new Error(`ARCH-029 B01 crossed a persistence boundary: ${token}`);
 }
 
-const worker = fs.readFileSync(path.join(root, "src/workers/merchant-communications.worker.ts"), "utf8");
+const worker = fs.readFileSync(
+  path.join(root, "src/workers/merchant-communications.worker.ts"),
+  "utf8",
+);
 for (const name of ["BATCH_SUBMIT", "BATCH_POLL", "BATCH_RESULTS"]) {
   if (!worker.includes(`STORE_CATEGORY_TRANSLATION_JOB_NAMES.${name}`)) {
-    throw new Error(`merchant-communications worker is missing Store Category ${name}`);
+    throw new Error(
+      `merchant-communications worker is missing Store Category ${name}`,
+    );
   }
 }
 
-const entrypoint = fs.readFileSync(path.join(root, "src/entrypoints/merchant-communications.ts"), "utf8");
-if (!entrypoint.includes("storeCategoryTranslationReconciliationService.reconcile(snapshot)")) {
-  throw new Error("Store Category translation reconciliation is not attached to the existing scheduler");
+const entrypoint = fs.readFileSync(
+  path.join(root, "src/entrypoints/merchant-communications.ts"),
+  "utf8",
+);
+if (
+  !entrypoint.includes(
+    "storeCategoryTranslationReconciliationService.reconcile(snapshot)",
+  )
+) {
+  throw new Error(
+    "Store Category translation reconciliation is not attached to the existing scheduler",
+  );
 }
 
-const provider = fs.readFileSync(path.join(root, "src/providers/translation.provider.ts"), "utf8");
+const provider = fs.readFileSync(
+  path.join(root, "src/providers/translation.provider.ts"),
+  "utf8",
+);
 if (!provider.includes("options.apiKey?.trim()")) {
-  throw new Error("translation provider does not accept a database-backed API key");
+  throw new Error(
+    "translation provider does not accept a database-backed API key",
+  );
 }
 if (!provider.includes("request.direction !== undefined")) {
-  throw new Error("translation provider has not been generalized beyond support-message direction");
+  throw new Error(
+    "translation provider has not been generalized beyond support-message direction",
+  );
 }
 
 console.log("ARCH-029 Store Category translation runtime validation passed");

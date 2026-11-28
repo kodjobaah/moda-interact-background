@@ -20,7 +20,10 @@ import {
 } from "./recovery-billing/recovery-capacity-exhaustion-notification.service.js";
 import { RecoveryCapacityAdmissionService } from "./recovery-billing/recovery-capacity-admission.service.js";
 import { RecoveryReservationLifecycleService } from "./recovery-billing/recovery-reservation-lifecycle.service.js";
-import { admitRecoveryCapacityWithPolicy, admitRetryCapacityInTransaction } from "./recovery-billing/capacity-policy.js";
+import {
+  admitRecoveryCapacityWithPolicy,
+  admitRetryCapacityInTransaction,
+} from "./recovery-billing/capacity-policy.js";
 import { InitialOutreachCreditService } from "./recovery-billing/initial-outreach-credit.service.js";
 import type {
   ConfirmedInitialOutreachCreditInput,
@@ -123,25 +126,41 @@ export class RecoveryBillingService {
     /** Exact application-owned action identity, including allowance continuation. */
     fundingSourceId?: string;
   }): Promise<RecoveryBillingAdmissionResult> {
-    if (input.fundingSourceId?.startsWith("recovery-outreach:retry_") ||
-        (input.outreachAttemptId?.startsWith("retry_") && input.fundingSourceId !== undefined)) {
+    if (
+      input.fundingSourceId?.startsWith("recovery-outreach:retry_") ||
+      (input.outreachAttemptId?.startsWith("retry_") &&
+        input.fundingSourceId !== undefined)
+    ) {
       return { kind: "blocked", reason: "reservation-in-flight" };
     }
     const sourceKey = createRecoveryIdempotencyKey(
       input.shopId,
-      input.fundingSourceId ?? (input.outreachAttemptId
-        ? `recovery-outreach:${input.outreachAttemptId}`
-        : input.recoveryId),
+      input.fundingSourceId ??
+        (input.outreachAttemptId
+          ? `recovery-outreach:${input.outreachAttemptId}`
+          : input.recoveryId),
     );
 
     const outcome = input.outreachAttemptId?.startsWith("retry_")
-      ? await this.initialOutreachCredit.admitInitialRetry({ ...input, outreachAttemptId: input.outreachAttemptId }, (tx) =>
-          admitRetryCapacityInTransaction(tx, { ...input, outreachAttemptId: input.outreachAttemptId! }, sourceKey))
+      ? await this.initialOutreachCredit.admitInitialRetry(
+          { ...input, outreachAttemptId: input.outreachAttemptId },
+          (tx) =>
+            admitRetryCapacityInTransaction(
+              tx,
+              { ...input, outreachAttemptId: input.outreachAttemptId! },
+              sourceKey,
+            ),
+        )
       : await admitRecoveryCapacityWithPolicy(input, sourceKey, {
-          policyResolver: this.policyResolver, postContractPolicyResolver: this.postContractPolicyResolver,
+          policyResolver: this.policyResolver,
+          postContractPolicyResolver: this.postContractPolicyResolver,
           capacityAdmission: this.capacityAdmission,
         });
-    if (outcome.exhaustedPolicy) await this.capacityExhaustionNotification.notify(input.shopId, outcome.exhaustedPolicy);
+    if (outcome.exhaustedPolicy)
+      await this.capacityExhaustionNotification.notify(
+        input.shopId,
+        outcome.exhaustedPolicy,
+      );
     return outcome.result;
   }
 
@@ -151,20 +170,27 @@ export class RecoveryBillingService {
     outreachAttemptId?: string;
     fundingSourceId?: string;
   }): Promise<RecoveryBillingAdmissionResult> {
-    if (input.fundingSourceId?.startsWith("recovery-outreach:retry_")) return { kind: "blocked", reason: "reservation-in-flight" };
+    if (input.fundingSourceId?.startsWith("recovery-outreach:retry_"))
+      return { kind: "blocked", reason: "reservation-in-flight" };
     if (input.outreachAttemptId?.startsWith("retry_")) {
-      if (input.fundingSourceId !== undefined) return { kind: "blocked", reason: "reservation-in-flight" };
+      if (input.fundingSourceId !== undefined)
+        return { kind: "blocked", reason: "reservation-in-flight" };
       const checked = await this.revalidateExistingInitialOutreach({
-        shopId: input.admission.policy.shopId, recoveryId: input.recoveryId,
-        outreachAttemptId: input.outreachAttemptId, outboundMessageId: null,
+        shopId: input.admission.policy.shopId,
+        recoveryId: input.recoveryId,
+        outreachAttemptId: input.outreachAttemptId,
+        outboundMessageId: null,
       });
-      return checked.kind === "admitted" && checked.admission.sourceKey === input.admission.sourceKey
+      return checked.kind === "admitted" &&
+        checked.admission.sourceKey === input.admission.sourceKey
         ? { kind: "admitted", admission: checked.admission }
         : { kind: "blocked", reason: "reservation-in-flight" };
     }
     let current: EffectiveBillingPolicy;
     try {
-      current = await this.policyResolver.resolve(input.admission.policy.shopId);
+      current = await this.policyResolver.resolve(
+        input.admission.policy.shopId,
+      );
     } catch (error) {
       if (error instanceof EffectiveBillingPolicyError) {
         if (error.reason === "NO_CONTRACT") {
@@ -257,7 +283,9 @@ export class RecoveryBillingService {
       ...(input.outreachAttemptId
         ? { outreachAttemptId: input.outreachAttemptId }
         : {}),
-      ...(input.fundingSourceId ? { fundingSourceId: input.fundingSourceId } : {}),
+      ...(input.fundingSourceId
+        ? { fundingSourceId: input.fundingSourceId }
+        : {}),
     });
   }
 

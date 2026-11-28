@@ -11,21 +11,29 @@ const ACTIVE_STATUSES = ["DETECTED", "MESSAGE_SENT", "ENGAGED"] as const;
 
 function expiryCutoff(now: Date, lifetimeDays: number): Date | null {
   const nowMs = now.getTime();
-  if (!Number.isFinite(nowMs)) throw new RangeError("Invalid checkout recovery expiry time.");
+  if (!Number.isFinite(nowMs))
+    throw new RangeError("Invalid checkout recovery expiry time.");
   if (!Number.isSafeInteger(lifetimeDays) || lifetimeDays < 0) {
     throw new RangeError("Invalid checkout recovery lifetime days.");
   }
   const cutoffMs = BigInt(nowMs) - BigInt(lifetimeDays) * MILLISECONDS_PER_DAY;
-  if (cutoffMs < MIN_POSTGRES_TIMESTAMP_MS || cutoffMs > MAX_DATE_TIMESTAMP_MS) return null;
+  if (cutoffMs < MIN_POSTGRES_TIMESTAMP_MS || cutoffMs > MAX_DATE_TIMESTAMP_MS)
+    return null;
   return new Date(Number(cutoffMs));
 }
 
 export class CheckoutRecoveryExpiryService {
   async expireInactive(
-    runtimeConfig: Pick<BackgroundRuntimeConfigSnapshot, "checkoutRecoveryLifetimeDays">,
+    runtimeConfig: Pick<
+      BackgroundRuntimeConfigSnapshot,
+      "checkoutRecoveryLifetimeDays"
+    >,
     now = new Date(),
   ): Promise<number> {
-    const cutoff = expiryCutoff(now, runtimeConfig.checkoutRecoveryLifetimeDays);
+    const cutoff = expiryCutoff(
+      now,
+      runtimeConfig.checkoutRecoveryLifetimeDays,
+    );
     if (cutoff === null) {
       await recoverySenderPoolService.releaseTerminalAssignments(PAGE_SIZE);
       return 0;
@@ -89,4 +97,5 @@ export class CheckoutRecoveryExpiryService {
   }
 }
 
-export const checkoutRecoveryExpiryService = new CheckoutRecoveryExpiryService();
+export const checkoutRecoveryExpiryService =
+  new CheckoutRecoveryExpiryService();

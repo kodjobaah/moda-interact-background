@@ -9,10 +9,10 @@ import { MerchantKnowledgeEntitlementService } from "../../src/services/merchant
 import { MerchantKnowledgeProcessingService } from "../../src/services/merchant-knowledge-processing.service.js";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
-const describeWithDatabase = testDatabaseUrl
-  && process.env.MODA_DISPOSABLE_INTEGRATION === "1"
-  ? describe
-  : describe.skip;
+const describeWithDatabase =
+  testDatabaseUrl && process.env.MODA_DISPOSABLE_INTEGRATION === "1"
+    ? describe
+    : describe.skip;
 
 describeWithDatabase("Merchant Knowledge processing pgvector promotion", () => {
   it("persists candidate vectors and supersedes the predecessor transactionally", async () => {
@@ -43,14 +43,19 @@ describeWithDatabase("Merchant Knowledge processing pgvector promotion", () => {
         select: { id: true, active: true, activationMode: true },
       });
       if (
-        existingFeature
-        && (!existingFeature.active || existingFeature.activationMode !== "MERCHANT_OPT_IN")
+        existingFeature &&
+        (!existingFeature.active ||
+          existingFeature.activationMode !== "MERCHANT_OPT_IN")
       ) {
-        throw new Error("merchant_knowledge Feature must be active and MERCHANT_OPT_IN");
+        throw new Error(
+          "merchant_knowledge Feature must be active and MERCHANT_OPT_IN",
+        );
       }
       featureId = existingFeature?.id ?? randomUUID();
 
-      await database.shop.create({ data: { id: shopId, domain: `${shopId}.test` } });
+      await database.shop.create({
+        data: { id: shopId, domain: `${shopId}.test` },
+      });
       if (!existingFeature) {
         await database.feature.create({
           data: {
@@ -85,7 +90,9 @@ describeWithDatabase("Merchant Knowledge processing pgvector promotion", () => {
           },
         },
       });
-      await database.subscription.create({ data: { shopId, planId, status: "ACTIVE" } });
+      await database.subscription.create({
+        data: { shopId, planId, status: "ACTIVE" },
+      });
       await database.shopFeaturePreference.create({
         data: { shopId, featureId, enabled: true },
       });
@@ -174,7 +181,12 @@ describeWithDatabase("Merchant Knowledge processing pgvector promotion", () => {
       await expect(
         database.merchantKnowledgeSourceRevision.findUniqueOrThrow({
           where: { id: candidateId },
-          select: { status: true, normalizedContent: true, contentUnits: true, contentHash: true },
+          select: {
+            status: true,
+            normalizedContent: true,
+            contentUnits: true,
+            contentHash: true,
+          },
         }),
       ).resolves.toEqual({
         status: "ACTIVE",
@@ -193,34 +205,46 @@ describeWithDatabase("Merchant Knowledge processing pgvector promotion", () => {
         completedAt: predecessorCompletedAt,
       });
       await expect(
-        database.merchantKnowledgeChunk.count({ where: { revisionId: predecessorId } }),
+        database.merchantKnowledgeChunk.count({
+          where: { revisionId: predecessorId },
+        }),
       ).resolves.toBe(0);
-      const chunks = await database.$queryRaw<Array<{
-        content: string;
-        embedding: string;
-        embeddingProvider: string;
-        embeddingModel: string;
-        embeddingDimensions: number;
-        embeddingIndexVersion: string;
-      }>>(Prisma.sql`
+      const chunks = await database.$queryRaw<
+        Array<{
+          content: string;
+          embedding: string;
+          embeddingProvider: string;
+          embeddingModel: string;
+          embeddingDimensions: number;
+          embeddingIndexVersion: string;
+        }>
+      >(Prisma.sql`
         SELECT "content", "embedding"::text AS "embedding", "embeddingProvider",
                "embeddingModel", "embeddingDimensions", "embeddingIndexVersion"
         FROM "commerce"."MerchantKnowledgeChunk"
         WHERE "revisionId" = ${candidateId}
       `);
-      expect(chunks).toEqual([{
-        content: text,
-        embedding: "[0.25,0.75]",
-        embeddingProvider: "openai",
-        embeddingModel: "test-model",
-        embeddingDimensions: 2,
-        embeddingIndexVersion: "v1",
-      }]);
+      expect(chunks).toEqual([
+        {
+          content: text,
+          embedding: "[0.25,0.75]",
+          embeddingProvider: "openai",
+          embeddingModel: "test-model",
+          embeddingDimensions: 2,
+          embeddingIndexVersion: "v1",
+        },
+      ]);
     } finally {
-      await database.merchantKnowledgeSourceRevision.deleteMany({ where: { sourceId } });
-      await database.merchantKnowledgeSource.deleteMany({ where: { id: sourceId } });
+      await database.merchantKnowledgeSourceRevision.deleteMany({
+        where: { sourceId },
+      });
+      await database.merchantKnowledgeSource.deleteMany({
+        where: { id: sourceId },
+      });
       if (featureId) {
-        await database.shopFeaturePreference.deleteMany({ where: { shopId, featureId } });
+        await database.shopFeaturePreference.deleteMany({
+          where: { shopId, featureId },
+        });
       }
       await database.subscription.deleteMany({ where: { shopId } });
       await database.billingPlanFeature.deleteMany({ where: { planId } });

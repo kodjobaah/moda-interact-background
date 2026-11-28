@@ -1,4 +1,7 @@
-import type { SearchProductsInput, ShopifyProduct } from "../integration/shopify/types.js";
+import type {
+  SearchProductsInput,
+  ShopifyProduct,
+} from "../integration/shopify/types.js";
 import { getShopifyAccessTokenForDomain } from "./shopify-session.service.js";
 
 type ShopifyProductNode = {
@@ -23,8 +26,7 @@ export async function searchProducts({
   query,
   maxPrice,
 }: SearchProductsInput): Promise<ShopifyProduct[]> {
-  const accessToken =
-    await getShopifyAccessTokenForDomain(shop);
+  const accessToken = await getShopifyAccessTokenForDomain(shop);
 
   const searchQuery = buildProductSearchQuery({
     query,
@@ -90,31 +92,23 @@ export async function searchProducts({
   console.log("Shopify GraphQL result:", JSON.stringify(result));
 
   if (result.errors) {
-    throw new Error(
-      `Shopify GraphQL error: ${JSON.stringify(result.errors)}`,
-    );
+    throw new Error(`Shopify GraphQL error: ${JSON.stringify(result.errors)}`);
   }
 
-  return result.data.products.nodes.map(
-    (product) => ({
-      id: product.id,
-      title: product.title,
-      handle: product.handle,
-      description: product.description,
+  return result.data.products.nodes.map((product) => ({
+    id: product.id,
+    title: product.title,
+    handle: product.handle,
+    description: product.description,
 
-      minPrice:
-        product.priceRangeV2.minVariantPrice.amount,
+    minPrice: product.priceRangeV2.minVariantPrice.amount,
 
-      maxPrice:
-        product.priceRangeV2.maxVariantPrice.amount,
+    maxPrice: product.priceRangeV2.maxVariantPrice.amount,
 
-      currencyCode:
-        product.priceRangeV2.minVariantPrice.currencyCode,
+    currencyCode: product.priceRangeV2.minVariantPrice.currencyCode,
 
-      available:
-        product.totalInventory > 0,
-    }),
-  );
+    available: product.totalInventory > 0,
+  }));
 }
 
 function buildProductSearchQuery({
@@ -122,7 +116,7 @@ function buildProductSearchQuery({
   maxPrice,
 }: {
   query: string;
-    maxPrice: number | undefined;
+  maxPrice: number | undefined;
 }) {
   const filters = [query];
 

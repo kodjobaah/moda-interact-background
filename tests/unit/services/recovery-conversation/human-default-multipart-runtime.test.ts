@@ -7,7 +7,9 @@ const runtime = vi.hoisted(() => ({
 }));
 vi.mock("../../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
 vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
-vi.mock("../../../../src/services/recovery-multipart/runtime.js", () => ({ recoveryMultipartEngine: runtime }));
+vi.mock("../../../../src/services/recovery-multipart/runtime.js", () => ({
+  recoveryMultipartEngine: runtime,
+}));
 
 import { createHumanDispatcherDependencies } from "../../../../src/services/recovery-conversation/human-command-dispatcher.service.js";
 
@@ -21,7 +23,9 @@ describe("default production HUMAN multipart adapter", () => {
     const source = { messageId: "immutable-human-root" } as FrozenMultipart;
     expect(adapter.freeze).toBeTypeOf("function");
     await expect(adapter.freeze!(source)).resolves.toBe("created");
-    await expect(adapter.continue(source.messageId)).resolves.toBe("acknowledged");
+    await expect(adapter.continue(source.messageId)).resolves.toBe(
+      "acknowledged",
+    );
     expect(runtime.freeze).toHaveBeenCalledExactlyOnceWith(source);
     expect(runtime.continue).toHaveBeenCalledExactlyOnceWith(source.messageId);
   });

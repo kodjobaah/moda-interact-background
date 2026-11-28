@@ -1,69 +1,490 @@
-import {describe,it,expect} from 'vitest';
-import {CommerceProductSchema,exampleFinal} from '@modainteract/moda-interact-shared/commerce';
-import {CommerceVerifiedPresentationSchema,renderCommerceProductFacts,verifyCommerceProductFacts,verifyCommerceOptionFacts} from '@modainteract/moda-interact-shared/commerce/presentation';
-import {MODA_SUPPORTED_LANGUAGE_TAGS} from '@modainteract/moda-interact-shared/internationalization';
-import {briefProductDetailCandidates,BRIEF_PRODUCT_COPY,SHORT_PRODUCT_STOCK} from './brief-product-list.js';
-import {fitVerifiedProductCaption,PRODUCT_SHOW_MORE,captionWithinDisplayTarget} from './compact-product-presentation.js';
-import type {CommercePresentationInput} from '../services/conversation-wrappers/contracts.js';
-function details(count=3):CommercePresentationInput{
- const products=Array.from({length:count},(_,i)=>CommerceProductSchema.parse({productId:`p${i}`,variantId:null,title:`Whole snowboard ${i}`,observedAt:'2026-11-14T16:00:00Z',description:{status:'AVAILABLE',text:`Full narrative ${i}. `.repeat(120)},attributes:{status:'AVAILABLE',items:[{name:'Material',values:['Whole canonical material']}]},options:{status:'NOT_PROVIDED',items:[]},selectedOptions:[],stock:{status:'KNOWN',quantity:50+i,scope:'PRODUCT'},unitPrice:'885.95',currency:'USD',productType:'Snowboard',vendor:null,url:null,imageUrl:'https://shop.example/product.jpg',available:true}));
- const pairs=products.map(({productId,variantId})=>({productId,variantId}));const verified=verifyCommerceProductFacts(pairs,products);if(verified.kind!=='verified')throw Error('fixture');
- return {envelope:{...exampleFinal,answerKind:'ANSWER',referralReason:null,replyText:'Arbitrary long model prose '.repeat(80),details:{productDetailSelections:pairs}},verified:{schemaVersion:1,brandName:null,locale:'en',disposition:'PRODUCT_DETAILS',storeUrl:'https://shop.example',products:[],productFacts:verified.productFacts,optionFacts:[],requiresShipping:null,policyUrl:null,includeNoVerifiedOffer:false},verifiedProducts:{shopId:'shop',platform:'SHOPIFY',products}};
+import { describe, it, expect } from "vitest";
+import {
+  CommerceProductSchema,
+  exampleFinal,
+} from "@modainteract/moda-interact-shared/commerce";
+import {
+  CommerceVerifiedPresentationSchema,
+  renderCommerceProductFacts,
+  verifyCommerceProductFacts,
+  verifyCommerceOptionFacts,
+} from "@modainteract/moda-interact-shared/commerce/presentation";
+import { MODA_SUPPORTED_LANGUAGE_TAGS } from "@modainteract/moda-interact-shared/internationalization";
+import {
+  briefProductDetailCandidates,
+  BRIEF_PRODUCT_COPY,
+  SHORT_PRODUCT_STOCK,
+} from "./brief-product-list.js";
+import {
+  fitVerifiedProductCaption,
+  PRODUCT_SHOW_MORE,
+  captionWithinDisplayTarget,
+} from "./compact-product-presentation.js";
+import type { CommercePresentationInput } from "../services/conversation-wrappers/contracts.js";
+function details(count = 3): CommercePresentationInput {
+  const products = Array.from({ length: count }, (_, i) =>
+    CommerceProductSchema.parse({
+      productId: `p${i}`,
+      variantId: null,
+      title: `Whole snowboard ${i}`,
+      observedAt: "2026-11-14T16:00:00Z",
+      description: {
+        status: "AVAILABLE",
+        text: `Full narrative ${i}. `.repeat(120),
+      },
+      attributes: {
+        status: "AVAILABLE",
+        items: [{ name: "Material", values: ["Whole canonical material"] }],
+      },
+      options: { status: "NOT_PROVIDED", items: [] },
+      selectedOptions: [],
+      stock: { status: "KNOWN", quantity: 50 + i, scope: "PRODUCT" },
+      unitPrice: "885.95",
+      currency: "USD",
+      productType: "Snowboard",
+      vendor: null,
+      url: null,
+      imageUrl: "https://shop.example/product.jpg",
+      available: true,
+    }),
+  );
+  const pairs = products.map(({ productId, variantId }) => ({
+    productId,
+    variantId,
+  }));
+  const verified = verifyCommerceProductFacts(pairs, products);
+  if (verified.kind !== "verified") throw Error("fixture");
+  return {
+    envelope: {
+      ...exampleFinal,
+      answerKind: "ANSWER",
+      referralReason: null,
+      replyText: "Arbitrary long model prose ".repeat(80),
+      details: { productDetailSelections: pairs },
+    },
+    verified: {
+      schemaVersion: 1,
+      brandName: null,
+      locale: "en",
+      disposition: "PRODUCT_DETAILS",
+      storeUrl: "https://shop.example",
+      products: [],
+      productFacts: verified.productFacts,
+      optionFacts: [],
+      requiresShipping: null,
+      policyUrl: null,
+      includeNoVerifiedOffer: false,
+    },
+    verifiedProducts: { shopId: "shop", platform: "SHOPIFY", products },
+  };
 }
-const footer='\nReply STOP to opt out.\nWebsite: https://shop.example\nCheckout:\nhttps://shop.example/checkouts/current';
-describe('overflow-only multi-product verified detail summaries',()=>{
- it('uses whole matched verified facts in a marked brief list without fabricating unavailable description or editing proof',()=>{
-  const input=details(),before=structuredClone(input);const fit=fitVerifiedProductCaption(input,body=>({header:'Saved',body,footer}));
-  expect(fit).not.toBeNull();expect(fit!.boundaries.body).toContain('Whole snowboard 0 —');expect(fit!.boundaries.body).toContain('885.95');expect(fit!.boundaries.body).toContain('USD');expect(fit!.boundaries.body).toContain('Stock: 50');expect(fit!.boundaries.body).not.toContain('Category: Snowboard');
-  expect(fit!.boundaries.body).not.toContain('Full narrative');expect(fit!.boundaries.body).not.toMatch(/description.*unavailable/i);expect(fit!.boundaries.body).toContain(PRODUCT_SHOW_MORE.en);
-  expect(Array.from(fit!.boundaries.body+fit!.boundaries.footer).length).toBeLessThanOrEqual(1024);expect(fit!.boundaries.footer).toBe(footer);expect(fit!.presentation.verifiedProducts!.products).toEqual(before.verifiedProducts!.products.slice(0,fit!.pairs.length));expect(fit!.presentation.verified.productFacts).toEqual(before.verified.productFacts!.slice(0,fit!.pairs.length));expect(input).toEqual(before);
- });
- it('keeps summary eligibility from original multi-product selection even when budget retains only one complete item',()=>{
-  const input=details();const fit=fitVerifiedProductCaption(input,body=>body.includes('Whole snowboard 1')?null:{header:'',body,footer});
-  expect(fit!.pairs).toEqual([{productId:'p0',variantId:null}]);expect(fit!.presentation.verifiedProducts!.products).toEqual(input.verifiedProducts!.products.slice(0,1));expect(fit!.presentation.verified.productFacts).toEqual(input.verified.productFacts!.slice(0,1));expect(fit!.presentation.verified.productFacts![0]!.description.status).toBe('AVAILABLE');expect(fit!.presentation.verified.productFacts![0]!.description.text).toContain('Full narrative');
- });
- it('uses single-product summaries only with explicit concise mode, retaining full proof',()=>{
-  const single=details(1);expect(briefProductDetailCandidates(single)).toBeUndefined();const fit=fitVerifiedProductCaption(single,body=>({header:'',body,footer}))!;expect(fit.boundaries.body).toContain('Whole snowboard 0');expect(fit.boundaries.body).not.toContain('Full narrative');expect(fit.presentation.verified.productFacts).toEqual(single.verified.productFacts);
-  const variants=details(2);variants.verifiedProducts!.products[1]!.productId='p0';variants.verifiedProducts!.products[1]!.variantId='v2';variants.verified.productFacts![1]!.productId='p0';variants.verified.productFacts![1]!.variantId='v2';expect(briefProductDetailCandidates(variants)).toBeUndefined();
- });
- it.each(['missing','duplicate','changed-fact'] as const)('refuses unproven brief summary inputs %s',mode=>{
-  const input=details();if(mode==='missing')input.verifiedProducts!.products.pop();if(mode==='duplicate')input.verifiedProducts!.products.push(input.verifiedProducts!.products[0]!);if(mode==='changed-fact')input.verified.productFacts![0]!.description.text='forged';expect(briefProductDetailCandidates(input)).toEqual([]);
- });
- it('never slices whole titles/category or mandatory footer to force a fit',()=>{
-  const input=details();for(const product of input.verifiedProducts!.products)product.title='😀'.repeat(250);for(const fact of input.verified.productFacts!)fact.title='😀'.repeat(250);
-  expect(fitVerifiedProductCaption(input,body=>({header:'',body,footer:footer+'x'.repeat(800)}))).toBeNull();expect(fitVerifiedProductCaption(details(),body=>({header:'',body,footer:'x'.repeat(1025)}))).toBeNull();
- });
- it.each(MODA_SUPPORTED_LANGUAGE_TAGS)('has explicit localized brief/price/category copy and canonical facts for %s',locale=>{
-  const input=details(2);input.verified.locale=locale;const candidates=briefProductDetailCandidates(input)!;expect(candidates[0]!.body).toContain(BRIEF_PRODUCT_COPY[locale][0]);expect(candidates[0]!.body).toContain(BRIEF_PRODUCT_COPY[locale][1]);expect(candidates[0]!.body).toContain(BRIEF_PRODUCT_COPY[locale][2]);expect(candidates[0]!.pairs).toHaveLength(2);
- });
- it('omits genuinely absent optional price/category without inventing values or a fake unavailable narrative',()=>{
-  const input=details(2);for(const product of input.verifiedProducts!.products){product.unitPrice=null;product.currency=null;product.productType=null;}
-  const body=briefProductDetailCandidates(input)![0]!.body;expect(body).not.toContain('Price:');expect(body).not.toContain('Category:');expect(body).toContain('Whole snowboard 0');expect(body).not.toContain('unavailable');
- });
- it('does not change referral/non-detail presentation selection',()=>{
-  const input=details();expect(briefProductDetailCandidates({...input,envelope:exampleFinal})).toBeUndefined();expect(briefProductDetailCandidates({...input,verified:{...input.verified,disposition:'PRODUCT_OPTIONS'}})).toBeUndefined();
- });
+const footer =
+  "\nReply STOP to opt out.\nWebsite: https://shop.example\nCheckout:\nhttps://shop.example/checkouts/current";
+describe("overflow-only multi-product verified detail summaries", () => {
+  it("uses whole matched verified facts in a marked brief list without fabricating unavailable description or editing proof", () => {
+    const input = details(),
+      before = structuredClone(input);
+    const fit = fitVerifiedProductCaption(input, (body) => ({
+      header: "Saved",
+      body,
+      footer,
+    }));
+    expect(fit).not.toBeNull();
+    expect(fit!.boundaries.body).toContain("Whole snowboard 0 —");
+    expect(fit!.boundaries.body).toContain("885.95");
+    expect(fit!.boundaries.body).toContain("USD");
+    expect(fit!.boundaries.body).toContain("Stock: 50");
+    expect(fit!.boundaries.body).not.toContain("Category: Snowboard");
+    expect(fit!.boundaries.body).not.toContain("Full narrative");
+    expect(fit!.boundaries.body).not.toMatch(/description.*unavailable/i);
+    expect(fit!.boundaries.body).toContain(PRODUCT_SHOW_MORE.en);
+    expect(
+      Array.from(fit!.boundaries.body + fit!.boundaries.footer).length,
+    ).toBeLessThanOrEqual(1024);
+    expect(fit!.boundaries.footer).toBe(footer);
+    expect(fit!.presentation.verifiedProducts!.products).toEqual(
+      before.verifiedProducts!.products.slice(0, fit!.pairs.length),
+    );
+    expect(fit!.presentation.verified.productFacts).toEqual(
+      before.verified.productFacts!.slice(0, fit!.pairs.length),
+    );
+    expect(input).toEqual(before);
+  });
+  it("keeps summary eligibility from original multi-product selection even when budget retains only one complete item", () => {
+    const input = details();
+    const fit = fitVerifiedProductCaption(input, (body) =>
+      body.includes("Whole snowboard 1") ? null : { header: "", body, footer },
+    );
+    expect(fit!.pairs).toEqual([{ productId: "p0", variantId: null }]);
+    expect(fit!.presentation.verifiedProducts!.products).toEqual(
+      input.verifiedProducts!.products.slice(0, 1),
+    );
+    expect(fit!.presentation.verified.productFacts).toEqual(
+      input.verified.productFacts!.slice(0, 1),
+    );
+    expect(
+      fit!.presentation.verified.productFacts![0]!.description.status,
+    ).toBe("AVAILABLE");
+    expect(
+      fit!.presentation.verified.productFacts![0]!.description.text,
+    ).toContain("Full narrative");
+  });
+  it("uses single-product summaries only with explicit concise mode, retaining full proof", () => {
+    const single = details(1);
+    expect(briefProductDetailCandidates(single)).toBeUndefined();
+    const fit = fitVerifiedProductCaption(single, (body) => ({
+      header: "",
+      body,
+      footer,
+    }))!;
+    expect(fit.boundaries.body).toContain("Whole snowboard 0");
+    expect(fit.boundaries.body).not.toContain("Full narrative");
+    expect(fit.presentation.verified.productFacts).toEqual(
+      single.verified.productFacts,
+    );
+    const variants = details(2);
+    variants.verifiedProducts!.products[1]!.productId = "p0";
+    variants.verifiedProducts!.products[1]!.variantId = "v2";
+    variants.verified.productFacts![1]!.productId = "p0";
+    variants.verified.productFacts![1]!.variantId = "v2";
+    expect(briefProductDetailCandidates(variants)).toBeUndefined();
+  });
+  it.each(["missing", "duplicate", "changed-fact"] as const)(
+    "refuses unproven brief summary inputs %s",
+    (mode) => {
+      const input = details();
+      if (mode === "missing") input.verifiedProducts!.products.pop();
+      if (mode === "duplicate")
+        input.verifiedProducts!.products.push(
+          input.verifiedProducts!.products[0]!,
+        );
+      if (mode === "changed-fact")
+        input.verified.productFacts![0]!.description.text = "forged";
+      expect(briefProductDetailCandidates(input)).toEqual([]);
+    },
+  );
+  it("never slices whole titles/category or mandatory footer to force a fit", () => {
+    const input = details();
+    for (const product of input.verifiedProducts!.products)
+      product.title = "😀".repeat(250);
+    for (const fact of input.verified.productFacts!)
+      fact.title = "😀".repeat(250);
+    expect(
+      fitVerifiedProductCaption(input, (body) => ({
+        header: "",
+        body,
+        footer: footer + "x".repeat(800),
+      })),
+    ).toBeNull();
+    expect(
+      fitVerifiedProductCaption(details(), (body) => ({
+        header: "",
+        body,
+        footer: "x".repeat(1025),
+      })),
+    ).toBeNull();
+  });
+  it.each(MODA_SUPPORTED_LANGUAGE_TAGS)(
+    "has explicit localized brief/price/category copy and canonical facts for %s",
+    (locale) => {
+      const input = details(2);
+      input.verified.locale = locale;
+      const candidates = briefProductDetailCandidates(input)!;
+      expect(candidates[0]!.body).toContain(BRIEF_PRODUCT_COPY[locale][0]);
+      expect(candidates[0]!.body).toContain(BRIEF_PRODUCT_COPY[locale][1]);
+      expect(candidates[0]!.body).toContain(BRIEF_PRODUCT_COPY[locale][2]);
+      expect(candidates[0]!.pairs).toHaveLength(2);
+    },
+  );
+  it("omits genuinely absent optional price/category without inventing values or a fake unavailable narrative", () => {
+    const input = details(2);
+    for (const product of input.verifiedProducts!.products) {
+      product.unitPrice = null;
+      product.currency = null;
+      product.productType = null;
+    }
+    const body = briefProductDetailCandidates(input)![0]!.body;
+    expect(body).not.toContain("Price:");
+    expect(body).not.toContain("Category:");
+    expect(body).toContain("Whole snowboard 0");
+    expect(body).not.toContain("unavailable");
+  });
+  it("does not change referral/non-detail presentation selection", () => {
+    const input = details();
+    expect(
+      briefProductDetailCandidates({ ...input, envelope: exampleFinal }),
+    ).toBeUndefined();
+    expect(
+      briefProductDetailCandidates({
+        ...input,
+        verified: { ...input.verified, disposition: "PRODUCT_OPTIONS" },
+      }),
+    ).toBeUndefined();
+  });
 });
 
-describe('explicit concise detail captions',()=>{
- const checkout='https://shop.example/checkouts/'+ 'a'.repeat(170);
- const actualFooter='\nWebsite: https://shop.example\nReply STOP to opt out.\nCheckout:\n'+checkout;
- function refresh(input:CommercePresentationInput){const pairs=input.verifiedProducts!.products.map(({productId,variantId})=>({productId,variantId}));const verified=verifyCommerceProductFacts(pairs,input.verifiedProducts!.products);if(verified.kind!=='verified')throw Error('fixture');input.verified.productFacts=verified.productFacts;return input;}
- it('shortens a sub1024 single detail caption while retaining full description proof and exact twoURL footer',()=>{
-  const input=details(1);input.verifiedProducts!.products[0]!.description={status:'AVAILABLE',text:'Complete verified description. '.repeat(7)};refresh(input);const before=structuredClone(input);
-  const original=renderCommerceProductFacts(CommerceVerifiedPresentationSchema.parse(input.verified).productFacts,'en')+actualFooter;expect(Array.from(original).length).toBeGreaterThan(400);expect(Array.from(original).length).toBeLessThanOrEqual(1024);
-  const fit=fitVerifiedProductCaption(input,body=>({header:'Saved header',body,footer:actualFooter}))!;
-  expect(fit.targetMet).toBe(true);expect(captionWithinDisplayTarget(fit.boundaries.body+fit.boundaries.footer)).toBe(true);expect(fit.boundaries.body).toContain('Whole snowboard 0 —');expect(fit.boundaries.body).toContain('885.95');expect(fit.boundaries.body).toContain('USD');expect(fit.boundaries.body).toContain('Stock: 50');expect(fit.boundaries.body).not.toContain(PRODUCT_SHOW_MORE.en);expect(fit.boundaries.body).not.toContain('Complete verified description');
-  expect(fit.boundaries.footer).toBe(actualFooter);expect(fit.boundaries.footer.endsWith(checkout)).toBe(true);expect(fit.presentation.verifiedProducts).toEqual(before.verifiedProducts);expect(fit.presentation.verified.productFacts).toEqual(before.verified.productFacts);expect(input).toEqual(before);
- });
- it('chooses the largest whole prefix inside the actual footer budget and binds only retained evidence',()=>{const input=details(),before=structuredClone(input);const fit=fitVerifiedProductCaption(input,body=>({header:'Saved',body,footer:actualFooter}))!;expect(fit.targetMet).toBe(true);expect(fit.pairs).toHaveLength(1);expect(fit.boundaries.body).not.toMatch(/Whole snowboard [12]/);expect(fit.presentation.verifiedProducts!.products).toEqual(before.verifiedProducts!.products.slice(0,1));expect(fit.presentation.verified.productFacts).toEqual(before.verified.productFacts!.slice(0,1));expect(fit.boundaries.body).toContain(PRODUCT_SHOW_MORE.en);expect(input).toEqual(before);});
- it('preserves all selected variant options and truthful variant stock as whole facts',()=>{const input=details(1),product=input.verifiedProducts!.products[0]!;product.variantId='selected-variant';product.selectedOptions=[{name:'Size',value:'Wide'},{name:'Color',value:'Blue'}];product.stock={status:'KNOWN',quantity:5,scope:'VARIANT'};refresh(input);const body=briefProductDetailCandidates(input,{concise:true})![0]!.body;expect(body).toContain('Size: Wide; Color: Blue');expect(body).toContain('Stock (selected variant): 5');expect(briefProductDetailCandidates(input,{concise:true})![0]!.pairs).toEqual([{productId:'p0',variantId:'selected-variant'}]);});
- it('keeps all verified option values rather than slicing them to fit the soft target',()=>{const input=details(1),product=input.verifiedProducts!.products[0]!;product.options={status:'AVAILABLE',items:[{name:'Size',values:['Small','Medium','Large'],usedForVariants:true},{name:'Color',values:['Blue','White'],usedForVariants:true}]};const result=verifyCommerceOptionFacts([{productId:product.productId,variantId:product.variantId}],[product]);if(result.kind!=='verified')throw Error('options fixture');const optionInput={...input,verified:{...input.verified,disposition:'PRODUCT_OPTIONS' as const,productFacts:[],optionFacts:result.optionFacts}};const fit=fitVerifiedProductCaption(optionInput,body=>({header:'',body,footer:actualFooter}))!;for(const value of ['Small','Medium','Large','Blue','White'])expect(fit.boundaries.body).toContain(value);expect(fit.presentation.verified.optionFacts).toEqual(result.optionFacts);expect(fit.presentation.verifiedProducts!.products).toEqual([product]);});
- it.each([{status:'KNOWN' as const,quantity:0,scope:'PRODUCT' as const},{status:'NOT_TRACKED' as const},{status:'UNAVAILABLE' as const}])('keeps truthful stock status without inventing availability %j',stock=>{const input=details(1);input.verifiedProducts!.products[0]!.stock=stock;refresh(input);const fit=fitVerifiedProductCaption(input,body=>({header:'',body,footer}))!;expect(fit.presentation.verified.productFacts![0]!.stock).toEqual(stock);if(stock.status==='KNOWN')expect(fit.boundaries.body).toContain('Stock: 0');else expect(fit.boundaries.body).not.toMatch(/Stock: [0-9]/);});
- it.each([null,false])('preserves rich DETAIL shipping qualification with requiresShipping %s',requiresShipping=>{const input=details(1);input.verified.requiresShipping=requiresShipping;input.envelope.details={...input.envelope.details,shippingInformationSelection:{productId:null,variantId:null},responseDisposition:'SHIPPING_INFORMATION_UNVERIFIED'};input.envelope.replyText='Verified product. Shipping costs could not be verified; check the store shipping policy.';const before=structuredClone(input);expect(fitVerifiedProductCaption(input,body=>({header:'',body,footer:actualFooter}))).toBeNull();expect(input).toEqual(before);});
- it.each(['policy','unverified','redirect'])('preserves every explicit mandatory DETAIL adjunct %s',kind=>{const input=details(1);input.verified.requiresShipping=false;if(kind==='policy')input.verified.policyUrl='https://shop.example/policies/shipping';else input.envelope.details={...input.envelope.details,responseDisposition:kind==='unverified'?'SHIPPING_INFORMATION_UNVERIFIED':'OUT_OF_SCOPE_REDIRECT'};expect(fitVerifiedProductCaption(input,body=>({header:'',body,footer}))).toBeNull();});
- it('counts Unicode points and nonempty lines without rewriting merchant text',()=>{expect(captionWithinDisplayTarget('😀'.repeat(400))).toBe(true);expect(captionWithinDisplayTarget('😀'.repeat(401))).toBe(false);expect(captionWithinDisplayTarget(Array(8).fill('x').join('\r\n'))).toBe(true);expect(captionWithinDisplayTarget(Array(9).fill('x').join('\n'))).toBe(false);});
- it('reports targetnotmet and preserves an entire long footer/title rather than pretending to control Readmore',()=>{const input=details(1);const longFooter=actualFooter.replace(checkout,'mandatory'.repeat(30)+'\n'+checkout);const fit=fitVerifiedProductCaption(input,body=>({header:'',body,footer:longFooter}))!;expect(fit.targetMet).toBe(false);expect(fit.boundaries.footer).toBe(longFooter);expect(fit.boundaries.body).toContain('Whole snowboard 0');expect(Array.from(fit.boundaries.body+fit.boundaries.footer).length).toBeLessThanOrEqual(1024);expect(fitVerifiedProductCaption(input,body=>({header:'',body,footer:'x'.repeat(1025)}))).toBeNull();});
- it('does not omit required mixed shipping/offer policy merely for a concise detail mode',()=>{for(const field of ['requiresShipping','includeNoVerifiedOffer']){const input=details(1);if(field==='requiresShipping')input.verified.requiresShipping=true;else input.verified.includeNoVerifiedOffer=true;expect(fitVerifiedProductCaption(input,body=>({header:'',body,footer}))).toBeNull();}});
- it.each(MODA_SUPPORTED_LANGUAGE_TAGS)('uses concise localized verified stock in %s',locale=>{const input=details(1);input.verified.locale=locale;const fit=fitVerifiedProductCaption(input,body=>({header:'',body,footer}))!;expect(fit.targetMet).toBe(true);expect(fit.boundaries.body).toContain(SHORT_PRODUCT_STOCK[locale]);expect(fit.boundaries.body).toContain('Whole snowboard 0');expect(fit.boundaries.body).not.toContain('Full narrative');});
+describe("explicit concise detail captions", () => {
+  const checkout = "https://shop.example/checkouts/" + "a".repeat(170);
+  const actualFooter =
+    "\nWebsite: https://shop.example\nReply STOP to opt out.\nCheckout:\n" +
+    checkout;
+  function refresh(input: CommercePresentationInput) {
+    const pairs = input.verifiedProducts!.products.map(
+      ({ productId, variantId }) => ({ productId, variantId }),
+    );
+    const verified = verifyCommerceProductFacts(
+      pairs,
+      input.verifiedProducts!.products,
+    );
+    if (verified.kind !== "verified") throw Error("fixture");
+    input.verified.productFacts = verified.productFacts;
+    return input;
+  }
+  it("shortens a sub1024 single detail caption while retaining full description proof and exact twoURL footer", () => {
+    const input = details(1);
+    input.verifiedProducts!.products[0]!.description = {
+      status: "AVAILABLE",
+      text: "Complete verified description. ".repeat(7),
+    };
+    refresh(input);
+    const before = structuredClone(input);
+    const original =
+      renderCommerceProductFacts(
+        CommerceVerifiedPresentationSchema.parse(input.verified).productFacts,
+        "en",
+      ) + actualFooter;
+    expect(Array.from(original).length).toBeGreaterThan(400);
+    expect(Array.from(original).length).toBeLessThanOrEqual(1024);
+    const fit = fitVerifiedProductCaption(input, (body) => ({
+      header: "Saved header",
+      body,
+      footer: actualFooter,
+    }))!;
+    expect(fit.targetMet).toBe(true);
+    expect(
+      captionWithinDisplayTarget(fit.boundaries.body + fit.boundaries.footer),
+    ).toBe(true);
+    expect(fit.boundaries.body).toContain("Whole snowboard 0 —");
+    expect(fit.boundaries.body).toContain("885.95");
+    expect(fit.boundaries.body).toContain("USD");
+    expect(fit.boundaries.body).toContain("Stock: 50");
+    expect(fit.boundaries.body).not.toContain(PRODUCT_SHOW_MORE.en);
+    expect(fit.boundaries.body).not.toContain("Complete verified description");
+    expect(fit.boundaries.footer).toBe(actualFooter);
+    expect(fit.boundaries.footer.endsWith(checkout)).toBe(true);
+    expect(fit.presentation.verifiedProducts).toEqual(before.verifiedProducts);
+    expect(fit.presentation.verified.productFacts).toEqual(
+      before.verified.productFacts,
+    );
+    expect(input).toEqual(before);
+  });
+  it("chooses the largest whole prefix inside the actual footer budget and binds only retained evidence", () => {
+    const input = details(),
+      before = structuredClone(input);
+    const fit = fitVerifiedProductCaption(input, (body) => ({
+      header: "Saved",
+      body,
+      footer: actualFooter,
+    }))!;
+    expect(fit.targetMet).toBe(true);
+    expect(fit.pairs).toHaveLength(1);
+    expect(fit.boundaries.body).not.toMatch(/Whole snowboard [12]/);
+    expect(fit.presentation.verifiedProducts!.products).toEqual(
+      before.verifiedProducts!.products.slice(0, 1),
+    );
+    expect(fit.presentation.verified.productFacts).toEqual(
+      before.verified.productFacts!.slice(0, 1),
+    );
+    expect(fit.boundaries.body).toContain(PRODUCT_SHOW_MORE.en);
+    expect(input).toEqual(before);
+  });
+  it("preserves all selected variant options and truthful variant stock as whole facts", () => {
+    const input = details(1),
+      product = input.verifiedProducts!.products[0]!;
+    product.variantId = "selected-variant";
+    product.selectedOptions = [
+      { name: "Size", value: "Wide" },
+      { name: "Color", value: "Blue" },
+    ];
+    product.stock = { status: "KNOWN", quantity: 5, scope: "VARIANT" };
+    refresh(input);
+    const body = briefProductDetailCandidates(input, { concise: true })![0]!
+      .body;
+    expect(body).toContain("Size: Wide; Color: Blue");
+    expect(body).toContain("Stock (selected variant): 5");
+    expect(
+      briefProductDetailCandidates(input, { concise: true })![0]!.pairs,
+    ).toEqual([{ productId: "p0", variantId: "selected-variant" }]);
+  });
+  it("keeps all verified option values rather than slicing them to fit the soft target", () => {
+    const input = details(1),
+      product = input.verifiedProducts!.products[0]!;
+    product.options = {
+      status: "AVAILABLE",
+      items: [
+        {
+          name: "Size",
+          values: ["Small", "Medium", "Large"],
+          usedForVariants: true,
+        },
+        { name: "Color", values: ["Blue", "White"], usedForVariants: true },
+      ],
+    };
+    const result = verifyCommerceOptionFacts(
+      [{ productId: product.productId, variantId: product.variantId }],
+      [product],
+    );
+    if (result.kind !== "verified") throw Error("options fixture");
+    const optionInput = {
+      ...input,
+      verified: {
+        ...input.verified,
+        disposition: "PRODUCT_OPTIONS" as const,
+        productFacts: [],
+        optionFacts: result.optionFacts,
+      },
+    };
+    const fit = fitVerifiedProductCaption(optionInput, (body) => ({
+      header: "",
+      body,
+      footer: actualFooter,
+    }))!;
+    for (const value of ["Small", "Medium", "Large", "Blue", "White"])
+      expect(fit.boundaries.body).toContain(value);
+    expect(fit.presentation.verified.optionFacts).toEqual(result.optionFacts);
+    expect(fit.presentation.verifiedProducts!.products).toEqual([product]);
+  });
+  it.each([
+    { status: "KNOWN" as const, quantity: 0, scope: "PRODUCT" as const },
+    { status: "NOT_TRACKED" as const },
+    { status: "UNAVAILABLE" as const },
+  ])(
+    "keeps truthful stock status without inventing availability %j",
+    (stock) => {
+      const input = details(1);
+      input.verifiedProducts!.products[0]!.stock = stock;
+      refresh(input);
+      const fit = fitVerifiedProductCaption(input, (body) => ({
+        header: "",
+        body,
+        footer,
+      }))!;
+      expect(fit.presentation.verified.productFacts![0]!.stock).toEqual(stock);
+      if (stock.status === "KNOWN")
+        expect(fit.boundaries.body).toContain("Stock: 0");
+      else expect(fit.boundaries.body).not.toMatch(/Stock: [0-9]/);
+    },
+  );
+  it.each([null, false])(
+    "preserves rich DETAIL shipping qualification with requiresShipping %s",
+    (requiresShipping) => {
+      const input = details(1);
+      input.verified.requiresShipping = requiresShipping;
+      input.envelope.details = {
+        ...input.envelope.details,
+        shippingInformationSelection: { productId: null, variantId: null },
+        responseDisposition: "SHIPPING_INFORMATION_UNVERIFIED",
+      };
+      input.envelope.replyText =
+        "Verified product. Shipping costs could not be verified; check the store shipping policy.";
+      const before = structuredClone(input);
+      expect(
+        fitVerifiedProductCaption(input, (body) => ({
+          header: "",
+          body,
+          footer: actualFooter,
+        })),
+      ).toBeNull();
+      expect(input).toEqual(before);
+    },
+  );
+  it.each(["policy", "unverified", "redirect"])(
+    "preserves every explicit mandatory DETAIL adjunct %s",
+    (kind) => {
+      const input = details(1);
+      input.verified.requiresShipping = false;
+      if (kind === "policy")
+        input.verified.policyUrl = "https://shop.example/policies/shipping";
+      else
+        input.envelope.details = {
+          ...input.envelope.details,
+          responseDisposition:
+            kind === "unverified"
+              ? "SHIPPING_INFORMATION_UNVERIFIED"
+              : "OUT_OF_SCOPE_REDIRECT",
+        };
+      expect(
+        fitVerifiedProductCaption(input, (body) => ({
+          header: "",
+          body,
+          footer,
+        })),
+      ).toBeNull();
+    },
+  );
+  it("counts Unicode points and nonempty lines without rewriting merchant text", () => {
+    expect(captionWithinDisplayTarget("😀".repeat(400))).toBe(true);
+    expect(captionWithinDisplayTarget("😀".repeat(401))).toBe(false);
+    expect(captionWithinDisplayTarget(Array(8).fill("x").join("\r\n"))).toBe(
+      true,
+    );
+    expect(captionWithinDisplayTarget(Array(9).fill("x").join("\n"))).toBe(
+      false,
+    );
+  });
+  it("reports targetnotmet and preserves an entire long footer/title rather than pretending to control Readmore", () => {
+    const input = details(1);
+    const longFooter = actualFooter.replace(
+      checkout,
+      "mandatory".repeat(30) + "\n" + checkout,
+    );
+    const fit = fitVerifiedProductCaption(input, (body) => ({
+      header: "",
+      body,
+      footer: longFooter,
+    }))!;
+    expect(fit.targetMet).toBe(false);
+    expect(fit.boundaries.footer).toBe(longFooter);
+    expect(fit.boundaries.body).toContain("Whole snowboard 0");
+    expect(
+      Array.from(fit.boundaries.body + fit.boundaries.footer).length,
+    ).toBeLessThanOrEqual(1024);
+    expect(
+      fitVerifiedProductCaption(input, (body) => ({
+        header: "",
+        body,
+        footer: "x".repeat(1025),
+      })),
+    ).toBeNull();
+  });
+  it("does not omit required mixed shipping/offer policy merely for a concise detail mode", () => {
+    for (const field of ["requiresShipping", "includeNoVerifiedOffer"]) {
+      const input = details(1);
+      if (field === "requiresShipping") input.verified.requiresShipping = true;
+      else input.verified.includeNoVerifiedOffer = true;
+      expect(
+        fitVerifiedProductCaption(input, (body) => ({
+          header: "",
+          body,
+          footer,
+        })),
+      ).toBeNull();
+    }
+  });
+  it.each(MODA_SUPPORTED_LANGUAGE_TAGS)(
+    "uses concise localized verified stock in %s",
+    (locale) => {
+      const input = details(1);
+      input.verified.locale = locale;
+      const fit = fitVerifiedProductCaption(input, (body) => ({
+        header: "",
+        body,
+        footer,
+      }))!;
+      expect(fit.targetMet).toBe(true);
+      expect(fit.boundaries.body).toContain(SHORT_PRODUCT_STOCK[locale]);
+      expect(fit.boundaries.body).toContain("Whole snowboard 0");
+      expect(fit.boundaries.body).not.toContain("Full narrative");
+    },
+  );
 });

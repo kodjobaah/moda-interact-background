@@ -1,223 +1,454 @@
 import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
 import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
 import { lockRecoveryContext } from "../recovery-conversation/recovery-conversation.sql.js";
-import { readExactAutomatedUsage, removeExactAutomatedUsage } from "../recovery-delivery-compensation/automated-usage.js";
+import {
+  readExactAutomatedUsage,
+  removeExactAutomatedUsage,
+} from "../recovery-delivery-compensation/automated-usage.js";
 import { recoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
-import { PENDING_AUTOMATED_WHATSAPP_CONTENT, type UntouchedReservationIdentity } from "./outbound-whatsapp-admission.types.js";
-import { MessageStatus, UsageMetric, Prisma, type PrismaClient } from "@prisma/client";
+import {
+  PENDING_AUTOMATED_WHATSAPP_CONTENT,
+  type UntouchedReservationIdentity,
+} from "./outbound-whatsapp-admission.types.js";
+import {
+  MessageStatus,
+  UsageMetric,
+  Prisma,
+  type PrismaClient,
+} from "@prisma/client";
 import prisma from "../../lib/db.js";
-import { isDefinitiveWhatsAppError, isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
+import {
+  isDefinitiveWhatsAppError,
+  isSynchronousRecipientFailure,
+} from "../whatsapp-provider-rejection.js";
 import { synchronousRecipientFailureService } from "../synchronous-recipient-failure.service.js";
 
 /** Provider-outcome adapter. Compensation/reachability belongs to existing owners. */
 export class OutboundProviderFailureService {
   constructor(
-    private readonly database: Pick<PrismaClient, "$transaction" | "conversationMessage" | "usageEvent"> = prisma,
-    private readonly synchronousFailure: Pick<typeof synchronousRecipientFailureService, "afterAutomatedRejection"> =
-      synchronousRecipientFailureService,
+    private readonly database: Pick<
+      PrismaClient,
+      "$transaction" | "conversationMessage" | "usageEvent"
+    > = prisma,
+    private readonly synchronousFailure: Pick<
+      typeof synchronousRecipientFailureService,
+      "afterAutomatedRejection"
+    > = synchronousRecipientFailureService,
   ) {}
 
-  async failPrepared(messageId: string, expectedReservation?: UntouchedReservationIdentity): Promise<void> {
+  async failPrepared(
+    messageId: string,
+    expectedReservation?: UntouchedReservationIdentity,
+  ): Promise<void> {
     await this.database.$transaction(async (tx) => {
       let owned = await this.readOwnedUsage(tx, messageId);
       if (!owned) return;
-      if(owned.message.allowanceBlockId||owned.message.conversation.checkoutRecoveryId){
-        const owner=await lockRecoveryContext(tx,owned.message.conversationId);
-        if(!owner||owner.shopId!==owned.shopId)throw new Error("ALLOWANCE_FAILURE_OWNER_MISMATCH");
-        owned=await this.readOwnedUsage(tx,messageId);
-        if(!owned)return;
+      if (
+        owned.message.allowanceBlockId ||
+        owned.message.conversation.checkoutRecoveryId
+      ) {
+        const owner = await lockRecoveryContext(
+          tx,
+          owned.message.conversationId,
+        );
+        if (!owner || owner.shopId !== owned.shopId)
+          throw new Error("ALLOWANCE_FAILURE_OWNER_MISMATCH");
+        owned = await this.readOwnedUsage(tx, messageId);
+        if (!owned) return;
       }
-      if (expectedReservation && (owned.shopId !== expectedReservation.shopId ||
+      if (
+        expectedReservation &&
+        (owned.shopId !== expectedReservation.shopId ||
           owned.message.conversationId !== expectedReservation.conversationId ||
-          owned.message.content !== PENDING_AUTOMATED_WHATSAPP_CONTENT || owned.message.outboundPresentation !== null)) return;
-      if (!owned.usage && owned.message.senderType === "AUTOMATION" && owned.message.conversation.checkoutRecoveryId) return;
+          owned.message.content !== PENDING_AUTOMATED_WHATSAPP_CONTENT ||
+          owned.message.outboundPresentation !== null)
+      )
+        return;
+      if (
+        !owned.usage &&
+        owned.message.senderType === "AUTOMATION" &&
+        owned.message.conversation.checkoutRecoveryId
+      )
+        return;
       let initial: string | undefined;
       if (owned.usage?.idempotencyKey.startsWith("recovery-outreach:")) {
-        const attemptId = /^recovery-outreach:([A-Za-z0-9_-]+)$/.exec(owned.usage.idempotencyKey)?.[1];
+        const attemptId = /^recovery-outreach:([A-Za-z0-9_-]+)$/.exec(
+          owned.usage.idempotencyKey,
+        )?.[1];
         const recoveryId = owned.message.conversation.checkoutRecoveryId;
-        if (!attemptId || !recoveryId || owned.message.senderType !== "AUTOMATION" ||
-            owned.usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE") return;
+        if (
+          !attemptId ||
+          !recoveryId ||
+          owned.message.senderType !== "AUTOMATION" ||
+          owned.usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE"
+        )
+          return;
         const attempt = await tx.recoveryOutreachAttempt.findUnique({
           where: { id: attemptId },
-          select: { checkoutRecoveryId: true, sequence: true, trigger: true, outboundMessageId: true },
+          select: {
+            checkoutRecoveryId: true,
+            sequence: true,
+            trigger: true,
+            outboundMessageId: true,
+          },
         });
-        if (!attempt || attempt.checkoutRecoveryId !== recoveryId ||
-            (attempt.outboundMessageId && attempt.outboundMessageId !== messageId) ||
-            (owned.message.recoveryOutreachAttempt && owned.message.recoveryOutreachAttempt.id !== attemptId)) return;
-        if (attempt.trigger === "INITIAL" && (attempt.sequence === 1 || attempt.sequence >= 3 && isInitialRetryId(attemptId))) {
-          if (!await this.lockInitial(tx, owned, attemptId)) return;
+        if (
+          !attempt ||
+          attempt.checkoutRecoveryId !== recoveryId ||
+          (attempt.outboundMessageId &&
+            attempt.outboundMessageId !== messageId) ||
+          (owned.message.recoveryOutreachAttempt &&
+            owned.message.recoveryOutreachAttempt.id !== attemptId)
+        )
+          return;
+        if (
+          attempt.trigger === "INITIAL" &&
+          (attempt.sequence === 1 ||
+            (attempt.sequence >= 3 && isInitialRetryId(attemptId)))
+        ) {
+          if (!(await this.lockInitial(tx, owned, attemptId))) return;
           initial = attemptId;
-        } else if (attempt.sequence !== 2 ||
-            (attempt.trigger !== "NO_RESPONSE_FOLLOW_UP" && attempt.trigger !== "POST_WINDOW_FOLLOW_UP")) {
+        } else if (
+          attempt.sequence !== 2 ||
+          (attempt.trigger !== "NO_RESPONSE_FOLLOW_UP" &&
+            attempt.trigger !== "POST_WINDOW_FOLLOW_UP")
+        ) {
           return;
         }
       }
       const where: Prisma.ConversationMessageWhereInput = {
-        id: messageId, conversationId: owned.message.conversationId, direction: "OUTBOUND",
-        ...(expectedReservation ? {content: PENDING_AUTOMATED_WHATSAPP_CONTENT,
-          outboundPresentation: {equals: Prisma.DbNull},
-          moderationAssessments: {none: {}},
-          conversation: {is: {id: expectedReservation.conversationId, OR: [
-            {shopId: expectedReservation.shopId, checkoutRecovery: null},
-            {checkoutRecovery: {is: {shopId: expectedReservation.shopId}}, OR: [{shopId: null}, {shopId: expectedReservation.shopId}]},
-          ]}},
-        } : {}),
+        id: messageId,
+        conversationId: owned.message.conversationId,
+        direction: "OUTBOUND",
+        ...(expectedReservation
+          ? {
+              content: PENDING_AUTOMATED_WHATSAPP_CONTENT,
+              outboundPresentation: { equals: Prisma.DbNull },
+              moderationAssessments: { none: {} },
+              conversation: {
+                is: {
+                  id: expectedReservation.conversationId,
+                  OR: [
+                    {
+                      shopId: expectedReservation.shopId,
+                      checkoutRecovery: null,
+                    },
+                    {
+                      checkoutRecovery: {
+                        is: { shopId: expectedReservation.shopId },
+                      },
+                      OR: [
+                        { shopId: null },
+                        { shopId: expectedReservation.shopId },
+                      ],
+                    },
+                  ],
+                },
+              },
+            }
+          : {}),
         senderType: initial ? "AUTOMATION" : { in: ["AUTOMATION", "AGENT"] },
-        providerDispatchKey: null, providerDispatchAdmittedAt: null,
-        providerDispatchControlRevision: null, providerMessageId: null,
-        sentAt: null, deliveredAt: null, readAt: null, failedAt: null, providerFailureCode: null,
+        providerDispatchKey: null,
+        providerDispatchAdmittedAt: null,
+        providerDispatchControlRevision: null,
+        providerMessageId: null,
+        sentAt: null,
+        deliveredAt: null,
+        readAt: null,
+        failedAt: null,
+        providerFailureCode: null,
       };
       const changed = await tx.conversationMessage.updateMany({
-        where: { ...where, status: MessageStatus.PENDING }, data: { status: MessageStatus.FAILED },
+        where: { ...where, status: MessageStatus.PENDING },
+        data: { status: MessageStatus.FAILED },
       });
-      if (!changed.count && !await tx.conversationMessage.findFirst({
-        where: { ...where, status: MessageStatus.FAILED }, select: { id: true },
-      })) return;
-      if (initial) await this.closeInitial(tx, owned, initial, "PRE_PROVIDER_REFUSED");
+      if (
+        !changed.count &&
+        !(await tx.conversationMessage.findFirst({
+          where: { ...where, status: MessageStatus.FAILED },
+          select: { id: true },
+        }))
+      )
+        return;
+      if (initial)
+        await this.closeInitial(tx, owned, initial, "PRE_PROVIDER_REFUSED");
       if (owned.usage) await this.deleteOwnedUsage(tx, owned.usage);
     });
   }
 
-  private async readOwnedUsage(tx: Prisma.TransactionClient, messageId: string) {
+  private async readOwnedUsage(
+    tx: Prisma.TransactionClient,
+    messageId: string,
+  ) {
     const message = await tx.conversationMessage.findUnique({
       where: { id: messageId },
-      include: { merchantSendCommand: { select: { id: true } },
+      include: {
+        merchantSendCommand: { select: { id: true } },
         recoveryOutreachAttempt: { select: { id: true } },
-        conversation: { include: { checkoutRecovery: { select: { shopId: true } } } } },
+        conversation: {
+          include: { checkoutRecovery: { select: { shopId: true } } },
+        },
+      },
     });
-    if (!message || message.direction !== "OUTBOUND" || message.merchantSendCommand ||
-        (message.senderType !== "AUTOMATION" && message.senderType !== "AGENT")) return null;
-    const shopId = message.conversation.checkoutRecovery?.shopId ?? message.conversation.shopId;
-    if (!shopId || (message.conversation.shopId && message.conversation.shopId !== shopId)) return null;
+    if (
+      !message ||
+      message.direction !== "OUTBOUND" ||
+      message.merchantSendCommand ||
+      (message.senderType !== "AUTOMATION" && message.senderType !== "AGENT")
+    )
+      return null;
+    const shopId =
+      message.conversation.checkoutRecovery?.shopId ??
+      message.conversation.shopId;
+    if (
+      !shopId ||
+      (message.conversation.shopId && message.conversation.shopId !== shopId)
+    )
+      return null;
     const usage = await tx.usageEvent.findMany({
-      where: { sourceId: messageId, metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE }, take: 2,
+      where: {
+        sourceId: messageId,
+        metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE,
+      },
+      take: 2,
     });
-    if (usage.length > 1 || (usage[0] && (usage[0].shopId !== shopId || Number(usage[0].quantity) !== 1)))
+    if (
+      usage.length > 1 ||
+      (usage[0] &&
+        (usage[0].shopId !== shopId || Number(usage[0].quantity) !== 1))
+    )
       return null;
     return { shopId, message, usage: usage[0] };
   }
 
   private async lockInitial(
-    tx: Prisma.TransactionClient, owned: NonNullable<Awaited<ReturnType<OutboundProviderFailureService["readOwnedUsage"]>>>,
-    attemptId: string, recipient?: string,
+    tx: Prisma.TransactionClient,
+    owned: NonNullable<
+      Awaited<ReturnType<OutboundProviderFailureService["readOwnedUsage"]>>
+    >,
+    attemptId: string,
+    recipient?: string,
   ): Promise<boolean> {
-    if (!owned.usage || owned.usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" || owned.message.senderType !== "AUTOMATION" || !owned.message.conversation.checkoutRecoveryId)
+    if (
+      !owned.usage ||
+      owned.usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" ||
+      owned.message.senderType !== "AUTOMATION" ||
+      !owned.message.conversation.checkoutRecoveryId
+    )
       return false;
     const shop = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "commerce"."Shop" WHERE "id"=${owned.shopId} FOR UPDATE`;
     if (shop.length !== 1) return false;
     const retry = isInitialRetryId(attemptId);
-    const attempt = retry ? await tx.$queryRaw<Array<{ id: string; recipient: string }>>`
+    const attempt = retry
+      ? await tx.$queryRaw<Array<{ id: string; recipient: string }>>`
       SELECT "id","recipient" FROM "commerce"."RecoveryOutreachAttempt"
       WHERE "id"=${attemptId} AND "checkoutRecoveryId"=${owned.message.conversation.checkoutRecoveryId}
         AND "sequence">=3 AND "trigger"='INITIAL' AND "status" IN ('PENDING','CAPACITY_BLOCKED')
         AND "sentAt" IS NULL AND "followUpDueAt" IS NULL AND "outboundMessageId" IS NULL
-      FOR UPDATE` : await tx.$queryRaw<Array<{ id: string; recipient: string }>>`
+      FOR UPDATE`
+      : await tx.$queryRaw<Array<{ id: string; recipient: string }>>`
       SELECT "id","recipient" FROM "commerce"."RecoveryOutreachAttempt"
       WHERE "id"=${attemptId} AND "checkoutRecoveryId"=${owned.message.conversation.checkoutRecoveryId}
         AND "sequence"=1 AND "trigger"='INITIAL' AND "status" IN ('PENDING','CAPACITY_BLOCKED')
         AND "sentAt" IS NULL AND "followUpDueAt" IS NULL AND "outboundMessageId" IS NULL
       FOR UPDATE`;
-    if (attempt.length !== 1 || (recipient !== undefined && attempt[0]?.recipient !== recipient)) return false;
-    if (retry) await readRetryFundingLineage(tx, { recoveryId: owned.message.conversation.checkoutRecoveryId,
-      conversationId: owned.message.conversationId, attemptId });
+    if (
+      attempt.length !== 1 ||
+      (recipient !== undefined && attempt[0]?.recipient !== recipient)
+    )
+      return false;
+    if (retry)
+      await readRetryFundingLineage(tx, {
+        recoveryId: owned.message.conversation.checkoutRecoveryId,
+        conversationId: owned.message.conversationId,
+        attemptId,
+      });
     const message = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "whatsapp"."ConversationMessage"
       WHERE "id"=${owned.message.id} AND "conversationId"=${owned.message.conversationId}
       FOR UPDATE`;
     if (message.length !== 1) return false;
     const fresh = await this.readOwnedUsage(tx, owned.message.id);
-    return fresh?.shopId === owned.shopId && fresh.usage?.id === owned.usage.id &&
+    return (
+      fresh?.shopId === owned.shopId &&
+      fresh.usage?.id === owned.usage.id &&
       fresh.usage?.idempotencyKey === owned.usage.idempotencyKey &&
-      fresh.message.conversation.checkoutRecoveryId === owned.message.conversation.checkoutRecoveryId;
+      fresh.message.conversation.checkoutRecoveryId ===
+        owned.message.conversation.checkoutRecoveryId
+    );
   }
 
   private async closeInitial(
-    tx: Prisma.TransactionClient, owned: NonNullable<Awaited<ReturnType<OutboundProviderFailureService["readOwnedUsage"]>>>,
-    attemptId: string, failureCode: string,
+    tx: Prisma.TransactionClient,
+    owned: NonNullable<
+      Awaited<ReturnType<OutboundProviderFailureService["readOwnedUsage"]>>
+    >,
+    attemptId: string,
+    failureCode: string,
   ) {
     const updated = await tx.recoveryOutreachAttempt.updateMany({
       where: {
-        id: attemptId, checkoutRecoveryId: owned.message.conversation.checkoutRecoveryId!,
-        sequence: isInitialRetryId(attemptId) ? {gte: 3} : 1, trigger: "INITIAL", status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
-        outboundMessageId: null, sentAt: null, followUpDueAt: null,
+        id: attemptId,
+        checkoutRecoveryId: owned.message.conversation.checkoutRecoveryId!,
+        sequence: isInitialRetryId(attemptId) ? { gte: 3 } : 1,
+        trigger: "INITIAL",
+        status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
+        outboundMessageId: null,
+        sentAt: null,
+        followUpDueAt: null,
       },
-      data: { outboundMessageId: owned.message.id, status: "FAILED", failureCode, closedAt: new Date() },
+      data: {
+        outboundMessageId: owned.message.id,
+        status: "FAILED",
+        failureCode,
+        closedAt: new Date(),
+      },
     });
-    if (updated.count !== 1) throw new Error("INITIAL_OUTREACH_FAILURE_LINEAGE_CONFLICT");
+    if (updated.count !== 1)
+      throw new Error("INITIAL_OUTREACH_FAILURE_LINEAGE_CONFLICT");
   }
 
   private async deleteOwnedUsage(
-    tx: Prisma.TransactionClient, usage: { id: string; shopId: string; sourceId: string | null; idempotencyKey: string },
+    tx: Prisma.TransactionClient,
+    usage: {
+      id: string;
+      shopId: string;
+      sourceId: string | null;
+      idempotencyKey: string;
+    },
   ) {
     const deleted = await tx.usageEvent.deleteMany({
-      where: { id: usage.id, shopId: usage.shopId, sourceId: usage.sourceId,
-        idempotencyKey: usage.idempotencyKey, metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE },
+      where: {
+        id: usage.id,
+        shopId: usage.shopId,
+        sourceId: usage.sourceId,
+        idempotencyKey: usage.idempotencyKey,
+        metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE,
+      },
     });
-    if (deleted.count !== 1) throw new Error("OUTBOUND_FAILURE_USAGE_LINEAGE_CONFLICT");
+    if (deleted.count !== 1)
+      throw new Error("OUTBOUND_FAILURE_USAGE_LINEAGE_CONFLICT");
   }
 
   async afterProviderError(
-    messageId: string, recipient: string, error: unknown,
+    messageId: string,
+    recipient: string,
+    error: unknown,
     preserveInitialAdmission = false,
   ): Promise<void> {
     if (isSynchronousRecipientFailure(error)) {
       // Keep the exact usage row until compensation derives attempt/source lineage.
-      await this.synchronousFailure.afterAutomatedRejection(messageId, recipient);
+      await this.synchronousFailure.afterAutomatedRejection(
+        messageId,
+        recipient,
+      );
     } else if (isDefinitiveWhatsAppError(error)) {
       if (preserveInitialAdmission) {
         await this.database.$transaction(async (tx) => {
           const owned = await this.readOwnedUsage(tx, messageId);
-          const initial = /^recovery-outreach:([A-Za-z0-9_-]+)$/.exec(owned?.usage?.idempotencyKey ?? "")?.[1];
-          if (!owned?.usage || !initial || !await this.lockInitial(tx, owned, initial, recipient))
+          const initial = /^recovery-outreach:([A-Za-z0-9_-]+)$/.exec(
+            owned?.usage?.idempotencyKey ?? "",
+          )?.[1];
+          if (
+            !owned?.usage ||
+            !initial ||
+            !(await this.lockInitial(tx, owned, initial, recipient))
+          )
             throw new Error("INITIAL_OUTREACH_FAILURE_LINEAGE_CONFLICT");
           const changed = await tx.conversationMessage.updateMany({
             where: {
-              id: messageId, conversationId: owned.message.conversationId, direction: "OUTBOUND",
-              senderType: "AUTOMATION", status: MessageStatus.PENDING,
-              providerDispatchKey: { not: null }, providerDispatchAdmittedAt: { not: null },
-              providerDispatchControlRevision: { not: null }, providerMessageId: null,
-              sentAt: null, deliveredAt: null, readAt: null, failedAt: null,
+              id: messageId,
+              conversationId: owned.message.conversationId,
+              direction: "OUTBOUND",
+              senderType: "AUTOMATION",
+              status: MessageStatus.PENDING,
+              providerDispatchKey: { not: null },
+              providerDispatchAdmittedAt: { not: null },
+              providerDispatchControlRevision: { not: null },
+              providerMessageId: null,
+              sentAt: null,
+              deliveredAt: null,
+              readAt: null,
+              failedAt: null,
             },
-            data: { status: MessageStatus.FAILED, failedAt: new Date(),
-              ...(error.providerCode ? { providerFailureCode: error.providerCode } : {}) },
+            data: {
+              status: MessageStatus.FAILED,
+              failedAt: new Date(),
+              ...(error.providerCode
+                ? { providerFailureCode: error.providerCode }
+                : {}),
+            },
           });
-          if (changed.count !== 1) throw new Error("INITIAL_OUTREACH_FAILURE_LINEAGE_CONFLICT");
+          if (changed.count !== 1)
+            throw new Error("INITIAL_OUTREACH_FAILURE_LINEAGE_CONFLICT");
           await this.closeInitial(tx, owned, initial, "PROVIDER_REJECTED");
           await this.deleteOwnedUsage(tx, owned.usage);
         });
       } else if (error.code === "provider-rejected" && error.providerCode) {
         await this.database.conversationMessage.update({
           where: { id: messageId },
-          data: { status: MessageStatus.FAILED, failedAt: new Date(),
-            providerFailureCode: error.providerCode },
+          data: {
+            status: MessageStatus.FAILED,
+            failedAt: new Date(),
+            providerFailureCode: error.providerCode,
+          },
         });
         await this.removeUsage(messageId);
       } else {
         await this.database.conversationMessage.update({
-          where: { id: messageId }, data: { status: MessageStatus.FAILED, failedAt:new Date(), providerFailureCode:error.code === "provider-rejected" ? "PROVIDER_REJECTED" : "CONFIGURATION_MISSING" },
+          where: { id: messageId },
+          data: {
+            status: MessageStatus.FAILED,
+            failedAt: new Date(),
+            providerFailureCode:
+              error.code === "provider-rejected"
+                ? "PROVIDER_REJECTED"
+                : "CONFIGURATION_MISSING",
+          },
         });
         await this.removeUsage(messageId);
       }
     }
-    if(isDefinitiveWhatsAppError(error)){
-      const message=await this.database.conversationMessage.findUnique({where:{id:messageId},select:{conversationId:true,allowanceBlockId:true}});
-      if(message?.allowanceBlockId)await recoveryAllowanceService.reconcileConversation(message.conversationId);
+    if (isDefinitiveWhatsAppError(error)) {
+      const message = await this.database.conversationMessage.findUnique({
+        where: { id: messageId },
+        select: { conversationId: true, allowanceBlockId: true },
+      });
+      if (message?.allowanceBlockId)
+        await recoveryAllowanceService.reconcileConversation(
+          message.conversationId,
+        );
     }
     // No durable final disposition for timeout/unknown provider acceptance.
   }
 
   private async removeUsage(messageId: string): Promise<void> {
-    const message=await this.database.conversationMessage.findUnique({where:{id:messageId},select:{conversationId:true,allowanceBlockId:true,conversation:{select:{checkoutRecoveryId:true}}}});
-    if(!message?.allowanceBlockId&&!message?.conversation.checkoutRecoveryId){
-      await this.database.usageEvent.deleteMany({where:{sourceId:messageId,metric:UsageMetric.OUTBOUND_AUTOMATED_MESSAGE}});
+    const message = await this.database.conversationMessage.findUnique({
+      where: { id: messageId },
+      select: {
+        conversationId: true,
+        allowanceBlockId: true,
+        conversation: { select: { checkoutRecoveryId: true } },
+      },
+    });
+    if (
+      !message?.allowanceBlockId &&
+      !message?.conversation.checkoutRecoveryId
+    ) {
+      await this.database.usageEvent.deleteMany({
+        where: {
+          sourceId: messageId,
+          metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE,
+        },
+      });
       return;
     }
-    await this.database.$transaction(async tx=>{
-      const owner=await lockRecoveryContext(tx,message.conversationId);
-      if(!owner)throw new Error("ALLOWANCE_FAILURE_OWNER_UNAVAILABLE");
-      const usage=await readExactAutomatedUsage(tx,owner.shopId,messageId);
-      await removeExactAutomatedUsage(tx,owner.shopId,messageId,usage);
+    await this.database.$transaction(async (tx) => {
+      const owner = await lockRecoveryContext(tx, message.conversationId);
+      if (!owner) throw new Error("ALLOWANCE_FAILURE_OWNER_UNAVAILABLE");
+      const usage = await readExactAutomatedUsage(tx, owner.shopId, messageId);
+      await removeExactAutomatedUsage(tx, owner.shopId, messageId, usage);
     });
   }
 }

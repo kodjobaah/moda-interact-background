@@ -4,7 +4,10 @@ const hoisted = vi.hoisted(() => ({
   processor: undefined as undefined | ((job: any) => Promise<void>),
   queueName: undefined as string | undefined,
   options: undefined as any,
-  observe: vi.fn(async (_definition: unknown, _job: unknown, work: () => Promise<unknown>) => work()),
+  observe: vi.fn(
+    async (_definition: unknown, _job: unknown, work: () => Promise<unknown>) =>
+      work(),
+  ),
   telemetry: { name: "telemetry" },
   listeners: new Map<string, (...args: any[]) => void>(),
   errorLog: vi.fn(),
@@ -12,7 +15,11 @@ const hoisted = vi.hoisted(() => ({
 
 vi.mock("bullmq", () => ({
   Worker: class {
-    constructor(queueName: string, processor: typeof hoisted.processor, options: unknown) {
+    constructor(
+      queueName: string,
+      processor: typeof hoisted.processor,
+      options: unknown,
+    ) {
       hoisted.queueName = queueName;
       hoisted.processor = processor ?? undefined;
       hoisted.options = options;
@@ -32,14 +39,22 @@ vi.mock("../../../src/runtime/deployment-environment.js", () => ({
 vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
   createBullMQTelemetry: vi.fn(() => hoisted.telemetry),
 }));
-vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: { name: "redis" } }));
+vi.mock("../../../src/lib/redis.js", () => ({
+  connectionRedis: { name: "redis" },
+}));
 vi.mock("../../../src/observability/worker-metrics.js", () => ({
   observeWorkerJob: hoisted.observe,
 }));
 
-import { MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME, MERCHANT_KNOWLEDGE_QUEUE_NAME } from "@modainteract/moda-interact-shared/merchant-knowledge";
+import {
+  MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME,
+  MERCHANT_KNOWLEDGE_QUEUE_NAME,
+} from "@modainteract/moda-interact-shared/merchant-knowledge";
 
-import { createMerchantKnowledgeWorker, type MerchantKnowledgeJobProcessor } from "../../../src/workers/merchant-knowledge.worker.js";
+import {
+  createMerchantKnowledgeWorker,
+  type MerchantKnowledgeJobProcessor,
+} from "../../../src/workers/merchant-knowledge.worker.js";
 
 const payload = {
   schemaVersion: 1,
@@ -81,7 +96,9 @@ describe("Merchant Knowledge worker", () => {
   });
 
   it("uses the dedicated queue, shared Redis connection and BullMQ telemetry", async () => {
-    const worker = createHarness({ processJob: vi.fn().mockResolvedValue(undefined) });
+    const worker = createHarness({
+      processJob: vi.fn().mockResolvedValue(undefined),
+    });
     await worker.run();
 
     expect(hoisted.queueName).toBe(MERCHANT_KNOWLEDGE_QUEUE_NAME);
@@ -106,7 +123,9 @@ describe("Merchant Knowledge worker", () => {
 
     await expect(worker.run()).resolves.toBeUndefined();
     expect(processJob).toHaveBeenCalledWith(payload);
-    await expect(worker.run(createJob({ data: { shopId: "invalid" } }))).rejects.toThrow();
+    await expect(
+      worker.run(createJob({ data: { shopId: "invalid" } })),
+    ).rejects.toThrow();
     expect(processJob).toHaveBeenCalledOnce();
   });
 
@@ -128,22 +147,31 @@ describe("Merchant Knowledge worker", () => {
     const markTerminalFailure = vi.fn().mockResolvedValue(undefined);
     const worker = createHarness({ processJob, markTerminalFailure });
 
-    await expect(worker.run(createJob({ attemptsMade: 2, opts: { attempts: 3 } }))).rejects.toBe(failure);
+    await expect(
+      worker.run(createJob({ attemptsMade: 2, opts: { attempts: 3 } })),
+    ).rejects.toBe(failure);
     expect(markTerminalFailure).toHaveBeenCalledWith({
       job: payload,
       failureCode: "Acquisition_Failure___secret",
     });
-    expect(JSON.stringify(markTerminalFailure.mock.calls)).not.toContain("sensitive source content");
+    expect(JSON.stringify(markTerminalFailure.mock.calls)).not.toContain(
+      "sensitive source content",
+    );
   });
 
   it("logs the actual BullMQ failure message and context", () => {
     createHarness({ processJob: vi.fn() });
     const original = new Error("R2 returned HTTP 503 while retrieving source");
     hoisted.listeners.get("failed")?.(createJob(), original);
-    expect(hoisted.errorLog).toHaveBeenCalledWith("merchant_knowledge.job.failed", expect.objectContaining({
-      shopId: "shop-1", sourceRevisionId: "revision-1",
-      errorMessage: "R2 returned HTTP 503 while retrieving source", error: original,
-    }));
+    expect(hoisted.errorLog).toHaveBeenCalledWith(
+      "merchant_knowledge.job.failed",
+      expect.objectContaining({
+        shopId: "shop-1",
+        sourceRevisionId: "revision-1",
+        errorMessage: "R2 returned HTTP 503 while retrieving source",
+        error: original,
+      }),
+    );
   });
 
   it("does not mark a retryable failure as terminal", async () => {
@@ -151,7 +179,9 @@ describe("Merchant Knowledge worker", () => {
     const markTerminalFailure = vi.fn().mockResolvedValue(undefined);
     const worker = createHarness({ processJob, markTerminalFailure });
 
-    await expect(worker.run(createJob({ attemptsMade: 1, opts: { attempts: 3 } }))).rejects.toThrow("retry me");
+    await expect(
+      worker.run(createJob({ attemptsMade: 1, opts: { attempts: 3 } })),
+    ).rejects.toThrow("retry me");
     expect(markTerminalFailure).not.toHaveBeenCalled();
   });
 });

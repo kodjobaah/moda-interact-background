@@ -1,16 +1,26 @@
-import type { RecoveryStage, TemplateUnavailableReason } from "./recovery-template.types.js";
+import type {
+  RecoveryStage,
+  TemplateUnavailableReason,
+} from "./recovery-template.types.js";
 
 export type InitialCheckoutItemsBindingDecision =
   | Readonly<{ ok: true; bodyPosition: number | null }>
-  | Readonly<{ ok: false; reason: Extract<TemplateUnavailableReason,
-      "BINDINGS_INVALID" | "DEFINITION_UNAVAILABLE"> }>;
+  | Readonly<{
+      ok: false;
+      reason: Extract<
+        TemplateUnavailableReason,
+        "BINDINGS_INVALID" | "DEFINITION_UNAVAILABLE"
+      >;
+    }>;
 
 /** Enforces the v1 initial-message basket contract without replacing the
  * frozen component digest and token checks in prepareFrozenComponents(). */
-export function decideInitialCheckoutItemsBinding(input: Readonly<{
-  stage: RecoveryStage;
-  parameterBindingsSnapshot: unknown;
-}>): InitialCheckoutItemsBindingDecision {
+export function decideInitialCheckoutItemsBinding(
+  input: Readonly<{
+    stage: RecoveryStage;
+    parameterBindingsSnapshot: unknown;
+  }>,
+): InitialCheckoutItemsBindingDecision {
   if (input.stage === "FOLLOW_UP") return { ok: true, bodyPosition: null };
   const snapshot = input.parameterBindingsSnapshot;
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
@@ -28,8 +38,15 @@ export function decideInitialCheckoutItemsBinding(input: Readonly<{
       return { ok: false, reason: "BINDINGS_INVALID" };
     }
   }
-  const summaryBindings = body.filter((binding) =>
-    (binding as Record<string, unknown>).variable === "checkout.itemsSummary");
-  if (summaryBindings.length !== 1) return { ok: false, reason: "DEFINITION_UNAVAILABLE" };
-  return { ok: true, bodyPosition: (summaryBindings[0] as Record<string, unknown>).position as number };
+  const summaryBindings = body.filter(
+    (binding) =>
+      (binding as Record<string, unknown>).variable === "checkout.itemsSummary",
+  );
+  if (summaryBindings.length !== 1)
+    return { ok: false, reason: "DEFINITION_UNAVAILABLE" };
+  return {
+    ok: true,
+    bodyPosition: (summaryBindings[0] as Record<string, unknown>)
+      .position as number,
+  };
 }

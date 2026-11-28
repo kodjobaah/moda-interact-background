@@ -11,9 +11,13 @@ function createQueue() {
   };
 }
 
-function createDatabase(unknownBatch: Record<string, unknown>, updateCount = 1) {
+function createDatabase(
+  unknownBatch: Record<string, unknown>,
+  updateCount = 1,
+) {
   return {
-    $queryRaw: vi.fn()
+    $queryRaw: vi
+      .fn()
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
@@ -67,7 +71,9 @@ describe("StoreCategoryTranslationReconciliationService provider correlation", (
       const database = createDatabase(unknownBatch);
       const queue = createQueue();
       const provider = {
-        findBatchByCorrelation: vi.fn().mockResolvedValue(terminalCorrelation(status)),
+        findBatchByCorrelation: vi
+          .fn()
+          .mockResolvedValue(terminalCorrelation(status)),
       };
       const resolve = vi.fn().mockResolvedValue("provider-api-key");
       const service = new StoreCategoryTranslationReconciliationService({
@@ -82,14 +88,23 @@ describe("StoreCategoryTranslationReconciliationService provider correlation", (
       expect(result.repairedJobs).toBe(1);
       expect(database.$executeRaw).toHaveBeenCalledOnce();
       const update = database.$executeRaw.mock.calls[0]?.[0];
-      expect(update.sql).toContain('UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"');
-      expect(update.sql).toContain('"status" = \'SUBMITTED\'');
+      expect(update.sql).toContain(
+        'UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"',
+      );
+      expect(update.sql).toContain("\"status\" = 'SUBMITTED'");
       expect(update.sql).toContain('"nextPollAt" = NOW()');
       expect(update.sql).not.toContain("CommerceStoreCategoryTranslationItem");
       expect(queue.add).toHaveBeenCalledWith(
         "store-category-translation-batch-poll",
-        expect.objectContaining({ translationBatchId: "batch-1", pollSequence: 3 }),
-        expect.objectContaining({ jobId: expect.stringContaining("store-category-translation-batch-poll-batch-1-3") }),
+        expect.objectContaining({
+          translationBatchId: "batch-1",
+          pollSequence: 3,
+        }),
+        expect.objectContaining({
+          jobId: expect.stringContaining(
+            "store-category-translation-batch-poll-batch-1-3",
+          ),
+        }),
       );
     },
   );
@@ -98,13 +113,16 @@ describe("StoreCategoryTranslationReconciliationService provider correlation", (
     const database = createDatabase(unknownBatch, 0);
     const queue = createQueue();
     const provider = {
-      findBatchByCorrelation: vi.fn().mockResolvedValue(terminalCorrelation("failed")),
+      findBatchByCorrelation: vi
+        .fn()
+        .mockResolvedValue(terminalCorrelation("failed")),
     };
     const service = new StoreCategoryTranslationReconciliationService({
       database: database as any,
       queue: queue as any,
       providerFactory: () => provider as any,
-      credentialResolverFactory: () => ({ resolve: vi.fn().mockResolvedValue("provider-api-key") }) as any,
+      credentialResolverFactory: () =>
+        ({ resolve: vi.fn().mockResolvedValue("provider-api-key") }) as any,
     });
 
     const result = await service.reconcile(backgroundRuntimeConfig());
@@ -114,7 +132,8 @@ describe("StoreCategoryTranslationReconciliationService provider correlation", (
   });
   it("assembles a PROCESSING run through the batch assembly service and restores its submit job", async () => {
     const database = {
-      $queryRaw: vi.fn()
+      $queryRaw: vi
+        .fn()
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ id: "run-1" }])
         .mockResolvedValueOnce([])
@@ -155,8 +174,11 @@ describe("StoreCategoryTranslationReconciliationService provider correlation", (
     expect(queue.add).toHaveBeenCalledWith(
       "store-category-translation-batch-submit",
       expect.objectContaining({ translationBatchId: "batch-1" }),
-      expect.objectContaining({ jobId: expect.stringContaining("store-category-translation-batch-submit-batch-1") }),
+      expect.objectContaining({
+        jobId: expect.stringContaining(
+          "store-category-translation-batch-submit-batch-1",
+        ),
+      }),
     );
   });
-
 });

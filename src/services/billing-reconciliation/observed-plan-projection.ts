@@ -29,9 +29,11 @@ export function classifyObservedPlanProjection(
 
   return {
     planUsable,
-    executableMapped: planUsable
-      && plan !== null
-      && (status === SubscriptionProjectionStatus.ACTIVE || status === SubscriptionProjectionStatus.TRIALING),
+    executableMapped:
+      planUsable &&
+      plan !== null &&
+      (status === SubscriptionProjectionStatus.ACTIVE ||
+        status === SubscriptionProjectionStatus.TRIALING),
     status,
     syncErrorCode: plan && !plan.active ? "UNMAPPED_PLAN_HANDLE" : null,
   };
@@ -39,8 +41,13 @@ export function classifyObservedPlanProjection(
 
 export function hasValidProviderBillingCycle(
   provider: PartnerSubscription,
-): provider is PartnerSubscription & { currentPeriodStart: Date; currentPeriodEnd: Date } {
-  return provider.currentPeriodStart !== null
-    && provider.currentPeriodEnd !== null
-    && provider.currentPeriodStart < provider.currentPeriodEnd;
+): provider is PartnerSubscription & {
+  currentPeriodStart: Date;
+  currentPeriodEnd: Date;
+} {
+  return (
+    provider.currentPeriodStart !== null &&
+    provider.currentPeriodEnd !== null &&
+    provider.currentPeriodStart < provider.currentPeriodEnd
+  );
 }

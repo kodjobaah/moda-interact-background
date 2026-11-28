@@ -1,4 +1,7 @@
-import { isInitialOutreachIdentity, isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
+import {
+  isInitialOutreachIdentity,
+  isInitialRetryId,
+} from "../../domain/recovery-outreach-identity.js";
 import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
 import {
   MerchantSupportMessageKind,
@@ -13,7 +16,10 @@ import {
   UsageMetric,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
@@ -25,7 +31,11 @@ import type {
 
 type NoticeDatabase = Pick<PrismaClient, "$transaction">;
 type NoticeLogger = Pick<StructuredLogger, "info" | "error">;
-type ErrorCategory = "INVALID_INPUT" | "LINEAGE_MISMATCH" | "FINALIZATION_CONFLICT" | "PERSISTENCE_FAILURE";
+type ErrorCategory =
+  | "INVALID_INPUT"
+  | "LINEAGE_MISMATCH"
+  | "FINALIZATION_CONFLICT"
+  | "PERSISTENCE_FAILURE";
 type NoticeEvent =
   | "recovery.initial_outreach_support_notice.created"
   | "recovery.initial_outreach_support_notice.disabled"
@@ -44,7 +54,11 @@ const outcomeEvents = {
   replayed: "recovery.initial_outreach_support_notice.replayed",
   "retry-finalized": "recovery.delivery_retry.attempt_finalized",
 } as const;
-const confirmedMessageStatuses: MessageStatus[] = [MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ];
+const confirmedMessageStatuses: MessageStatus[] = [
+  MessageStatus.SENT,
+  MessageStatus.DELIVERED,
+  MessageStatus.READ,
+];
 const replayableStatuses: RecoveryOutreachStatus[] = [
   RecoveryOutreachStatus.WAITING_FOR_RESPONSE,
   RecoveryOutreachStatus.ENGAGED,
@@ -54,24 +68,36 @@ const initialPendingStatuses: RecoveryOutreachStatus[] = [
   RecoveryOutreachStatus.PENDING,
   RecoveryOutreachStatus.CAPACITY_BLOCKED,
 ];
-const sourceKeyFor = (attemptId: string) => `recovery-initial-outreach:v1:${attemptId}`;
+const sourceKeyFor = (attemptId: string) =>
+  `recovery-initial-outreach:v1:${attemptId}`;
 
 class FinalizationError extends Error {
-  constructor(readonly category: ErrorCategory, message: string) {
+  constructor(
+    readonly category: ErrorCategory,
+    message: string,
+  ) {
     super(message);
     this.name = "FinalizationError";
   }
 }
 
 function validId(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0 && Array.from(value).length <= 128;
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    Array.from(value).length <= 128
+  );
 }
 
 function validateInput(input: ConfirmedInitialRecoveryOutreachInput): void {
   if (!input || typeof input !== "object") {
-    throw new FinalizationError("INVALID_INPUT", "Invalid initial outreach finalisation input");
+    throw new FinalizationError(
+      "INVALID_INPUT",
+      "Invalid initial outreach finalisation input",
+    );
   }
-  if (!validId(input.shopId)) throw new FinalizationError("INVALID_INPUT", "Invalid shopId");
+  if (!validId(input.shopId))
+    throw new FinalizationError("INVALID_INPUT", "Invalid shopId");
   if (!validId(input.checkoutRecoveryId)) {
     throw new FinalizationError("INVALID_INPUT", "Invalid checkoutRecoveryId");
   }
@@ -81,12 +107,18 @@ function validateInput(input: ConfirmedInitialRecoveryOutreachInput): void {
   if (!validId(input.outboundMessageId)) {
     throw new FinalizationError("INVALID_INPUT", "Invalid outboundMessageId");
   }
-  if (!(input.sentAt instanceof Date) || !Number.isFinite(input.sentAt.getTime())) {
+  if (
+    !(input.sentAt instanceof Date) ||
+    !Number.isFinite(input.sentAt.getTime())
+  ) {
     throw new FinalizationError("INVALID_INPUT", "Invalid sentAt");
   }
-  if (input.followUpDueAt !== null &&
-      (!(input.followUpDueAt instanceof Date) || !Number.isFinite(input.followUpDueAt.getTime()) ||
-       input.followUpDueAt.getTime() <= input.sentAt.getTime())) {
+  if (
+    input.followUpDueAt !== null &&
+    (!(input.followUpDueAt instanceof Date) ||
+      !Number.isFinite(input.followUpDueAt.getTime()) ||
+      input.followUpDueAt.getTime() <= input.sentAt.getTime())
+  ) {
     throw new FinalizationError("INVALID_INPUT", "Invalid followUpDueAt");
   }
 }
@@ -118,220 +150,312 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
     try {
       validateInput(input);
       inputValidated = true;
-      const result = await this.database.$transaction(async (tx): Promise<InitialOutreachNoticeResult> => {
-        const pointer = await tx.recoveryOutreachAttempt.findUnique({
-          where: { id: input.outreachAttemptId },
-          select: { id: true, checkoutRecoveryId: true, checkoutRecovery: { select: { shopId: true } } },
-        });
-        if (!pointer || pointer.id !== input.outreachAttemptId ||
+      const result = await this.database.$transaction(
+        async (tx): Promise<InitialOutreachNoticeResult> => {
+          const pointer = await tx.recoveryOutreachAttempt.findUnique({
+            where: { id: input.outreachAttemptId },
+            select: {
+              id: true,
+              checkoutRecoveryId: true,
+              checkoutRecovery: { select: { shopId: true } },
+            },
+          });
+          if (
+            !pointer ||
+            pointer.id !== input.outreachAttemptId ||
             pointer.checkoutRecoveryId !== input.checkoutRecoveryId ||
-            pointer.checkoutRecovery.shopId !== input.shopId) {
-          lineageMismatch("Initial outreach routing pointer did not match");
-        }
-        const lockedShop = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+            pointer.checkoutRecovery.shopId !== input.shopId
+          ) {
+            lineageMismatch("Initial outreach routing pointer did not match");
+          }
+          const lockedShop = await tx.$queryRaw<
+            Array<{ id: string }>
+          >(Prisma.sql`
           SELECT "id"
           FROM "commerce"."Shop"
           WHERE "id" = ${pointer.checkoutRecovery.shopId}
           ${isInitialRetryId(input.outreachAttemptId) ? Prisma.sql`FOR UPDATE` : Prisma.sql`FOR KEY SHARE`}
         `);
-        if (lockedShop.length !== 1 || lockedShop[0]?.id !== input.shopId) {
-          lineageMismatch("Initial outreach Shop pointer was not found");
-        }
-        // A retry's provider status may race finalization. Lock Shop exclusively
-        // before reading the message and attempt; the status owner uses Shop
-        // KEY SHARE. Original sends preserve their existing lock path.
-        const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+          if (lockedShop.length !== 1 || lockedShop[0]?.id !== input.shopId) {
+            lineageMismatch("Initial outreach Shop pointer was not found");
+          }
+          // A retry's provider status may race finalization. Lock Shop exclusively
+          // before reading the message and attempt; the status owner uses Shop
+          // KEY SHARE. Original sends preserve their existing lock path.
+          const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
           SELECT "id"
           FROM "commerce"."RecoveryOutreachAttempt"
           WHERE "id" = ${input.outreachAttemptId}
           FOR UPDATE
         `);
-        if (locked.length !== 1) lineageMismatch("Initial outreach attempt was not found");
+          if (locked.length !== 1)
+            lineageMismatch("Initial outreach attempt was not found");
 
-        const attempt = await tx.recoveryOutreachAttempt.findUnique({
-          where: { id: input.outreachAttemptId },
-          select: {
-            id: true,
-            checkoutRecoveryId: true,
-            sequence: true,
-            trigger: true,
-            initiatedBy: true,
-            status: true,
-            failureCode: true,
-            closedAt: true,
-            sentAt: true,
-            outboundMessageId: true,
-            followUpDueAt: true,
-            checkoutRecovery: {
-              select: {
-                shopId: true,
-                conversation: { select: { id: true, shopId: true } },
+          const attempt = await tx.recoveryOutreachAttempt.findUnique({
+            where: { id: input.outreachAttemptId },
+            select: {
+              id: true,
+              checkoutRecoveryId: true,
+              sequence: true,
+              trigger: true,
+              initiatedBy: true,
+              status: true,
+              failureCode: true,
+              closedAt: true,
+              sentAt: true,
+              outboundMessageId: true,
+              followUpDueAt: true,
+              checkoutRecovery: {
+                select: {
+                  shopId: true,
+                  conversation: { select: { id: true, shopId: true } },
+                },
               },
             },
-          },
-        });
-        if (!attempt || attempt.id !== input.outreachAttemptId ||
+          });
+          if (
+            !attempt ||
+            attempt.id !== input.outreachAttemptId ||
             attempt.checkoutRecoveryId !== input.checkoutRecoveryId ||
             !isInitialOutreachIdentity(attempt) ||
-            (attempt.initiatedBy !== null && attempt.initiatedBy !== RecoveryOutreachInitiator.AUTOMATION) ||
-            attempt.checkoutRecovery.shopId !== pointer.checkoutRecovery.shopId) {
-          lineageMismatch("Initial outreach attempt lineage did not match");
-        }
-        const recovery = attempt.checkoutRecovery;
-        const conversation = recovery.conversation;
-        if (recovery.shopId !== input.shopId || !conversation ||
-            (conversation.shopId !== null && conversation.shopId !== recovery.shopId)) {
-          lineageMismatch("Recovery tenant or conversation lineage did not match");
-        }
+            (attempt.initiatedBy !== null &&
+              attempt.initiatedBy !== RecoveryOutreachInitiator.AUTOMATION) ||
+            attempt.checkoutRecovery.shopId !== pointer.checkoutRecovery.shopId
+          ) {
+            lineageMismatch("Initial outreach attempt lineage did not match");
+          }
+          const recovery = attempt.checkoutRecovery;
+          const conversation = recovery.conversation;
+          if (
+            recovery.shopId !== input.shopId ||
+            !conversation ||
+            (conversation.shopId !== null &&
+              conversation.shopId !== recovery.shopId)
+          ) {
+            lineageMismatch(
+              "Recovery tenant or conversation lineage did not match",
+            );
+          }
 
-        if (isInitialRetryId(attempt.id)) {
-          await readRetryFundingLineage(tx, { recoveryId: input.checkoutRecoveryId, conversationId: conversation.id, attemptId: attempt.id });
-        }
-        const outboundMessage = await tx.conversationMessage.findUnique({
-          where: { id: input.outboundMessageId },
-          select: {
-            id: true,
-            conversationId: true,
-            direction: true,
-            senderType: true,
-            status: true,
-            sentAt: true,
-            recoveryOutreachAttempt: { select: { id: true } },
-          },
-        });
-        if (!outboundMessage || outboundMessage.conversationId !== conversation.id ||
+          if (isInitialRetryId(attempt.id)) {
+            await readRetryFundingLineage(tx, {
+              recoveryId: input.checkoutRecoveryId,
+              conversationId: conversation.id,
+              attemptId: attempt.id,
+            });
+          }
+          const outboundMessage = await tx.conversationMessage.findUnique({
+            where: { id: input.outboundMessageId },
+            select: {
+              id: true,
+              conversationId: true,
+              direction: true,
+              senderType: true,
+              status: true,
+              sentAt: true,
+              recoveryOutreachAttempt: { select: { id: true } },
+            },
+          });
+          if (
+            !outboundMessage ||
+            outboundMessage.conversationId !== conversation.id ||
             outboundMessage.direction !== MessageDirection.OUTBOUND ||
             outboundMessage.senderType !== MessageSenderType.AUTOMATION ||
-            (outboundMessage.recoveryOutreachAttempt && outboundMessage.recoveryOutreachAttempt.id !== attempt.id) ||
+            (outboundMessage.recoveryOutreachAttempt &&
+              outboundMessage.recoveryOutreachAttempt.id !== attempt.id) ||
             !confirmedMessageStatuses.includes(outboundMessage.status) ||
-            !outboundMessage.sentAt || outboundMessage.sentAt.getTime() !== input.sentAt.getTime()) {
-          lineageMismatch("Confirmed outbound message lineage did not match");
-        }
+            !outboundMessage.sentAt ||
+            outboundMessage.sentAt.getTime() !== input.sentAt.getTime()
+          ) {
+            lineageMismatch("Confirmed outbound message lineage did not match");
+          }
 
-        if (replayableStatuses.includes(attempt.status)) {
-          if (attempt.outboundMessageId !== input.outboundMessageId ||
+          if (replayableStatuses.includes(attempt.status)) {
+            if (
+              attempt.outboundMessageId !== input.outboundMessageId ||
               !sameDate(attempt.sentAt, input.sentAt) ||
-              !sameDate(attempt.followUpDueAt, input.followUpDueAt)) {
-            finalizationConflict("Initial outreach attempt was finalised with a different message identity");
+              !sameDate(attempt.followUpDueAt, input.followUpDueAt)
+            ) {
+              finalizationConflict(
+                "Initial outreach attempt was finalised with a different message identity",
+              );
+            }
+            return { outcome: "replayed", outreachAttemptId: attempt.id };
           }
-          return { outcome: "replayed", outreachAttemptId: attempt.id };
-        }
-        const repairingFalseFailure = attempt.status === RecoveryOutreachStatus.FAILED &&
-          attempt.failureCode === "PROVIDER_FAILURE" && attempt.closedAt === null &&
-          attempt.sentAt === null && attempt.outboundMessageId === null && attempt.followUpDueAt === null &&
-          attempt.initiatedBy === RecoveryOutreachInitiator.AUTOMATION;
-        if (!initialPendingStatuses.includes(attempt.status) && !repairingFalseFailure) {
-          finalizationConflict("Initial outreach attempt cannot be finalised from its current state");
-        }
-        if (attempt.sentAt !== null || attempt.outboundMessageId !== null || attempt.followUpDueAt !== null) {
-          finalizationConflict("Initial outreach attempt already has a conflicting receipt");
-        }
-        if (repairingFalseFailure) {
-          const usage = await tx.usageEvent.findUnique({
-            where: { idempotencyKey: `recovery-outreach:${attempt.id}` },
-            select: { id: true, shopId: true, metric: true, sourceType: true, sourceId: true, quantity: true },
-          });
-          if (!usage || usage.shopId !== input.shopId ||
+          const repairingFalseFailure =
+            attempt.status === RecoveryOutreachStatus.FAILED &&
+            attempt.failureCode === "PROVIDER_FAILURE" &&
+            attempt.closedAt === null &&
+            attempt.sentAt === null &&
+            attempt.outboundMessageId === null &&
+            attempt.followUpDueAt === null &&
+            attempt.initiatedBy === RecoveryOutreachInitiator.AUTOMATION;
+          if (
+            !initialPendingStatuses.includes(attempt.status) &&
+            !repairingFalseFailure
+          ) {
+            finalizationConflict(
+              "Initial outreach attempt cannot be finalised from its current state",
+            );
+          }
+          if (
+            attempt.sentAt !== null ||
+            attempt.outboundMessageId !== null ||
+            attempt.followUpDueAt !== null
+          ) {
+            finalizationConflict(
+              "Initial outreach attempt already has a conflicting receipt",
+            );
+          }
+          if (repairingFalseFailure) {
+            const usage = await tx.usageEvent.findUnique({
+              where: { idempotencyKey: `recovery-outreach:${attempt.id}` },
+              select: {
+                id: true,
+                shopId: true,
+                metric: true,
+                sourceType: true,
+                sourceId: true,
+                quantity: true,
+              },
+            });
+            if (
+              !usage ||
+              usage.shopId !== input.shopId ||
               usage.metric !== UsageMetric.OUTBOUND_AUTOMATED_MESSAGE ||
-              usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" || Number(usage.quantity) !== 1 ||
-              usage.sourceId !== input.outboundMessageId) {
-            finalizationConflict("Failed initial attempt has no exact confirmed usage lineage");
+              usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" ||
+              Number(usage.quantity) !== 1 ||
+              usage.sourceId !== input.outboundMessageId
+            ) {
+              finalizationConflict(
+                "Failed initial attempt has no exact confirmed usage lineage",
+              );
+            }
           }
-        }
 
-        const transitioned = await tx.recoveryOutreachAttempt.updateMany({
-          where: {
-            id: attempt.id,
-            status: repairingFalseFailure
-              ? RecoveryOutreachStatus.FAILED
-              : { in: [RecoveryOutreachStatus.PENDING, RecoveryOutreachStatus.CAPACITY_BLOCKED] },
-            failureCode: repairingFalseFailure ? "PROVIDER_FAILURE" : null,
-            closedAt: null,
-            OR: repairingFalseFailure
-              ? [{ initiatedBy: RecoveryOutreachInitiator.AUTOMATION }]
-              : [{ initiatedBy: null }, { initiatedBy: RecoveryOutreachInitiator.AUTOMATION }],
-            sequence: attempt.sequence,
-            trigger: RecoveryOutreachTrigger.INITIAL,
-            sentAt: null,
-            outboundMessageId: null,
-            followUpDueAt: null,
-          },
-          data: {
-            status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE,
-            failureCode: null,
-            sentAt: input.sentAt,
-            outboundMessageId: input.outboundMessageId,
-            followUpDueAt: input.followUpDueAt,
-          },
-        });
-        if (transitioned.count !== 1) {
-          finalizationConflict("Initial outreach attempt changed before finalisation");
-        }
+          const transitioned = await tx.recoveryOutreachAttempt.updateMany({
+            where: {
+              id: attempt.id,
+              status: repairingFalseFailure
+                ? RecoveryOutreachStatus.FAILED
+                : {
+                    in: [
+                      RecoveryOutreachStatus.PENDING,
+                      RecoveryOutreachStatus.CAPACITY_BLOCKED,
+                    ],
+                  },
+              failureCode: repairingFalseFailure ? "PROVIDER_FAILURE" : null,
+              closedAt: null,
+              OR: repairingFalseFailure
+                ? [{ initiatedBy: RecoveryOutreachInitiator.AUTOMATION }]
+                : [
+                    { initiatedBy: null },
+                    { initiatedBy: RecoveryOutreachInitiator.AUTOMATION },
+                  ],
+              sequence: attempt.sequence,
+              trigger: RecoveryOutreachTrigger.INITIAL,
+              sentAt: null,
+              outboundMessageId: null,
+              followUpDueAt: null,
+            },
+            data: {
+              status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE,
+              failureCode: null,
+              sentAt: input.sentAt,
+              outboundMessageId: input.outboundMessageId,
+              followUpDueAt: input.followUpDueAt,
+            },
+          });
+          if (transitioned.count !== 1) {
+            finalizationConflict(
+              "Initial outreach attempt changed before finalisation",
+            );
+          }
 
-        // Physical retries are not new merchant outreach notifications.
-        if (isInitialRetryId(attempt.id)) return { outcome: "retry-finalized", outreachAttemptId: attempt.id };
-        const settings = await tx.shopSettings.findUnique({
-          where: { shopId: recovery.shopId },
-          select: { notifyOnInitialRecoveryOutreach: true },
-        });
-        if (!settings?.notifyOnInitialRecoveryOutreach) {
-          return { outcome: "disabled", outreachAttemptId: attempt.id };
-        }
+          // Physical retries are not new merchant outreach notifications.
+          if (isInitialRetryId(attempt.id))
+            return {
+              outcome: "retry-finalized",
+              outreachAttemptId: attempt.id,
+            };
+          const settings = await tx.shopSettings.findUnique({
+            where: { shopId: recovery.shopId },
+            select: { notifyOnInitialRecoveryOutreach: true },
+          });
+          if (!settings?.notifyOnInitialRecoveryOutreach) {
+            return { outcome: "disabled", outreachAttemptId: attempt.id };
+          }
 
-        await tx.merchantSupportThread.createMany({
-          data: [{ shopId: recovery.shopId }],
-          skipDuplicates: true,
-        });
-        const thread = await tx.merchantSupportThread.findUniqueOrThrow({
-          where: { shopId: recovery.shopId },
-          select: { id: true },
-        });
-        const availableAt = this.now();
-        if (!(availableAt instanceof Date) || !Number.isFinite(availableAt.getTime())) {
-          throw new FinalizationError("INVALID_INPUT", "Invalid now() date");
-        }
-        const sourceKey = sourceKeyFor(attempt.id);
-        const inserted = await tx.merchantSupportMessage.createMany({
-          skipDuplicates: true,
-          data: [{
-            threadId: thread.id,
-            kind: MerchantSupportMessageKind.SYSTEM,
-            state: MerchantSupportMessageState.AVAILABLE,
-            originalBody,
-            sourceLanguageTag: "en-GB",
-            systemCode: "RECOVERY_INITIAL_OUTREACH_SENT",
-            systemVersion: "1",
-            sourceKey,
-            checkoutRecoveryId: attempt.checkoutRecoveryId,
-            readAt: null,
-            availableAt,
-          }],
-        });
-        if (inserted.count !== 1) {
-          finalizationConflict("Initial outreach Support source key already exists");
-        }
-        await tx.merchantSupportThread.updateMany({
-          where: {
-            id: thread.id,
-            OR: [{ lastMessageAt: null }, { lastMessageAt: { lt: availableAt } }],
-          },
-          data: { lastMessageAt: availableAt },
-        });
-        return { outcome: "created", outreachAttemptId: attempt.id };
-      });
+          await tx.merchantSupportThread.createMany({
+            data: [{ shopId: recovery.shopId }],
+            skipDuplicates: true,
+          });
+          const thread = await tx.merchantSupportThread.findUniqueOrThrow({
+            where: { shopId: recovery.shopId },
+            select: { id: true },
+          });
+          const availableAt = this.now();
+          if (
+            !(availableAt instanceof Date) ||
+            !Number.isFinite(availableAt.getTime())
+          ) {
+            throw new FinalizationError("INVALID_INPUT", "Invalid now() date");
+          }
+          const sourceKey = sourceKeyFor(attempt.id);
+          const inserted = await tx.merchantSupportMessage.createMany({
+            skipDuplicates: true,
+            data: [
+              {
+                threadId: thread.id,
+                kind: MerchantSupportMessageKind.SYSTEM,
+                state: MerchantSupportMessageState.AVAILABLE,
+                originalBody,
+                sourceLanguageTag: "en-GB",
+                systemCode: "RECOVERY_INITIAL_OUTREACH_SENT",
+                systemVersion: "1",
+                sourceKey,
+                checkoutRecoveryId: attempt.checkoutRecoveryId,
+                readAt: null,
+                availableAt,
+              },
+            ],
+          });
+          if (inserted.count !== 1) {
+            finalizationConflict(
+              "Initial outreach Support source key already exists",
+            );
+          }
+          await tx.merchantSupportThread.updateMany({
+            where: {
+              id: thread.id,
+              OR: [
+                { lastMessageAt: null },
+                { lastMessageAt: { lt: availableAt } },
+              ],
+            },
+            data: { lastMessageAt: availableAt },
+          });
+          return { outcome: "created", outreachAttemptId: attempt.id };
+        },
+      );
       const event: NoticeEvent = outcomeEvents[result.outcome];
-      this.logSafely(event, {
-        shopId: input.shopId,
-        checkoutRecoveryId: input.checkoutRecoveryId,
-        outreachAttemptId: input.outreachAttemptId,
-        outboundMessageId: input.outboundMessageId,
-        outcome: result.outcome,
-      }, "info");
+      this.logSafely(
+        event,
+        {
+          shopId: input.shopId,
+          checkoutRecoveryId: input.checkoutRecoveryId,
+          outreachAttemptId: input.outreachAttemptId,
+          outboundMessageId: input.outboundMessageId,
+          outcome: result.outcome,
+        },
+        "info",
+      );
       return result;
     } catch (error) {
-      const category: ErrorCategory = error instanceof FinalizationError
-        ? error.category
-        : "PERSISTENCE_FAILURE";
+      const category: ErrorCategory =
+        error instanceof FinalizationError
+          ? error.category
+          : "PERSISTENCE_FAILURE";
       const fields: Record<string, unknown> = {
         outcome: "failed",
         errorCategory: category,
@@ -343,12 +467,20 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
         fields.outreachAttemptId = input.outreachAttemptId;
         fields.outboundMessageId = input.outboundMessageId;
       }
-      this.logSafely("recovery.initial_outreach_support_notice.failed", fields, "error");
+      this.logSafely(
+        "recovery.initial_outreach_support_notice.failed",
+        fields,
+        "error",
+      );
       throw error;
     }
   }
 
-  private logSafely(event: NoticeEvent, fields: Record<string, unknown>, level: "info" | "error"): void {
+  private logSafely(
+    event: NoticeEvent,
+    fields: Record<string, unknown>,
+    level: "info" | "error",
+  ): void {
     // A failing sink must never undo a committed transaction or replace its original error.
     try {
       this.logger[level](event, fields);
@@ -358,4 +490,5 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
   }
 }
 
-export const recoveryInitialOutreachSupportNoticeService = new RecoveryInitialOutreachSupportNoticeService();
+export const recoveryInitialOutreachSupportNoticeService =
+  new RecoveryInitialOutreachSupportNoticeService();

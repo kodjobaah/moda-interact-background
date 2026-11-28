@@ -24,9 +24,11 @@ import {
 } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 const lookupLogger = createLogger({
-  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
 });
-const urlDigest = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 16);
+const urlDigest = (value: string) =>
+  createHash("sha256").update(value).digest("hex").slice(0, 16);
 const CONSENT_ATTRIBUTE_KEY = "moda_wa_consent_v1";
 const SYNTHETIC_DIAGNOSTIC_ENVIRONMENTS = new Set(["test", "development"]);
 import {
@@ -100,13 +102,18 @@ type AbandonedCheckoutGraphqlResponse = {
   data?: {
     shop?: { plan?: { shopifyPlus?: boolean | null } | null } | null;
     abandonedCheckoutsCount?: { count?: number | null } | null;
-    abandonedCheckouts?: { nodes?: ShopifyAbandonedCheckoutNode[] | null } | null;
+    abandonedCheckouts?: {
+      nodes?: ShopifyAbandonedCheckoutNode[] | null;
+    } | null;
   } | null;
   errors?: unknown;
 };
 
 type GraphqlOperation = "AbandonedCheckoutsCount" | "AbandonedCheckouts";
-type FetchPort = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+type FetchPort = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
 type LookupLogger = Pick<StructuredLogger, "info" | "warn" | "error">;
 
 interface LookupDiagnostics {
@@ -145,8 +152,12 @@ export class AbandonedCheckoutLookupService {
     options: { signal?: AbortSignal } = {},
   ): Promise<AbandonedCheckoutLookupOutcome> {
     const policy = this.readPolicy ? await this.readPolicy() : null;
-    const maxCandidates = policy?.abandonedCheckoutMaxCandidates ?? ABANDONED_CHECKOUT_MAX_CANDIDATES;
-    const lookupWindowMs = policy?.abandonedCheckoutLookupWindowMs ?? ABANDONED_CHECKOUT_LOOKUP_WINDOW_MS;
+    const maxCandidates =
+      policy?.abandonedCheckoutMaxCandidates ??
+      ABANDONED_CHECKOUT_MAX_CANDIDATES;
+    const lookupWindowMs =
+      policy?.abandonedCheckoutLookupWindowMs ??
+      ABANDONED_CHECKOUT_LOOKUP_WINDOW_MS;
     const correlation = {
       shopId: input.shopId,
       checkoutDigest: urlDigest(input.checkoutToken),
@@ -156,17 +167,22 @@ export class AbandonedCheckoutLookupService {
     if (!input.abandonedCheckoutUrl) {
       this.log("info", "shopify.abandoned_checkout.lookup_outcome", {
         ...correlation,
-        outcome: "not-found", reason: "missing-recovery-url",
+        outcome: "not-found",
+        reason: "missing-recovery-url",
       });
       return { kind: "not-found" };
     }
 
     // The time scope is required to keep the query narrow and bounded.
-    const timeRange = this.buildCreatedAtFilter(input.checkoutCreatedAt, lookupWindowMs);
+    const timeRange = this.buildCreatedAtFilter(
+      input.checkoutCreatedAt,
+      lookupWindowMs,
+    );
     if (!timeRange) {
       this.log("info", "shopify.abandoned_checkout.lookup_outcome", {
         ...correlation,
-        outcome: "not-found", reason: "invalid-checkout-created-at",
+        outcome: "not-found",
+        reason: "invalid-checkout-created-at",
       });
       return { kind: "not-found" };
     }
@@ -214,8 +230,11 @@ export class AbandonedCheckoutLookupService {
     if (count === 0) {
       this.log("info", "shopify.abandoned_checkout.lookup_outcome", {
         ...correlation,
-        outcome: "not-found", reason: "zero-candidates", candidateCount: 0,
-        windowFrom: timeRange.fromIso, windowTo: timeRange.toIso,
+        outcome: "not-found",
+        reason: "zero-candidates",
+        candidateCount: 0,
+        windowFrom: timeRange.fromIso,
+        windowTo: timeRange.toIso,
       });
       return { kind: "not-found" };
     }
@@ -250,10 +269,15 @@ export class AbandonedCheckoutLookupService {
     if (matches.length === 0) {
       this.log("info", "shopify.abandoned_checkout.lookup_outcome", {
         ...correlation,
-        outcome: "not-found", reason: "url-mismatch", candidateCount: candidates.length,
-        windowFrom: timeRange.fromIso, windowTo: timeRange.toIso,
+        outcome: "not-found",
+        reason: "url-mismatch",
+        candidateCount: candidates.length,
+        windowFrom: timeRange.fromIso,
+        windowTo: timeRange.toIso,
         expectedUrlDigest: urlDigest(input.abandonedCheckoutUrl),
-        returnedUrlDigests: candidates.map(c => urlDigest(c.abandonedCheckoutUrl)),
+        returnedUrlDigests: candidates.map((c) =>
+          urlDigest(c.abandonedCheckoutUrl),
+        ),
       });
       return { kind: "not-found" };
     }
@@ -273,7 +297,8 @@ export class AbandonedCheckoutLookupService {
     const match = matches[0] as NormalizedAbandonedCheckout;
     this.log("info", "shopify.abandoned_checkout.lookup_outcome", {
       ...correlation,
-      outcome: "found", candidateCount: candidates.length,
+      outcome: "found",
+      candidateCount: candidates.length,
     });
     this.log("info", "shopify.abandoned_checkout.lookup_decision", {
       ...correlation,
@@ -304,7 +329,9 @@ export class AbandonedCheckoutLookupService {
     // which can be later than the checkout/create webhook by many minutes.
     // Keep the original lower bound and include the elapsed checkout lifetime.
     // The count pre-check still prevents enumerating more than maxCandidates.
-    const to = new Date(Math.max(created.getTime(), this.now()) + lookupWindowMs);
+    const to = new Date(
+      Math.max(created.getTime(), this.now()) + lookupWindowMs,
+    );
 
     return {
       fromIso: from.toISOString(),
@@ -312,7 +339,10 @@ export class AbandonedCheckoutLookupService {
     };
   }
 
-  private buildFilterQuery(timeRange: { fromIso: string; toIso: string }): string {
+  private buildFilterQuery(timeRange: {
+    fromIso: string;
+    toIso: string;
+  }): string {
     const from = timeRange.fromIso;
     const to = timeRange.toIso;
     return `created_at:>="${from}" AND created_at:<="${to}"`;
@@ -463,13 +493,17 @@ export class AbandonedCheckoutLookupService {
 
     // Never send a recovery with a silently truncated basket snapshot.
     if (nodes.some((node) => node.lineItems?.pageInfo?.hasNextPage)) {
-      throw new Error("Shopify abandoned checkout exceeds the 100 line-item lookup bound");
+      throw new Error(
+        "Shopify abandoned checkout exceeds the 100 line-item lookup bound",
+      );
     }
     const shopifyPlus = result.data?.shop?.plan?.shopifyPlus;
-    return nodes.map((node) => this.normalize(
-      node,
-      typeof shopifyPlus === "boolean" ? shopifyPlus : null,
-    ));
+    return nodes.map((node) =>
+      this.normalize(
+        node,
+        typeof shopifyPlus === "boolean" ? shopifyPlus : null,
+      ),
+    );
   }
 
   private normalize(
@@ -483,11 +517,19 @@ export class AbandonedCheckoutLookupService {
       createdAt: node?.createdAt ?? "",
       completedAt: node?.completedAt ?? null,
       shopifyPlus,
-      consentReceiptAttribute: this.normalizeConsentReceiptAttribute(node?.customAttributes),
+      consentReceiptAttribute: this.normalizeConsentReceiptAttribute(
+        node?.customAttributes,
+      ),
       billingPhone: node?.billingAddress?.phone ?? null,
-      billingCountryCode: safelyNormalize(node?.billingAddress?.countryCodeV2, normalizeCountryCode),
+      billingCountryCode: safelyNormalize(
+        node?.billingAddress?.countryCodeV2,
+        normalizeCountryCode,
+      ),
       shippingPhone: node?.shippingAddress?.phone ?? null,
-      shippingCountryCode: safelyNormalize(node?.shippingAddress?.countryCodeV2, normalizeCountryCode),
+      shippingCountryCode: safelyNormalize(
+        node?.shippingAddress?.countryCodeV2,
+        normalizeCountryCode,
+      ),
       currencyCode: presentmentMoney?.currencyCode ?? null,
       totalPrice: presentmentMoney?.amount ?? null,
       internationalContext: normalizeInternationalContext(node),
@@ -522,13 +564,20 @@ export class AbandonedCheckoutLookupService {
   ): NormalizedAbandonedCheckout["consentReceiptAttribute"] {
     if (attributes == null) return { kind: "MISSING" };
     if (!Array.isArray(attributes)) return { kind: "INVALID" };
-    if (attributes.some((attribute) =>
-      typeof attribute !== "object" || attribute === null ||
-      typeof attribute.key !== "string" || typeof attribute.value !== "string")) {
+    if (
+      attributes.some(
+        (attribute) =>
+          typeof attribute !== "object" ||
+          attribute === null ||
+          typeof attribute.key !== "string" ||
+          typeof attribute.value !== "string",
+      )
+    ) {
       return { kind: "INVALID" };
     }
-    const matching = attributes.filter((attribute) =>
-      attribute.key === "moda_wa_consent_v1");
+    const matching = attributes.filter(
+      (attribute) => attribute.key === "moda_wa_consent_v1",
+    );
     if (matching.length === 0) return { kind: "MISSING" };
     if (matching.length !== 1 || typeof matching[0]?.value !== "string") {
       return { kind: "INVALID" };
@@ -553,7 +602,11 @@ export class AbandonedCheckoutLookupService {
       operation,
       queryBounds,
     };
-    this.log("info", "shopify.abandoned_checkout.graphql.request_started", requestFields);
+    this.log(
+      "info",
+      "shopify.abandoned_checkout.graphql.request_started",
+      requestFields,
+    );
 
     let response: Response;
     try {
@@ -697,11 +750,15 @@ export class AbandonedCheckoutLookupService {
         httpStatus: response.status,
         nodeCount: Array.isArray(nodes) ? nodes.length : null,
       });
-      this.log("info", "shopify.abandoned_checkout.graphql.receipt_attributes", {
-        ...requestFields,
-        httpStatus: response.status,
-        ...summarizeConsentAttributes(nodes),
-      });
+      this.log(
+        "info",
+        "shopify.abandoned_checkout.graphql.receipt_attributes",
+        {
+          ...requestFields,
+          httpStatus: response.status,
+          ...summarizeConsentAttributes(nodes),
+        },
+      );
     }
     this.log("info", "shopify.abandoned_checkout.graphql.request_completed", {
       ...requestFields,
@@ -718,7 +775,8 @@ export class AbandonedCheckoutLookupService {
     httpStatus: number,
     responseText: string,
   ): void {
-    const environment = this.diagnostics.environment?.() ?? resolveDeploymentEnvironmentName();
+    const environment =
+      this.diagnostics.environment?.() ?? resolveDeploymentEnvironmentName();
     if (!SYNTHETIC_DIAGNOSTIC_ENVIRONMENTS.has(environment)) return;
 
     const codePoints = Array.from(responseText);
@@ -733,15 +791,19 @@ export class AbandonedCheckoutLookupService {
 
     chunks.forEach((responseChunk, chunkIndex) => {
       const sanitized = sanitizeLogFields({ responseChunk }).responseChunk;
-      this.log("info", "shopify.abandoned_checkout.graphql.synthetic_response_chunk", {
-        ...requestFields,
-        httpStatus,
-        responseChunk,
-        chunkIndex,
-        chunkCount: chunks.length,
-        syntheticTestData: true,
-        redactionApplied: sanitized !== responseChunk,
-      });
+      this.log(
+        "info",
+        "shopify.abandoned_checkout.graphql.synthetic_response_chunk",
+        {
+          ...requestFields,
+          httpStatus,
+          responseChunk,
+          chunkIndex,
+          chunkCount: chunks.length,
+          syntheticTestData: true,
+          redactionApplied: sanitized !== responseChunk,
+        },
+      );
     });
   }
 
@@ -758,9 +820,13 @@ export class AbandonedCheckoutLookupService {
   }
 }
 
-function getQueryBounds(variables: Record<string, unknown>): Record<string, unknown> {
+function getQueryBounds(
+  variables: Record<string, unknown>,
+): Record<string, unknown> {
   const query = typeof variables.query === "string" ? variables.query : "";
-  const bounds = [...query.matchAll(/created_at:>="([^"]+)"|created_at:<="([^"]+)"/g)];
+  const bounds = [
+    ...query.matchAll(/created_at:>="([^"]+)"|created_at:<="([^"]+)"/g),
+  ];
   return {
     from: bounds.find((match) => match[1])?.[1] ?? null,
     to: bounds.find((match) => match[2])?.[2] ?? null,
@@ -781,18 +847,28 @@ function summarizeConsentAttributes(nodes: unknown): Record<string, number> {
       summary.invalid += 1;
       continue;
     }
-    const attributes = (rawNode as ShopifyAbandonedCheckoutNode).customAttributes;
+    const attributes = (rawNode as ShopifyAbandonedCheckoutNode)
+      .customAttributes;
     if (attributes == null) {
       summary.missing += 1;
       continue;
     }
-    if (!Array.isArray(attributes) || attributes.some((attribute) =>
-      attribute === null || typeof attribute !== "object" ||
-      typeof attribute.key !== "string" || typeof attribute.value !== "string")) {
+    if (
+      !Array.isArray(attributes) ||
+      attributes.some(
+        (attribute) =>
+          attribute === null ||
+          typeof attribute !== "object" ||
+          typeof attribute.key !== "string" ||
+          typeof attribute.value !== "string",
+      )
+    ) {
       summary.invalid += 1;
       continue;
     }
-    const matches = attributes.filter((attribute) => attribute.key === CONSENT_ATTRIBUTE_KEY);
+    const matches = attributes.filter(
+      (attribute) => attribute.key === CONSENT_ATTRIBUTE_KEY,
+    );
     if (matches.length === 0) summary.missing += 1;
     else if (matches.length > 1) summary.duplicate += 1;
     else summary.present += 1;
@@ -805,7 +881,10 @@ function safeProviderText(value: string): {
   redactionApplied: boolean;
   truncated: boolean;
 } {
-  const unsafe = /https?:\/\/|@|Bearer\s|shp[a-z]*_|(?:\d[\s()+.-]*){9,}|(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|password)\s*[:=]/i.test(value);
+  const unsafe =
+    /https?:\/\/|@|Bearer\s|shp[a-z]*_|(?:\d[\s()+.-]*){9,}|(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|password)\s*[:=]/i.test(
+      value,
+    );
   return {
     value: unsafe ? "[REDACTED]" : value.slice(0, 1024),
     redactionApplied: unsafe,
@@ -827,7 +906,10 @@ function safeException(error: unknown): Record<string, unknown> {
     name: error.name.slice(0, 64),
     message: safe.value,
   };
-  if ("code" in error && (typeof error.code === "string" || typeof error.code === "number")) {
+  if (
+    "code" in error &&
+    (typeof error.code === "string" || typeof error.code === "number")
+  ) {
     errorRecord.code = error.code;
   }
   const cause = error.cause;
@@ -835,12 +917,16 @@ function safeException(error: unknown): Record<string, unknown> {
   if (safeCause) errorRecord.cause = safeCause.value;
   return {
     error: errorRecord,
-    redactionApplied: safe.redactionApplied || (safeCause?.redactionApplied ?? false),
+    redactionApplied:
+      safe.redactionApplied || (safeCause?.redactionApplied ?? false),
     truncated: safe.truncated || (safeCause?.truncated ?? false),
   };
 }
 
-function safeCauseRecord(error: unknown, depth = 0): {
+function safeCauseRecord(
+  error: unknown,
+  depth = 0,
+): {
   value: Record<string, unknown>;
   redactionApplied: boolean;
   truncated: boolean;
@@ -865,15 +951,20 @@ function safeCauseRecord(error: unknown, depth = 0): {
     name: error.name.slice(0, 64),
     message: safe.value,
   };
-  if ("code" in error && (typeof error.code === "string" || typeof error.code === "number")) {
+  if (
+    "code" in error &&
+    (typeof error.code === "string" || typeof error.code === "number")
+  ) {
     value.code = error.code;
   }
   const nestedCause = error.cause;
-  const nested = nestedCause === undefined ? null : safeCauseRecord(nestedCause, depth + 1);
+  const nested =
+    nestedCause === undefined ? null : safeCauseRecord(nestedCause, depth + 1);
   if (nested) value.cause = nested.value;
   return {
     value,
-    redactionApplied: safe.redactionApplied || (nested?.redactionApplied ?? false),
+    redactionApplied:
+      safe.redactionApplied || (nested?.redactionApplied ?? false),
     truncated: safe.truncated || (nested?.truncated ?? false),
   };
 }
@@ -889,7 +980,11 @@ function safeProviderErrors(errors: unknown): Record<string, unknown> {
   let redactionApplied = false;
   let truncated = errors.length > 50;
   const providerErrors = errors.slice(0, 50).map((rawError) => {
-    if (rawError === null || typeof rawError !== "object" || Array.isArray(rawError)) {
+    if (
+      rawError === null ||
+      typeof rawError !== "object" ||
+      Array.isArray(rawError)
+    ) {
       redactionApplied = true;
       return { message: "[REDACTED]" };
     }
@@ -901,21 +996,36 @@ function safeProviderErrors(errors: unknown): Record<string, unknown> {
       redactionApplied ||= safe.redactionApplied;
       truncated ||= safe.truncated;
     }
-    if ("path" in source) output.path = safeProviderValue(source.path, () => {
-      redactionApplied = true;
-    }, () => {
-      truncated = true;
-    });
-    if ("locations" in source) output.locations = safeProviderValue(source.locations, () => {
-      redactionApplied = true;
-    }, () => {
-      truncated = true;
-    });
-    if ("extensions" in source) output.extensions = safeProviderValue(source.extensions, () => {
-      redactionApplied = true;
-    }, () => {
-      truncated = true;
-    });
+    if ("path" in source)
+      output.path = safeProviderValue(
+        source.path,
+        () => {
+          redactionApplied = true;
+        },
+        () => {
+          truncated = true;
+        },
+      );
+    if ("locations" in source)
+      output.locations = safeProviderValue(
+        source.locations,
+        () => {
+          redactionApplied = true;
+        },
+        () => {
+          truncated = true;
+        },
+      );
+    if ("extensions" in source)
+      output.extensions = safeProviderValue(
+        source.extensions,
+        () => {
+          redactionApplied = true;
+        },
+        () => {
+          truncated = true;
+        },
+      );
     return output;
   });
   return { providerErrors, redactionApplied, truncated };
@@ -937,19 +1047,27 @@ function safeProviderValue(
     if (safe.truncated) markTruncated();
     return safe.value;
   }
-  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (value === null || typeof value === "number" || typeof value === "boolean")
+    return value;
   if (Array.isArray(value)) {
     if (value.length > 50) markTruncated();
-    return value.slice(0, 50).map((entry) =>
-      safeProviderValue(entry, markRedacted, markTruncated, depth + 1));
+    return value
+      .slice(0, 50)
+      .map((entry) =>
+        safeProviderValue(entry, markRedacted, markTruncated, depth + 1),
+      );
   }
   if (typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>);
     if (entries.length > 50) markTruncated();
-    return Object.fromEntries(entries.slice(0, 50).map(([key, entry]) => [
-      key,
-      safeProviderValue(entry, markRedacted, markTruncated, depth + 1),
-    ]));
+    return Object.fromEntries(
+      entries
+        .slice(0, 50)
+        .map(([key, entry]) => [
+          key,
+          safeProviderValue(entry, markRedacted, markTruncated, depth + 1),
+        ]),
+    );
   }
   return String(value);
 }
@@ -971,7 +1089,8 @@ function safeHttpErrorBody(responseText: string): Record<string, unknown> {
   };
 }
 
-export const abandonedCheckoutLookupService = new AbandonedCheckoutLookupService(readRecoveryExecutionPolicy);
+export const abandonedCheckoutLookupService =
+  new AbandonedCheckoutLookupService(readRecoveryExecutionPolicy);
 
 function normalizeAuthoritativeCheckoutAttributes(
   value: unknown,
@@ -996,14 +1115,22 @@ function normalizeAuthoritativeCheckoutAttributes(
   return { kind: "available", values: attributes };
 }
 
-function normalizeInternationalContext(node: ShopifyAbandonedCheckoutNode): InternationalContext {
+function normalizeInternationalContext(
+  node: ShopifyAbandonedCheckoutNode,
+): InternationalContext {
   const presentmentMoney = node?.totalPriceSet?.presentmentMoney;
   const billingAddress = node?.billingAddress;
 
   return {
-    languageTag: safelyNormalize(node?.customer?.locale, canonicaliseLanguageTag),
+    languageTag: safelyNormalize(
+      node?.customer?.locale,
+      canonicaliseLanguageTag,
+    ),
     languageSource: null,
-    countryCode: safelyNormalize(billingAddress?.countryCodeV2, normalizeCountryCode),
+    countryCode: safelyNormalize(
+      billingAddress?.countryCodeV2,
+      normalizeCountryCode,
+    ),
     currencyCode: safelyNormalize(
       presentmentMoney?.currencyCode,
       normalizeCurrencyCode,

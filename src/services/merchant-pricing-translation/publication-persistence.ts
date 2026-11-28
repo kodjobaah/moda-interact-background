@@ -57,7 +57,9 @@ export async function finalizeMerchantPricingTranslationRun(
     return { status: "skipped", runId: translationRunId };
   }
 
-  const plans = await transaction.$queryRaw<MerchantPricingPublicationPlanRow[]>(Prisma.sql`
+  const plans = await transaction.$queryRaw<
+    MerchantPricingPublicationPlanRow[]
+  >(Prisma.sql`
     SELECT "id", "shopifyPlanHandle", "publicationStatus"::text AS "publicationStatus",
       "currentTranslationRunId", "isActive"
     FROM "billing"."MerchantPricingPlan"
@@ -89,7 +91,8 @@ export async function finalizeMerchantPricingTranslationRun(
   }
 
   if (
-    run.sourceSchemaVersion !== MERCHANT_PRICING_PUBLICATION_SOURCE_SCHEMA_VERSION
+    run.sourceSchemaVersion !==
+    MERCHANT_PRICING_PUBLICATION_SOURCE_SCHEMA_VERSION
   ) {
     await failReadyMerchantPricingRun(transaction, {
       runId: run.id,
@@ -105,7 +108,9 @@ export async function finalizeMerchantPricingTranslationRun(
     };
   }
 
-  const storedSource = canonicalMerchantPricingPublicationSource(run.sourceSnapshot);
+  const storedSource = canonicalMerchantPricingPublicationSource(
+    run.sourceSnapshot,
+  );
   if (
     !storedSource ||
     run.shopifyPlanHandle !== storedSource.shopifyPlanHandle ||
@@ -203,7 +208,9 @@ export async function finalizeMerchantPricingTranslationRun(
       AND "isActive" = false
   `);
   if (planChanged !== 1) {
-    throw new Error("Merchant Pricing draft changed during automatic finalisation");
+    throw new Error(
+      "Merchant Pricing draft changed during automatic finalisation",
+    );
   }
 
   const runChanged = await transaction.$executeRaw(Prisma.sql`
@@ -213,7 +220,9 @@ export async function finalizeMerchantPricingTranslationRun(
     WHERE "id" = ${run.id} AND "status" = 'READY_TO_APPLY'
   `);
   if (runChanged !== 1) {
-    throw new Error("Merchant Pricing translation run changed during automatic finalisation");
+    throw new Error(
+      "Merchant Pricing translation run changed during automatic finalisation",
+    );
   }
 
   await transaction.$executeRaw(Prisma.sql`

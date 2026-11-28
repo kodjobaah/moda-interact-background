@@ -27,12 +27,20 @@ function docker(args, options = {}) {
 }
 
 function sealCredential(credential) {
-  const nonce = Buffer.from(randomUUID().replaceAll("-", "").slice(0, 24), "hex");
+  const nonce = Buffer.from(
+    randomUUID().replaceAll("-", "").slice(0, 24),
+    "hex",
+  );
   const cipher = createCipheriv("aes-256-gcm", encryptionKey, nonce);
-  cipher.setAAD(Buffer.from(createCommerceOpenRouterCredentialAad({
-    environment: "DEVELOPMENT",
-    keyId: "disposable-key",
-  }), "utf8"));
+  cipher.setAAD(
+    Buffer.from(
+      createCommerceOpenRouterCredentialAad({
+        environment: "DEVELOPMENT",
+        keyId: "disposable-key",
+      }),
+      "utf8",
+    ),
+  );
   const ciphertext = Buffer.concat([
     cipher.update(Buffer.from(credential, "utf8")),
     cipher.final(),
@@ -44,7 +52,15 @@ async function waitForPostgres() {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
     try {
-      docker(["exec", container, "pg_isready", "-U", "postgres", "-d", "postgres"]);
+      docker([
+        "exec",
+        container,
+        "pg_isready",
+        "-U",
+        "postgres",
+        "-d",
+        "postgres",
+      ]);
       return;
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -59,7 +75,8 @@ function assert(condition, message) {
 
 function assertWinner(result, source, modelId) {
   assert(
-    result.selectionSource === source && result.model.catalogueEntryId === modelId,
+    result.selectionSource === source &&
+      result.model.catalogueEntryId === modelId,
     `expected ${source}/${modelId}, got ${result.selectionSource}/${result.model.catalogueEntryId}`,
   );
 }
@@ -68,7 +85,11 @@ async function expectUnavailable(operation, description) {
   try {
     await operation();
   } catch (error) {
-    assert(error instanceof Error && error.message === "Commerce model is unavailable", `${description} returned a bounded error`);
+    assert(
+      error instanceof Error &&
+        error.message === "Commerce model is unavailable",
+      `${description} returned a bounded error`,
+    );
     return;
   }
   throw new Error(`Assertion failed: ${description} should fail closed`);
@@ -79,28 +100,55 @@ let client;
 try {
   docker(["network", "create", network]);
   docker([
-    "run", "--detach", "--name", container, "--network", network,
-    "--publish", "127.0.0.1::5432",
-    "--env", "POSTGRES_USER=postgres",
-    "--env", `POSTGRES_PASSWORD=${databasePassword}`,
-    "--env", "POSTGRES_DB=postgres",
+    "run",
+    "--detach",
+    "--name",
+    container,
+    "--network",
+    network,
+    "--publish",
+    "127.0.0.1::5432",
+    "--env",
+    "POSTGRES_USER=postgres",
+    "--env",
+    `POSTGRES_PASSWORD=${databasePassword}`,
+    "--env",
+    "POSTGRES_DB=postgres",
     "pgvector/pgvector:pg16",
   ]);
   await waitForPostgres();
   const published = docker(["port", container, "5432/tcp"]);
   const port = Number(published.slice(published.lastIndexOf(":") + 1));
-  assert(Number.isInteger(port) && port > 0, "Docker published a disposable PostgreSQL port");
+  assert(
+    Number.isInteger(port) && port > 0,
+    "Docker published a disposable PostgreSQL port",
+  );
   const databaseUrl = `postgresql://postgres:${encodeURIComponent(databasePassword)}@127.0.0.1:${port}/postgres`;
 
-  execFileSync("npx", ["prisma", "migrate", "deploy", "--schema", "database/prisma/schema.prisma"], {
-    cwd: process.cwd(),
-    env: { ...environment, DATABASE_URL: databaseUrl },
-    stdio: "inherit",
-  });
+  execFileSync(
+    "npx",
+    [
+      "prisma",
+      "migrate",
+      "deploy",
+      "--schema",
+      "database/prisma/schema.prisma",
+    ],
+    {
+      cwd: process.cwd(),
+      env: { ...environment, DATABASE_URL: databaseUrl },
+      stdio: "inherit",
+    },
+  );
   await waitForPostgres();
 
   register();
-  const [{ PrismaClient }, { resolveProductionCommerceModel }, { createOpenRouterCredentialResolver }, { createProductionCommerceModelInvoker }] = await Promise.all([
+  const [
+    { PrismaClient },
+    { resolveProductionCommerceModel },
+    { createOpenRouterCredentialResolver },
+    { createProductionCommerceModelInvoker },
+  ] = await Promise.all([
     import("@prisma/client"),
     import("../src/commerce/model-resolution.ts"),
     import("../src/commerce/openrouter-credential.ts"),
@@ -122,11 +170,17 @@ try {
       { id: "shop-b", domain: "shop-b.myshopify.com" },
     ],
   });
-  const platformAvailability = await client.commerceModelAvailability.findFirstOrThrow({
-    where: { scope: "PLATFORM", shopId: null },
-  });
+  const platformAvailability =
+    await client.commerceModelAvailability.findFirstOrThrow({
+      where: { scope: "PLATFORM", shopId: null },
+    });
   const shopAvailability = await client.commerceModelAvailability.create({
-    data: { id: "proof-shop-a-availability", scope: "SHOP", shopId: "shop-a", enabled: true },
+    data: {
+      id: "proof-shop-a-availability",
+      scope: "SHOP",
+      shopId: "shop-a",
+      enabled: true,
+    },
   });
 
   const modelRows = [
@@ -181,12 +235,40 @@ try {
   });
 
   const planDetails = [
-    { id: "merchant-starter", handle: "starter", modelId: "starter-model", displayName: "Starter" },
-    { id: "merchant-growth", handle: "growth", modelId: "growth-model", displayName: "Growth" },
+    {
+      id: "merchant-starter",
+      handle: "starter",
+      modelId: "starter-model",
+      displayName: "Starter",
+    },
+    {
+      id: "merchant-growth",
+      handle: "growth",
+      modelId: "growth-model",
+      displayName: "Growth",
+    },
   ];
   const pricingLocales = [
-    "zh-Hans", "zh-Hant", "cs", "da", "nl", "en", "fi", "fr", "de", "it",
-    "ja", "ko", "nb", "pl", "pt-BR", "pt-PT", "es", "sv", "th", "tr",
+    "zh-Hans",
+    "zh-Hant",
+    "cs",
+    "da",
+    "nl",
+    "en",
+    "fi",
+    "fr",
+    "de",
+    "it",
+    "ja",
+    "ko",
+    "nb",
+    "pl",
+    "pt-BR",
+    "pt-PT",
+    "es",
+    "sv",
+    "th",
+    "tr",
   ];
   await client.$transaction(async (transaction) => {
     for (const [cataloguePosition, plan] of planDetails.entries()) {
@@ -246,18 +328,35 @@ try {
     where: { shopifyPlanHandle: "starter" },
     select: { id: true, shopifyPlanHandle: true, commerceModelId: true },
   });
-  assert(proofState?.status === "ACTIVE" && proofState.plan?.shopifyPlanHandle === "starter", "current subscription points to the Starter BillingPlan");
-  assert(proofPlan?.commerceModelId === "starter-model", "Starter MerchantPricingPlan points to starter-model");
-  const proofShopConfiguration = await client.commerceAgentConfiguration.findFirst({
-    where: { environment: "DEVELOPMENT", scope: "SHOP", shopId: "shop-a" },
-    select: { modelId: true },
-  });
-  assert(proofShopConfiguration?.modelId === null, "Shop Agent Configuration has no explicit model override");
+  assert(
+    proofState?.status === "ACTIVE" &&
+      proofState.plan?.shopifyPlanHandle === "starter",
+    "current subscription points to the Starter BillingPlan",
+  );
+  assert(
+    proofPlan?.commerceModelId === "starter-model",
+    "Starter MerchantPricingPlan points to starter-model",
+  );
+  const proofShopConfiguration =
+    await client.commerceAgentConfiguration.findFirst({
+      where: { environment: "DEVELOPMENT", scope: "SHOP", shopId: "shop-a" },
+      select: { modelId: true },
+    });
+  assert(
+    proofShopConfiguration?.modelId === null,
+    "Shop Agent Configuration has no explicit model override",
+  );
   const proofPlanModel = await client.commerceModelCatalogueEntry.findUnique({
     where: { id: "starter-model" },
     include: { availability: true },
   });
-  assert(proofPlanModel?.enabled && proofPlanModel.availability.enabled && proofPlanModel.availability.scope === "PLATFORM" && proofPlanModel.availability.shopId === null, "Starter model has enabled Platform availability");
+  assert(
+    proofPlanModel?.enabled &&
+      proofPlanModel.availability.enabled &&
+      proofPlanModel.availability.scope === "PLATFORM" &&
+      proofPlanModel.availability.shopId === null,
+    "Starter model has enabled Platform availability",
+  );
   const proofAvailability = CommerceModelAvailabilitySchema.parse({
     id: proofPlanModel.availability.id,
     scope: proofPlanModel.availability.scope,
@@ -297,7 +396,10 @@ try {
 
   await client.subscription.update({
     where: { shopId: "shop-a" },
-    data: { pendingPlanId: "billing-growth", pendingShopifyPlanHandle: "growth" },
+    data: {
+      pendingPlanId: "billing-growth",
+      pendingShopifyPlanHandle: "growth",
+    },
   });
   resolved = await resolveProductionCommerceModel(input);
   assertWinner(resolved, "PRICING_PLAN", "starter-model");
@@ -320,7 +422,9 @@ try {
     where: { id: shopConfiguration.id },
     data: { modelId: null },
   });
-  await client.commerceAgentConfiguration.delete({ where: { id: platformConfiguration.id } });
+  await client.commerceAgentConfiguration.delete({
+    where: { id: platformConfiguration.id },
+  });
   resolved = await resolveProductionCommerceModel(input);
   assertWinner(resolved, "PRICING_PLAN", "growth-model");
 
@@ -352,12 +456,17 @@ try {
     "Shop B selecting Shop A model availability",
   );
 
-  const keyring = parseCredentialKeyring(JSON.stringify({ "disposable-key": encryptionKeyBase64 }));
+  const keyring = parseCredentialKeyring(
+    JSON.stringify({ "disposable-key": encryptionKeyBase64 }),
+  );
   process.env.MODA_ENCRYPTION_KEYS_JSON = JSON.stringify({
     "disposable-key": encryptionKeyBase64,
   });
   process.env.MODA_ENCRYPTION_ACTIVE_KEY_ID = "disposable-key";
-  const credentialResolver = createOpenRouterCredentialResolver({ db: client, keyring });
+  const credentialResolver = createOpenRouterCredentialResolver({
+    db: client,
+    keyring,
+  });
   const firstCredential = sealCredential("credential-A");
   await client.commerceOpenRouterCredential.create({
     data: {
@@ -391,11 +500,22 @@ try {
   });
   const originalModelId = productionInvoker.selection.selectionSource;
   const testRequest = {
-    instructions: [], context: {}, history: [], messages: [], tools: [], maxOutputTokens: 1,
+    instructions: [],
+    context: {},
+    history: [],
+    messages: [],
+    tools: [],
+    maxOutputTokens: 1,
   };
   await productionInvoker.invoke(testRequest, new AbortController().signal);
-  assert(observedInvocations[0]?.credential === "credential-A", "first invocation uses credential A");
-  assert(observedInvocations[0]?.providerModelId === "platform-model", "invoker retains selected Platform model");
+  assert(
+    observedInvocations[0]?.credential === "credential-A",
+    "first invocation uses credential A",
+  );
+  assert(
+    observedInvocations[0]?.providerModelId === "platform-model",
+    "invoker retains selected Platform model",
+  );
 
   const secondCredential = sealCredential("credential-B");
   await client.commerceOpenRouterCredential.update({
@@ -407,9 +527,18 @@ try {
     data: { modelId: "starter-model" },
   });
   await productionInvoker.invoke(testRequest, new AbortController().signal);
-  assert(observedInvocations[1]?.credential === "credential-B", "next invocation observes credential B");
-  assert(observedInvocations[1]?.providerModelId === "platform-model", "current invoker keeps original model identity");
-  assert(productionInvoker.selection.selectionSource === originalModelId, "selection provenance is stable for the turn");
+  assert(
+    observedInvocations[1]?.credential === "credential-B",
+    "next invocation observes credential B",
+  );
+  assert(
+    observedInvocations[1]?.providerModelId === "platform-model",
+    "current invoker keeps original model identity",
+  );
+  assert(
+    productionInvoker.selection.selectionSource === originalModelId,
+    "selection provenance is stable for the turn",
+  );
 
   const nextTurnInvoker = await createProductionCommerceModelInvoker({
     ...input,
@@ -417,14 +546,30 @@ try {
     createClient,
   });
   await nextTurnInvoker.invoke(testRequest, new AbortController().signal);
-  assert(observedInvocations[2]?.credential === "credential-B", "new turn also sees current credential");
-  assert(observedInvocations[2]?.providerModelId === "starter-model", "new turn resolves changed model selection");
+  assert(
+    observedInvocations[2]?.credential === "credential-B",
+    "new turn also sees current credential",
+  );
+  assert(
+    observedInvocations[2]?.providerModelId === "starter-model",
+    "new turn resolves changed model selection",
+  );
 
-  console.log("ARCH-024 disposable production-model proof passed (selection, pending-plan, Shop scope, credential rotation, and turn stability)");
+  console.log(
+    "ARCH-024 disposable production-model proof passed (selection, pending-plan, Shop scope, credential rotation, and turn stability)",
+  );
 } finally {
   if (client) await client.$disconnect().catch(() => {});
   delete process.env.MODA_ENCRYPTION_KEYS_JSON;
   delete process.env.MODA_ENCRYPTION_ACTIVE_KEY_ID;
-  try { docker(["rm", "--force", container]); } catch { /* best-effort cleanup */ }
-  try { docker(["network", "rm", network]); } catch { /* best-effort cleanup */ }
+  try {
+    docker(["rm", "--force", container]);
+  } catch {
+    /* best-effort cleanup */
+  }
+  try {
+    docker(["network", "rm", network]);
+  } catch {
+    /* best-effort cleanup */
+  }
 }

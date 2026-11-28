@@ -5,7 +5,11 @@ import {
 } from "../domain/pending-recovery-candidate.js";
 
 import { Queue } from "bullmq";
-import { nextShopifyVerificationRetry, SHOPIFY_VERIFICATION_HORIZON_MS, SHOPIFY_VERIFICATION_INDEX_CUSHION_MS } from "../domain/shopify-abandoned-verification-retry.js";
+import {
+  nextShopifyVerificationRetry,
+  SHOPIFY_VERIFICATION_HORIZON_MS,
+  SHOPIFY_VERIFICATION_INDEX_CUSHION_MS,
+} from "../domain/shopify-abandoned-verification-retry.js";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 
 import { connectionRedis } from "../lib/redis.js";
@@ -13,19 +17,11 @@ import { readRecoveryExecutionPolicy } from "./platform-configuration/consumers.
 import type { CheckoutCreatedContractInput } from "../events/shopify-contract-adapter.js";
 import { createPendingRecoveryCandidateJobId } from "@modainteract/moda-interact-shared/shopify/node";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
-import {
-  shopExecutionEligibilityService,
-} from "./shop-execution-eligibility.service.js";
+import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import { recoveryPolicyService } from "./recovery-policy.service.js";
-import {
-  PendingRecoveryCandidateIndexStore,
-} from "./pending-recovery-candidate/candidate-index.store.js";
-import {
-  CheckoutOrderGuardService,
-} from "./pending-recovery-candidate/checkout-order-guard.service.js";
-import {
-  PendingRecoveryCandidateLifecycleService,
-} from "./pending-recovery-candidate/candidate-lifecycle.service.js";
+import { PendingRecoveryCandidateIndexStore } from "./pending-recovery-candidate/candidate-index.store.js";
+import { CheckoutOrderGuardService } from "./pending-recovery-candidate/checkout-order-guard.service.js";
+import { PendingRecoveryCandidateLifecycleService } from "./pending-recovery-candidate/candidate-lifecycle.service.js";
 import {
   PendingRecoveryCandidateActivityService,
   type CandidateActivityInput,
@@ -45,8 +41,11 @@ const bullMQTelemetry = createBullMQTelemetry({
 
 export type { CandidateActivityInput, CandidateActivityResult };
 
-let pendingCandidateQueue: Queue<PendingRecoveryCandidate, void, string> | null =
-  null;
+let pendingCandidateQueue: Queue<
+  PendingRecoveryCandidate,
+  void,
+  string
+> | null = null;
 
 function getPendingCandidateQueue() {
   if (!pendingCandidateQueue) {
@@ -81,25 +80,40 @@ export class PendingRecoveryCandidateService {
     private readonly candidateIndexStore = new PendingRecoveryCandidateIndexStore(),
     private readonly checkoutOrderGuard = new CheckoutOrderGuardService(),
   ) {
-    this.candidateLifecycleService = new PendingRecoveryCandidateLifecycleService({
-      getQueue: () => getPendingCandidateQueue(),
-      candidateIndexStore: this.candidateIndexStore,
-      withCheckoutLock: (shopId, checkoutToken, callback) =>
-        this.checkoutOrderGuard.withCheckoutLock(shopId, checkoutToken, callback),
-    });
-    this.candidateActivityService = new PendingRecoveryCandidateActivityService({
-      resolveCandidate: (input) => this.candidateLifecycleService.resolve(input),
-      withCheckoutLock: (shopId, checkoutToken, callback) =>
-        this.checkoutOrderGuard.withCheckoutLock(shopId, checkoutToken, callback),
-      cancelCandidate: (candidate) => this.candidateLifecycleService.cancel(candidate),
-      resolveDelayMinutes: async (shopId) =>
-        (await recoveryPolicyService.resolve(shopId)).recoveryDelayMinutes,
-      getQueue: () => getPendingCandidateQueue(),
-      candidateIndexStore: this.candidateIndexStore,
-    });
+    this.candidateLifecycleService =
+      new PendingRecoveryCandidateLifecycleService({
+        getQueue: () => getPendingCandidateQueue(),
+        candidateIndexStore: this.candidateIndexStore,
+        withCheckoutLock: (shopId, checkoutToken, callback) =>
+          this.checkoutOrderGuard.withCheckoutLock(
+            shopId,
+            checkoutToken,
+            callback,
+          ),
+      });
+    this.candidateActivityService = new PendingRecoveryCandidateActivityService(
+      {
+        resolveCandidate: (input) =>
+          this.candidateLifecycleService.resolve(input),
+        withCheckoutLock: (shopId, checkoutToken, callback) =>
+          this.checkoutOrderGuard.withCheckoutLock(
+            shopId,
+            checkoutToken,
+            callback,
+          ),
+        cancelCandidate: (candidate) =>
+          this.candidateLifecycleService.cancel(candidate),
+        resolveDelayMinutes: async (shopId) =>
+          (await recoveryPolicyService.resolve(shopId)).recoveryDelayMinutes,
+        getQueue: () => getPendingCandidateQueue(),
+        candidateIndexStore: this.candidateIndexStore,
+      },
+    );
   }
 
-  async scheduleFromCheckoutCreated(input: CheckoutCreatedContractInput): Promise<
+  async scheduleFromCheckoutCreated(
+    input: CheckoutCreatedContractInput,
+  ): Promise<
     | {
         outcome: "enqueued" | "refreshed";
         jobId: string;
@@ -109,12 +123,18 @@ export class PendingRecoveryCandidateService {
     | {
         outcome: "discarded-shop-unavailable";
         shopDomain: string;
-        reason?: "CONTRACT_REQUIRED" | "SUBSCRIPTION_FROZEN" | "SHOP_UNAVAILABLE" | "UNMAPPED_PLAN" | "SYNC_ERROR";
+        reason?:
+          | "CONTRACT_REQUIRED"
+          | "SUBSCRIPTION_FROZEN"
+          | "SHOP_UNAVAILABLE"
+          | "UNMAPPED_PLAN"
+          | "SYNC_ERROR";
       }
     | { outcome: "discarded-subscription-frozen"; shopDomain: string }
   > {
     const shopDomain = input.shopDomain.trim().toLowerCase();
-    const shop = await shopExecutionEligibilityService.resolveShopByDomain(shopDomain);
+    const shop =
+      await shopExecutionEligibilityService.resolveShopByDomain(shopDomain);
 
     if (!shop) {
       throw new Error(`Shop not found for domain: ${shopDomain}`);
@@ -151,7 +171,10 @@ export class PendingRecoveryCandidateService {
       ...(input.internationalContext
         ? { internationalContext: input.internationalContext }
         : {}),
-      lastActivityAt: canonicalCandidateActivityAt(input.activityAt, schedulingNow),
+      lastActivityAt: canonicalCandidateActivityAt(
+        input.activityAt,
+        schedulingNow,
+      ),
     };
 
     const queue = getPendingCandidateQueue();
@@ -176,11 +199,20 @@ export class PendingRecoveryCandidateService {
       // A duplicate or stale checkout-created webhook must not reset the
       // bounded Shopify verification clock or promote a delayed retry early.
       // Only genuinely newer activity may restart the merchant inactivity delay.
-      const previousActivityAt = existingJob.data.lastActivityAt ?? existingJob.data.checkoutCreatedAt;
-      if (existingJob.data.shopifyVerification && previousActivityAt &&
-          Date.parse(candidate.lastActivityAt ?? "") <= Date.parse(previousActivityAt)) {
-        return { outcome: "refreshed", jobId: activeJobId, delayMinutes,
-          candidate: existingJob.data };
+      const previousActivityAt =
+        existingJob.data.lastActivityAt ?? existingJob.data.checkoutCreatedAt;
+      if (
+        existingJob.data.shopifyVerification &&
+        previousActivityAt &&
+        Date.parse(candidate.lastActivityAt ?? "") <=
+          Date.parse(previousActivityAt)
+      ) {
+        return {
+          outcome: "refreshed",
+          jobId: activeJobId,
+          delayMinutes,
+          candidate: existingJob.data,
+        };
       }
       const effectiveCandidate = {
         ...candidate,
@@ -194,18 +226,27 @@ export class PendingRecoveryCandidateService {
       };
       if (newJob && legacyJob) {
         await legacyJob.remove();
-        await this.candidateIndexStore.removeShopMember(candidate.shopId, legacyJobId);
+        await this.candidateIndexStore.removeShopMember(
+          candidate.shopId,
+          legacyJobId,
+        );
       }
       if (
         previousCartToken &&
         previousCartToken !== effectiveCandidate.cartToken
       ) {
-        await this.candidateIndexStore.removeCartAlias(candidate.shopId, previousCartToken);
+        await this.candidateIndexStore.removeCartAlias(
+          candidate.shopId,
+          previousCartToken,
+        );
       }
       await existingJob.updateData(effectiveCandidate);
       const state = await existingJob.getState();
       if (state === "delayed") {
-        const dueAtMs = candidateActivityDueAtMs(effectiveLastActivityAt, delayMinutes);
+        const dueAtMs = candidateActivityDueAtMs(
+          effectiveLastActivityAt,
+          delayMinutes,
+        );
         await existingJob.changeDelay(Math.max(0, dueAtMs - Date.now()));
       }
 
@@ -213,9 +254,10 @@ export class PendingRecoveryCandidateService {
         candidate: effectiveCandidate,
         jobId: activeJobId,
         delayMinutes,
-        dueAtMs: state === "delayed"
-          ? candidateActivityDueAtMs(effectiveLastActivityAt, delayMinutes)
-          : Date.now(),
+        dueAtMs:
+          state === "delayed"
+            ? candidateActivityDueAtMs(effectiveLastActivityAt, delayMinutes)
+            : Date.now(),
         shouldIndexShop:
           state === "delayed" || state === "waiting" || state === "active",
       });
@@ -228,7 +270,10 @@ export class PendingRecoveryCandidateService {
       };
     }
 
-    const dueAtMs = candidateActivityDueAtMs(candidate.lastActivityAt, delayMinutes);
+    const dueAtMs = candidateActivityDueAtMs(
+      candidate.lastActivityAt,
+      delayMinutes,
+    );
     await queue.add(EVALUATE_PENDING_RECOVERY_JOB, candidate, {
       jobId,
       delay: Math.max(0, dueAtMs - schedulingNow),
@@ -260,40 +305,63 @@ export class PendingRecoveryCandidateService {
     internationalContext?: InternationalContext;
   }) {
     const shopDomain = input.shopDomain.trim().toLowerCase();
-    const shop = await shopExecutionEligibilityService.resolveShopByDomain(shopDomain);
+    const shop =
+      await shopExecutionEligibilityService.resolveShopByDomain(shopDomain);
     if (!shop) throw new Error(`Shop not found for domain: ${shopDomain}`);
     if (shop.status !== "ACTIVE") {
       return { outcome: "discarded-shop-unavailable", shopDomain } as const;
     }
-    const execution = shopExecutionEligibilityService.evaluateResolvedShop(shop, "recovery");
+    const execution = shopExecutionEligibilityService.evaluateResolvedShop(
+      shop,
+      "recovery",
+    );
     if (!execution.allowed) {
       if (execution.reason === "SUBSCRIPTION_FROZEN") {
-        return { outcome: "discarded-subscription-frozen", shopDomain } as const;
+        return {
+          outcome: "discarded-subscription-frozen",
+          shopDomain,
+        } as const;
       }
-      return { outcome: "discarded-shop-unavailable", shopDomain, reason: execution.reason } as const;
+      return {
+        outcome: "discarded-shop-unavailable",
+        shopDomain,
+        reason: execution.reason,
+      } as const;
     }
 
-    return this.checkoutOrderGuard.withCheckoutLock(shop.id, input.checkoutToken, async () => {
-      if (await this.checkoutOrderGuard.hasOrderProcessed(shop.id, input.checkoutToken)) {
-        return { outcome: "discarded-order-completed", shopDomain } as const;
-      }
+    return this.checkoutOrderGuard.withCheckoutLock(
+      shop.id,
+      input.checkoutToken,
+      async () => {
+        if (
+          await this.checkoutOrderGuard.hasOrderProcessed(
+            shop.id,
+            input.checkoutToken,
+          )
+        ) {
+          return { outcome: "discarded-order-completed", shopDomain } as const;
+        }
 
-      const policy = await recoveryPolicyService.resolve(shop.id);
-      const delayMinutes = policy.recoveryDelayMinutes;
-      const candidate: PendingRecoveryCandidate = {
-        shopId: shop.id,
-        shopDomain,
-        checkoutToken: input.checkoutToken,
-        cartToken: input.cartToken ?? null,
-        abandonedCheckoutUrl: input.abandonedCheckoutUrl ?? null,
-        checkoutCreatedAt: input.checkoutCreatedAt ?? null,
-        ...(input.internationalContext
-          ? { internationalContext: input.internationalContext }
-          : {}),
-        lastActivityAt: canonicalCandidateActivityAt(input.activityAt),
-      };
-      return this.candidateLifecycleService.scheduleFromCheckoutUpdated(candidate, delayMinutes);
-    });
+        const policy = await recoveryPolicyService.resolve(shop.id);
+        const delayMinutes = policy.recoveryDelayMinutes;
+        const candidate: PendingRecoveryCandidate = {
+          shopId: shop.id,
+          shopDomain,
+          checkoutToken: input.checkoutToken,
+          cartToken: input.cartToken ?? null,
+          abandonedCheckoutUrl: input.abandonedCheckoutUrl ?? null,
+          checkoutCreatedAt: input.checkoutCreatedAt ?? null,
+          ...(input.internationalContext
+            ? { internationalContext: input.internationalContext }
+            : {}),
+          lastActivityAt: canonicalCandidateActivityAt(input.activityAt),
+        };
+        return this.candidateLifecycleService.scheduleFromCheckoutUpdated(
+          candidate,
+          delayMinutes,
+        );
+      },
+    );
   }
 
   async findCandidateJobIdByCheckout(input: {
@@ -388,7 +456,6 @@ export class PendingRecoveryCandidateService {
     return this.checkoutOrderGuard.hasOrderProcessed(shopId, checkoutToken);
   }
 
-
   /** Reschedule the SAME active Shopify BullMQ job only for absent provider
    * confirmation. The checkout mutex serialises this transition with order
    * completion and checkout updates. The callback must update the job payload
@@ -399,31 +466,56 @@ export class PendingRecoveryCandidateService {
     jobId: string,
     move: (updated: PendingRecoveryCandidate, dueAtMs: number) => Promise<void>,
     now = Date.now(),
-  ): Promise<{ kind: "deferred"; dueAtMs: number; attempt: number } |
-      { kind: "exhausted" | "superseded" | "order-completed" }> {
-    return this.checkoutOrderGuard.withCheckoutLock(candidate.shopId, candidate.checkoutToken, async () => {
-      const indexed = await this.candidateIndexStore.findByCheckout({
-        shopId: candidate.shopId, checkoutToken: candidate.checkoutToken,
-      });
-      if (indexed !== jobId) return { kind: "superseded" } as const;
-      if (await this.checkoutOrderGuard.hasOrderProcessed(candidate.shopId, candidate.checkoutToken)) {
-        return { kind: "order-completed" } as const;
-      }
-      const next = nextShopifyVerificationRetry(candidate.shopifyVerification, now);
-      if (!next) return { kind: "exhausted" } as const;
-      const updated: PendingRecoveryCandidate = {
-        ...candidate, shopifyVerification: next.state,
-      };
-      // Keep identity discoverable for the delayed attempt. The maturity worker
-      // will perform the normal authorisation + completion checks on each retry.
-      await this.candidateIndexStore.upsert({
-        candidate: updated, jobId, delayMinutes: 0, dueAtMs: next.dueAtMs,
-        shouldIndexShop: true,
-        retentionMs: SHOPIFY_VERIFICATION_HORIZON_MS + SHOPIFY_VERIFICATION_INDEX_CUSHION_MS,
-      });
-      await move(updated, next.dueAtMs);
-      return { kind: "deferred", dueAtMs: next.dueAtMs, attempt: next.state.deferrals + 1 } as const;
-    });
+  ): Promise<
+    | { kind: "deferred"; dueAtMs: number; attempt: number }
+    | { kind: "exhausted" | "superseded" | "order-completed" }
+  > {
+    return this.checkoutOrderGuard.withCheckoutLock(
+      candidate.shopId,
+      candidate.checkoutToken,
+      async () => {
+        const indexed = await this.candidateIndexStore.findByCheckout({
+          shopId: candidate.shopId,
+          checkoutToken: candidate.checkoutToken,
+        });
+        if (indexed !== jobId) return { kind: "superseded" } as const;
+        if (
+          await this.checkoutOrderGuard.hasOrderProcessed(
+            candidate.shopId,
+            candidate.checkoutToken,
+          )
+        ) {
+          return { kind: "order-completed" } as const;
+        }
+        const next = nextShopifyVerificationRetry(
+          candidate.shopifyVerification,
+          now,
+        );
+        if (!next) return { kind: "exhausted" } as const;
+        const updated: PendingRecoveryCandidate = {
+          ...candidate,
+          shopifyVerification: next.state,
+        };
+        // Keep identity discoverable for the delayed attempt. The maturity worker
+        // will perform the normal authorisation + completion checks on each retry.
+        await this.candidateIndexStore.upsert({
+          candidate: updated,
+          jobId,
+          delayMinutes: 0,
+          dueAtMs: next.dueAtMs,
+          shouldIndexShop: true,
+          retentionMs:
+            SHOPIFY_VERIFICATION_HORIZON_MS +
+            SHOPIFY_VERIFICATION_INDEX_CUSHION_MS,
+        });
+        await move(updated, next.dueAtMs);
+        return {
+          kind: "deferred",
+          dueAtMs: next.dueAtMs,
+          attempt: next.state.deferrals + 1,
+        } as const;
+      },
+    );
   }
 
   async handleCandidateMatured(
@@ -445,10 +537,9 @@ export class PendingRecoveryCandidateService {
     );
     return candidate;
   }
-
-
 }
 
 export const pendingRecoveryCandidateService =
-  new PendingRecoveryCandidateService(new PendingRecoveryCandidateIndexStore(readRecoveryExecutionPolicy));
-
+  new PendingRecoveryCandidateService(
+    new PendingRecoveryCandidateIndexStore(readRecoveryExecutionPolicy),
+  );

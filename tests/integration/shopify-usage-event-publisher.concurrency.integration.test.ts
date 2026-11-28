@@ -52,17 +52,27 @@ describeWithDatabase("Shopify usage publisher PostgreSQL concurrency", () => {
       });
 
       const [first, second] = await Promise.all([
-        new ShopifyUsageEventPublisherService(firstClient, firstProvider).publishDue(),
-        new ShopifyUsageEventPublisherService(secondClient, secondProvider).publishDue(),
+        new ShopifyUsageEventPublisherService(
+          firstClient,
+          firstProvider,
+        ).publishDue(),
+        new ShopifyUsageEventPublisherService(
+          secondClient,
+          secondProvider,
+        ).publishDue(),
       ]);
 
       expect(first.claimed + second.claimed).toBe(1);
       expect(providerCalls).toBe(1);
-      expect(await database.usageEvent.count({
-        where: { shopId, shopifyReportState: "REPORTED" },
-      })).toBe(1);
+      expect(
+        await database.usageEvent.count({
+          where: { shopId, shopifyReportState: "REPORTED" },
+        }),
+      ).toBe(1);
     } finally {
-      await database.shop.delete({ where: { id: shopId } }).catch(() => undefined);
+      await database.shop
+        .delete({ where: { id: shopId } })
+        .catch(() => undefined);
       await Promise.all([
         database.$disconnect(),
         firstClient.$disconnect(),

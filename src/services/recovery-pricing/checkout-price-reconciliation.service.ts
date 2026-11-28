@@ -1,10 +1,16 @@
-import { initialOutreachRecoveryStateAllowed, isInitialOutreachIdentity } from "../../domain/recovery-outreach-identity.js";
+import {
+  initialOutreachRecoveryStateAllowed,
+  isInitialOutreachIdentity,
+} from "../../domain/recovery-outreach-identity.js";
 import {
   CommerceOutreachToolContextSchema,
   CommerceToolOutputs,
   CommerceToolResultSchema,
 } from "@modainteract/moda-interact-shared/commerce";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import {
   compareObservedLinePrices,
@@ -31,14 +37,36 @@ const MAX_PROVIDER_ERROR_PAYLOAD_ITEMS = 8;
 const MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH = 192;
 const ACTIVE_ATTEMPT_STATUSES = new Set(["PENDING", "CAPACITY_BLOCKED"]);
 const PROVIDER_ERROR_PAYLOAD_KEYS = new Set([
-  "message", "code", "type", "error_subcode", "subcode", "status", "status_code",
-  "error_data", "details", "errors", "error", "reason", "field", "fields",
-  "request_id", "trace_id", "fbtrace_id", "provider_request_id", "error_user_title",
-  "error_user_msg", "user_title", "user_msg", "category", "retryable",
+  "message",
+  "code",
+  "type",
+  "error_subcode",
+  "subcode",
+  "status",
+  "status_code",
+  "error_data",
+  "details",
+  "errors",
+  "error",
+  "reason",
+  "field",
+  "fields",
+  "request_id",
+  "trace_id",
+  "fbtrace_id",
+  "provider_request_id",
+  "error_user_title",
+  "error_user_msg",
+  "user_title",
+  "user_msg",
+  "category",
+  "retryable",
 ]);
 
 type PriceReconciliationLogger = Pick<StructuredLogger, "error">;
-type Product = NonNullable<ReturnType<typeof CommerceToolOutputs.commerce_get_product.parse>["product"]>;
+type Product = NonNullable<
+  ReturnType<typeof CommerceToolOutputs.commerce_get_product.parse>["product"]
+>;
 type CatalogueRead =
   | { kind: "product"; product: Product }
   | { kind: "unavailable"; reasonCode: string; sourceCode?: string };
@@ -86,7 +114,9 @@ export type CheckoutPriceReconciliationServiceDependencies = Readonly<{
 }>;
 
 function safeId(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 && value.trim() === value ? value : null;
+  return typeof value === "string" && value.length > 0 && value.trim() === value
+    ? value
+    : null;
 }
 
 function safePrice(value: unknown): string | null {
@@ -94,14 +124,17 @@ function safePrice(value: unknown): string | null {
 }
 
 function safeQuantity(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : null;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return null;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : null;
 }
 
@@ -115,24 +148,36 @@ function redactSourceErrorText(value: string): Readonly<{
   truncated: boolean;
 }> {
   if (/^\s*(?:\{|\[|<html\b|<!doctype\s+html)/i.test(value)) {
-    return { value: "[REDACTED_PAYLOAD]", redactionApplied: true, truncated: false };
+    return {
+      value: "[REDACTED_PAYLOAD]",
+      redactionApplied: true,
+      truncated: false,
+    };
   }
-  const payloadMarker = /\b(?:response|error)?\s*(?:body|payload)\s*[:=]\s*/i.exec(value);
+  const payloadMarker =
+    /\b(?:response|error)?\s*(?:body|payload)\s*[:=]\s*/i.exec(value);
   const objectPayload = /\s+\{(?=["'][^"']+["']\s*:)/.exec(value);
   const payloadStart = payloadMarker?.index ?? objectPayload?.index;
-  const withoutPayload = payloadStart === undefined
-    ? value
-    : `${value.slice(0, payloadStart)} [REDACTED_PAYLOAD]`;
+  const withoutPayload =
+    payloadStart === undefined
+      ? value
+      : `${value.slice(0, payloadStart)} [REDACTED_PAYLOAD]`;
   const scrubbed = withoutPayload
     .replace(/[\r\n\t]+/g, " ")
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED]")
     .replace(/\b(?:https?:\/\/|www\.)[^\s<>"']+/gi, "[REDACTED_URL]")
     .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
-    .replace(/\b(authorization|access[_ -]?token|refresh[_ -]?token|api[_ -]?key|client[_ -]?secret|password|passwd|secret|token)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1=[REDACTED]")
-    .replace(/(?<![A-Za-z0-9])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9])/g, (candidate) => {
-      const digitCount = candidate.replace(/\D/g, "").length;
-      return digitCount >= 7 && digitCount <= 15 ? "[REDACTED]" : candidate;
-    });
+    .replace(
+      /\b(authorization|access[_ -]?token|refresh[_ -]?token|api[_ -]?key|client[_ -]?secret|password|passwd|secret|token)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$1=[REDACTED]",
+    )
+    .replace(
+      /(?<![A-Za-z0-9])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9])/g,
+      (candidate) => {
+        const digitCount = candidate.replace(/\D/g, "").length;
+        return digitCount >= 7 && digitCount <= 15 ? "[REDACTED]" : candidate;
+      },
+    );
   const truncated = scrubbed.length > MAX_SOURCE_ERROR_TEXT_LENGTH;
   return {
     value: truncated
@@ -143,7 +188,11 @@ function redactSourceErrorText(value: string): Readonly<{
   };
 }
 
-type PayloadSanitizationState = { remainingNodes: number; redactionApplied: boolean; truncated: boolean };
+type PayloadSanitizationState = {
+  remainingNodes: number;
+  redactionApplied: boolean;
+  truncated: boolean;
+};
 
 function sanitizeProviderErrorPayload(
   value: unknown,
@@ -156,24 +205,29 @@ function sanitizeProviderErrorPayload(
   }
   state.remainingNodes--;
   if (typeof value === "string") {
-    const boundedInput = value.length > MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH * 4
-      ? value.slice(0, MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH * 4)
-      : value;
+    const boundedInput =
+      value.length > MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH * 4
+        ? value.slice(0, MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH * 4)
+        : value;
     if (boundedInput.length < value.length) state.truncated = true;
     const safeText = redactSourceErrorText(boundedInput);
-    const truncated = safeText.value.length > MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH;
+    const truncated =
+      safeText.value.length > MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH;
     state.redactionApplied ||= safeText.redactionApplied;
     state.truncated ||= safeText.truncated || truncated;
     return truncated
       ? `${safeText.value.slice(0, MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH)}[TRUNCATED]`
       : safeText.value;
   }
-  if (typeof value === "number") return Number.isFinite(value) ? value : "[REDACTED]";
+  if (typeof value === "number")
+    return Number.isFinite(value) ? value : "[REDACTED]";
   if (typeof value === "boolean" || value === null) return value;
   if (Array.isArray(value)) {
     const items = value.slice(0, MAX_PROVIDER_ERROR_PAYLOAD_ITEMS);
     if (value.length > items.length) state.truncated = true;
-    return items.map((item) => sanitizeProviderErrorPayload(item, state, depth + 1));
+    return items.map((item) =>
+      sanitizeProviderErrorPayload(item, state, depth + 1),
+    );
   }
   const object = objectRecord(value);
   if (!object) {
@@ -195,8 +249,12 @@ function sanitizeProviderErrorPayload(
     }
     const item = object[key];
     const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (!PROVIDER_ERROR_PAYLOAD_KEYS.has(key.toLowerCase()) ||
-        /email|phone|address|customer|recipient|token|secret|password|authorization|cookie|url|description|coupon|prompt|header|body|success/.test(normalizedKey)) {
+    if (
+      !PROVIDER_ERROR_PAYLOAD_KEYS.has(key.toLowerCase()) ||
+      /email|phone|address|customer|recipient|token|secret|password|authorization|cookie|url|description|coupon|prompt|header|body|success/.test(
+        normalizedKey,
+      )
+    ) {
       state.redactionApplied = true;
       continue;
     }
@@ -210,41 +268,72 @@ function sanitizeProviderErrorPayload(
 }
 
 function sourceErrorPayload(error: unknown): unknown {
-  if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+  if (
+    error === null ||
+    (typeof error !== "object" && typeof error !== "function")
+  )
+    return undefined;
   const source = error as Record<string, unknown>;
-  return source.providerErrorPayload ?? source.providerError ?? source.error_data ?? source.errorData ??
-    source.error ?? source.details ?? source.responseBody ?? source.body ?? source.payload;
+  return (
+    source.providerErrorPayload ??
+    source.providerError ??
+    source.error_data ??
+    source.errorData ??
+    source.error ??
+    source.details ??
+    source.responseBody ??
+    source.body ??
+    source.payload
+  );
 }
 
 function isProductionEnvironment(environment: string): boolean {
   return /^(?:prod(?:uction)?|live)(?:$|[-_.])/.test(environment);
 }
 
-function safeSourceErrorDiagnostic(error: unknown, includePayload: boolean): Readonly<{
+function safeSourceErrorDiagnostic(
+  error: unknown,
+  includePayload: boolean,
+): Readonly<{
   diagnostic: Readonly<Record<string, unknown>>;
   redactionApplied: boolean;
   truncated: boolean;
 }> {
-  const source = error !== null && (typeof error === "object" || typeof error === "function")
-    ? error as Record<string, unknown>
-    : null;
-  const name = error instanceof Error
-    ? error.name
-    : typeof source?.name === "string" ? source.name : "NonErrorThrown";
-  const message = error instanceof Error
-    ? error.message
-    : typeof source?.message === "string" ? source.message
-      : typeof error === "string" ? error : "[NonErrorSourceFailure]";
+  const source =
+    error !== null && (typeof error === "object" || typeof error === "function")
+      ? (error as Record<string, unknown>)
+      : null;
+  const name =
+    error instanceof Error
+      ? error.name
+      : typeof source?.name === "string"
+        ? source.name
+        : "NonErrorThrown";
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof source?.message === "string"
+        ? source.message
+        : typeof error === "string"
+          ? error
+          : "[NonErrorSourceFailure]";
   const safeName = redactSourceErrorText(name);
   const safeMessage = redactSourceErrorText(message);
   const diagnostic: Record<string, unknown> = {
     name: safeName.value.slice(0, 128),
     message: safeMessage.value,
   };
-  let redactionApplied = safeName.redactionApplied || safeMessage.redactionApplied;
-  let truncated = safeName.truncated || safeMessage.truncated || safeName.value.length > 128;
+  let redactionApplied =
+    safeName.redactionApplied || safeMessage.redactionApplied;
+  let truncated =
+    safeName.truncated || safeMessage.truncated || safeName.value.length > 128;
   const status = source?.status ?? source?.statusCode ?? source?.httpStatus;
-  if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) {
+  if (
+    typeof status === "number" &&
+    Number.isInteger(status) &&
+    status >= 100 &&
+    status <= 599
+  ) {
     diagnostic.status = status;
   }
   const code = source?.code ?? source?.errorCode;
@@ -264,7 +353,10 @@ function safeSourceErrorDiagnostic(error: unknown, includePayload: boolean): Rea
       };
       const sanitizedPayload = sanitizeProviderErrorPayload(payload, state);
       const serialized = JSON.stringify(sanitizedPayload);
-      if (Buffer.byteLength(serialized, "utf8") <= MAX_PROVIDER_ERROR_PAYLOAD_BYTES) {
+      if (
+        Buffer.byteLength(serialized, "utf8") <=
+        MAX_PROVIDER_ERROR_PAYLOAD_BYTES
+      ) {
         diagnostic.providerErrorPayload = sanitizedPayload;
       } else {
         diagnostic.providerErrorPayload = "[TRUNCATED]";
@@ -277,7 +369,10 @@ function safeSourceErrorDiagnostic(error: unknown, includePayload: boolean): Rea
   return { diagnostic, redactionApplied, truncated };
 }
 
-function waitForAbort(signal: AbortSignal): { promise: Promise<never>; dispose: () => void } {
+function waitForAbort(signal: AbortSignal): {
+  promise: Promise<never>;
+  dispose: () => void;
+} {
   let onAbort: (() => void) | undefined;
   const promise = new Promise<never>((_resolve, reject) => {
     onAbort = () => reject(abortError(signal));
@@ -286,7 +381,9 @@ function waitForAbort(signal: AbortSignal): { promise: Promise<never>; dispose: 
   });
   return {
     promise,
-    dispose: () => { if (onAbort) signal.removeEventListener("abort", onAbort); },
+    dispose: () => {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    },
   };
 }
 
@@ -304,15 +401,23 @@ export class CheckoutPriceReconciliationService {
   private readonly setTimer: typeof setTimeout;
   private readonly clearTimer: typeof clearTimeout;
 
-  constructor(private readonly dependencies: CheckoutPriceReconciliationServiceDependencies) {
+  constructor(
+    private readonly dependencies: CheckoutPriceReconciliationServiceDependencies,
+  ) {
     this.now = dependencies.now ?? (() => new Date());
     this.logger = dependencies.logger ?? defaultLogger;
-    this.environment = (dependencies.environment ?? resolveDeploymentEnvironmentName()).trim().toLowerCase();
+    this.environment = (
+      dependencies.environment ?? resolveDeploymentEnvironmentName()
+    )
+      .trim()
+      .toLowerCase();
     this.setTimer = dependencies.setTimer ?? setTimeout;
     this.clearTimer = dependencies.clearTimer ?? clearTimeout;
   }
 
-  async reconcile(input: PriceReconciliationInput): Promise<CheckoutPriceReconciliation> {
+  async reconcile(
+    input: PriceReconciliationInput,
+  ): Promise<CheckoutPriceReconciliation> {
     this.validateInput(input);
     input.signal.throwIfAborted();
     const startedAt = this.now();
@@ -320,7 +425,10 @@ export class CheckoutPriceReconciliationService {
       throw new InvalidPriceReconciliationAttemptError("CLOCK_INVALID");
     }
     const evaluatedAt = startedAt.toISOString();
-    const initial = await this.readAndValidateState(input, "before_product_reads");
+    const initial = await this.readAndValidateState(
+      input,
+      "before_product_reads",
+    );
     const recovery = initial.state.recovery;
     const basket = recovery.lineItems;
 
@@ -349,35 +457,43 @@ export class CheckoutPriceReconciliationService {
       });
     }
 
-    const preparedLines = basket.map((line, index) => this.prepareLine(
-      line,
-      index,
-      recovery.platform,
-      recovery.currency,
-    ));
+    const preparedLines = basket.map((line, index) =>
+      this.prepareLine(line, index, recovery.platform, recovery.currency),
+    );
     const requestsByKey = new Map<string, ProductRequest>();
     for (const line of preparedLines) {
       if (!line.requestKey || !line.productId) continue;
       const request = requestsByKey.get(line.requestKey);
       if (request) request.lineKeys.push(line.lineKey);
-      else requestsByKey.set(line.requestKey, {
-        key: line.requestKey,
-        productId: line.productId,
-        variantId: line.variantId,
-        lineKeys: [line.lineKey],
-      });
+      else
+        requestsByKey.set(line.requestKey, {
+          key: line.requestKey,
+          productId: line.productId,
+          variantId: line.variantId,
+          lineKeys: [line.lineKey],
+        });
     }
 
-    const reads = await this.readProducts(input, [...requestsByKey.values()], startedAt.getTime());
+    const reads = await this.readProducts(
+      input,
+      [...requestsByKey.values()],
+      startedAt.getTime(),
+    );
     const final = await this.readAndValidateState(input, "after_product_reads");
-    if (final.fingerprint !== initial.fingerprint ||
-        final.state.recovery.platform !== recovery.platform) {
-      throw new InvalidPriceReconciliationAttemptError("RECOVERY_BASKET_CHANGED_DURING_READ");
+    if (
+      final.fingerprint !== initial.fingerprint ||
+      final.state.recovery.platform !== recovery.platform
+    ) {
+      throw new InvalidPriceReconciliationAttemptError(
+        "RECOVERY_BASKET_CHANGED_DURING_READ",
+      );
     }
     input.signal.throwIfAborted();
     if (reads.failure !== undefined) throw reads.failure;
 
-    const lines = preparedLines.map((line) => this.finishLine(line, recovery.platform, reads.outcomes));
+    const lines = preparedLines.map((line) =>
+      this.finishLine(line, recovery.platform, reads.outcomes),
+    );
     return deriveCheckoutPriceReconciliation({
       shopId: input.shopId,
       checkoutRecoveryId: input.checkoutRecoveryId,
@@ -390,12 +506,19 @@ export class CheckoutPriceReconciliationService {
   }
 
   private validateInput(input: PriceReconciliationInput): void {
-    if (!input || typeof input.shopId !== "string" || input.shopId.length === 0 ||
-        typeof input.checkoutRecoveryId !== "string" || input.checkoutRecoveryId.length === 0 ||
-        typeof input.outreachAttemptId !== "string" || input.outreachAttemptId.length === 0 ||
-        !Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 1 ||
-        !/^[a-f0-9]{64}$/.test(input.expectedBasketFingerprint) ||
-        !(input.signal instanceof AbortSignal)) {
+    if (
+      !input ||
+      typeof input.shopId !== "string" ||
+      input.shopId.length === 0 ||
+      typeof input.checkoutRecoveryId !== "string" ||
+      input.checkoutRecoveryId.length === 0 ||
+      typeof input.outreachAttemptId !== "string" ||
+      input.outreachAttemptId.length === 0 ||
+      !Number.isSafeInteger(input.expectedGeneration) ||
+      input.expectedGeneration < 1 ||
+      !/^[a-f0-9]{64}$/.test(input.expectedBasketFingerprint) ||
+      !(input.signal instanceof AbortSignal)
+    ) {
       throw new InvalidPriceReconciliationAttemptError("INPUT_INVALID");
     }
   }
@@ -423,17 +546,32 @@ export class CheckoutPriceReconciliationService {
       throw error;
     }
     input.signal.throwIfAborted();
-    if (!state || state.recovery.id !== input.checkoutRecoveryId || state.recovery.shopId !== input.shopId ||
-        state.recovery.generation !== input.expectedGeneration ||
-        (this.dependencies.stage === "FOLLOW_UP" ? !["MESSAGE_SENT", "ENGAGED"].includes(state.recovery.status) : !initialOutreachRecoveryStateAllowed(input.outreachAttemptId, state.recovery.status)) ||
-        !state.attempt || state.attempt.id !== input.outreachAttemptId ||
-        state.attempt.checkoutRecoveryId !== input.checkoutRecoveryId ||
-        (this.dependencies.stage === "FOLLOW_UP"
-          ? state.attempt.sequence !== 2 || state.attempt.trigger !== "POST_WINDOW_FOLLOW_UP" ||
-            state.attempt.initiatedBy !== "HUMAN" || !["PENDING", "CAPACITY_BLOCKED"].includes(state.attempt.status)
-          : !isInitialOutreachIdentity(state.attempt) ||
-            !ACTIVE_ATTEMPT_STATUSES.has(state.attempt.status) || state.attempt.initiatedBy === "HUMAN")) {
-      throw new InvalidPriceReconciliationAttemptError("RECOVERY_ATTEMPT_LINEAGE_INVALID");
+    if (
+      !state ||
+      state.recovery.id !== input.checkoutRecoveryId ||
+      state.recovery.shopId !== input.shopId ||
+      state.recovery.generation !== input.expectedGeneration ||
+      (this.dependencies.stage === "FOLLOW_UP"
+        ? !["MESSAGE_SENT", "ENGAGED"].includes(state.recovery.status)
+        : !initialOutreachRecoveryStateAllowed(
+            input.outreachAttemptId,
+            state.recovery.status,
+          )) ||
+      !state.attempt ||
+      state.attempt.id !== input.outreachAttemptId ||
+      state.attempt.checkoutRecoveryId !== input.checkoutRecoveryId ||
+      (this.dependencies.stage === "FOLLOW_UP"
+        ? state.attempt.sequence !== 2 ||
+          state.attempt.trigger !== "POST_WINDOW_FOLLOW_UP" ||
+          state.attempt.initiatedBy !== "HUMAN" ||
+          !["PENDING", "CAPACITY_BLOCKED"].includes(state.attempt.status)
+        : !isInitialOutreachIdentity(state.attempt) ||
+          !ACTIVE_ATTEMPT_STATUSES.has(state.attempt.status) ||
+          state.attempt.initiatedBy === "HUMAN")
+    ) {
+      throw new InvalidPriceReconciliationAttemptError(
+        "RECOVERY_ATTEMPT_LINEAGE_INVALID",
+      );
     }
     let fingerprint: string;
     try {
@@ -445,10 +583,14 @@ export class CheckoutPriceReconciliationService {
         lineItems: state.recovery.lineItems,
       });
     } catch {
-      throw new InvalidPriceReconciliationAttemptError("RECOVERY_BASKET_INVALID");
+      throw new InvalidPriceReconciliationAttemptError(
+        "RECOVERY_BASKET_INVALID",
+      );
     }
     if (fingerprint !== input.expectedBasketFingerprint) {
-      throw new InvalidPriceReconciliationAttemptError("RECOVERY_BASKET_FINGERPRINT_MISMATCH");
+      throw new InvalidPriceReconciliationAttemptError(
+        "RECOVERY_BASKET_FINGERPRINT_MISMATCH",
+      );
     }
     return { state, fingerprint };
   }
@@ -460,7 +602,10 @@ export class CheckoutPriceReconciliationService {
     currency: string | null,
   ): PreparedLine {
     const line = objectRecord(raw);
-    if (!line) throw new InvalidPriceReconciliationAttemptError("RECOVERY_BASKET_INVALID");
+    if (!line)
+      throw new InvalidPriceReconciliationAttemptError(
+        "RECOVERY_BASKET_INVALID",
+      );
     const productId = safeId(line.productId);
     const variantId = safeId(line.variantId);
     const variantIsExplicitNull = line.variantId === null;
@@ -470,11 +615,16 @@ export class CheckoutPriceReconciliationService {
     const reasons = new Set<string>();
     if (!productId) reasons.add("MISSING_LINE_IDENTITY");
     if (quantity === null) reasons.add("SOURCE_OBSERVATION_INVALID");
-    if (variantId === null && !variantIsExplicitNull) reasons.add("SOURCE_OBSERVATION_INVALID");
-    if (checkoutUnitPrice === null || checkoutCurrency === null) reasons.add("SNAPSHOT_UNIT_PRICE_UNKNOWN");
-    if (platform === "SHOPIFY" && variantId === null) reasons.add("MISSING_VARIANT_ID");
-    if (platform !== "SHOPIFY" && platform !== "WOOCOMMERCE") reasons.add("SOURCE_OBSERVATION_INVALID");
-    const canRead = productId !== null &&
+    if (variantId === null && !variantIsExplicitNull)
+      reasons.add("SOURCE_OBSERVATION_INVALID");
+    if (checkoutUnitPrice === null || checkoutCurrency === null)
+      reasons.add("SNAPSHOT_UNIT_PRICE_UNKNOWN");
+    if (platform === "SHOPIFY" && variantId === null)
+      reasons.add("MISSING_VARIANT_ID");
+    if (platform !== "SHOPIFY" && platform !== "WOOCOMMERCE")
+      reasons.add("SOURCE_OBSERVATION_INVALID");
+    const canRead =
+      productId !== null &&
       (platform === "WOOCOMMERCE"
         ? variantIsExplicitNull || variantId !== null
         : platform === "SHOPIFY" && variantId !== null);
@@ -500,19 +650,28 @@ export class CheckoutPriceReconciliationService {
     if (requests.length === 0) return { outcomes };
     const deadlineController = new AbortController();
     const failureController = new AbortController();
-    const readSignal = AbortSignal.any([input.signal, deadlineController.signal, failureController.signal]);
+    const readSignal = AbortSignal.any([
+      input.signal,
+      deadlineController.signal,
+      failureController.signal,
+    ]);
     let timedOut = false;
     let failure: unknown;
     let rejectDeadline!: (error: unknown) => void;
     const deadlineError = new ReadBudgetExceededError();
-    const deadlinePromise = new Promise<never>((_resolve, reject) => { rejectDeadline = reject; });
+    const deadlinePromise = new Promise<never>((_resolve, reject) => {
+      rejectDeadline = reject;
+    });
     const expire = () => {
       if (timedOut) return;
       timedOut = true;
       deadlineController.abort(deadlineError);
       rejectDeadline(deadlineError);
     };
-    const remaining = Math.max(0, READ_BUDGET_MS - (this.now().getTime() - startedAtMs));
+    const remaining = Math.max(
+      0,
+      READ_BUDGET_MS - (this.now().getTime() - startedAtMs),
+    );
     const timer: TimerHandle = this.setTimer(expire, remaining);
     let next = 0;
     const callerAbortError = waitForAbort(input.signal);
@@ -525,21 +684,33 @@ export class CheckoutPriceReconciliationService {
         if (!request) return;
         if (timedOut || this.now().getTime() - startedAtMs >= READ_BUDGET_MS) {
           expire();
-          outcomes.set(request.key, { kind: "unavailable", reasonCode: "BUDGET_EXHAUSTED" });
+          outcomes.set(request.key, {
+            kind: "unavailable",
+            reasonCode: "BUDGET_EXHAUSTED",
+          });
           continue;
         }
         const readStartedAt = this.now().getTime();
-        const operation = Promise.resolve().then(() => this.dependencies.productReader.read({
-          shopId: input.shopId,
-          productId: request.productId,
-          variantId: request.variantId,
-          toolContext: CommerceOutreachToolContextSchema.parse({ purpose: "INITIAL_RECOVERY_OUTREACH" }),
-          signal: readSignal,
-        }));
+        const operation = Promise.resolve().then(() =>
+          this.dependencies.productReader.read({
+            shopId: input.shopId,
+            productId: request.productId,
+            variantId: request.variantId,
+            toolContext: CommerceOutreachToolContextSchema.parse({
+              purpose: "INITIAL_RECOVERY_OUTREACH",
+            }),
+            signal: readSignal,
+          }),
+        );
         void operation.catch(() => undefined);
         const operationAbort = waitForAbort(readSignal);
         try {
-          const raw = await Promise.race([operation, deadlinePromise, callerAbortError.promise, operationAbort.promise]);
+          const raw = await Promise.race([
+            operation,
+            deadlinePromise,
+            callerAbortError.promise,
+            operationAbort.promise,
+          ]);
           const outcome = this.parseProductResult(raw);
           outcomes.set(request.key, outcome);
           if (outcome.kind === "unavailable") {
@@ -555,7 +726,10 @@ export class CheckoutPriceReconciliationService {
           }
         } catch (error) {
           if (error === deadlineError || timedOut) {
-            outcomes.set(request.key, { kind: "unavailable", reasonCode: "BUDGET_EXHAUSTED" });
+            outcomes.set(request.key, {
+              kind: "unavailable",
+              reasonCode: "BUDGET_EXHAUSTED",
+            });
             continue;
           }
           if (input.signal.aborted) return;
@@ -579,7 +753,11 @@ export class CheckoutPriceReconciliationService {
     };
 
     try {
-      await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENCY, requests.length) }, () => worker()));
+      await Promise.all(
+        Array.from({ length: Math.min(MAX_CONCURRENCY, requests.length) }, () =>
+          worker(),
+        ),
+      );
     } finally {
       this.clearTimer(timer);
       callerAbortError.dispose();
@@ -591,7 +769,8 @@ export class CheckoutPriceReconciliationService {
 
   private parseProductResult(raw: unknown): CatalogueRead {
     const result = CommerceToolResultSchema.safeParse(raw);
-    if (!result.success) return { kind: "unavailable", reasonCode: "SOURCE_OBSERVATION_INVALID" };
+    if (!result.success)
+      return { kind: "unavailable", reasonCode: "SOURCE_OBSERVATION_INVALID" };
     if (result.data.status === "ERROR") {
       return {
         kind: "unavailable",
@@ -599,9 +778,13 @@ export class CheckoutPriceReconciliationService {
         sourceCode: result.data.code,
       };
     }
-    const output = CommerceToolOutputs.commerce_get_product.safeParse(result.data.data);
-    if (!output.success) return { kind: "unavailable", reasonCode: "SOURCE_OBSERVATION_INVALID" };
-    if (output.data.product === null) return { kind: "unavailable", reasonCode: "CATALOGUE_PRICE_UNAVAILABLE" };
+    const output = CommerceToolOutputs.commerce_get_product.safeParse(
+      result.data.data,
+    );
+    if (!output.success)
+      return { kind: "unavailable", reasonCode: "SOURCE_OBSERVATION_INVALID" };
+    if (output.data.product === null)
+      return { kind: "unavailable", reasonCode: "CATALOGUE_PRICE_UNAVAILABLE" };
     return { kind: "product", product: output.data.product };
   }
 
@@ -620,16 +803,25 @@ export class CheckoutPriceReconciliationService {
         reasons.add("CATALOGUE_PRICE_UNAVAILABLE");
       } else if (read.kind === "unavailable") {
         reasons.add(read.reasonCode);
-        if (read.reasonCode === "BUDGET_EXHAUSTED") reasons.add("CATALOGUE_PRICE_UNAVAILABLE");
-      } else if (read.product.productId !== line.productId || read.product.variantId !== line.variantId) {
+        if (read.reasonCode === "BUDGET_EXHAUSTED")
+          reasons.add("CATALOGUE_PRICE_UNAVAILABLE");
+      } else if (
+        read.product.productId !== line.productId ||
+        read.product.variantId !== line.variantId
+      ) {
         reasons.add("PROVIDER_IDENTITY_MISMATCH");
       } else {
         catalogueUnitPrice = read.product.unitPrice;
         catalogueCurrency = read.product.currency;
         catalogueObservedAt = read.product.observedAt;
-        if (catalogueUnitPrice === null || catalogueCurrency === null) reasons.add("CATALOGUE_PRICE_UNAVAILABLE");
+        if (catalogueUnitPrice === null || catalogueCurrency === null)
+          reasons.add("CATALOGUE_PRICE_UNAVAILABLE");
       }
-    } else if (platform === "SHOPIFY" && line.productId !== null && line.variantId === null) {
+    } else if (
+      platform === "SHOPIFY" &&
+      line.productId !== null &&
+      line.variantId === null
+    ) {
       reasons.add("MISSING_VARIANT_ID");
     }
 
@@ -640,9 +832,8 @@ export class CheckoutPriceReconciliationService {
       catalogueCurrency,
     });
     for (const reasonCode of comparison.reasonCodes) reasons.add(reasonCode);
-    const catalogueComparison = line.quantity === null
-      ? "INCOMPARABLE"
-      : comparison.catalogueComparison;
+    const catalogueComparison =
+      line.quantity === null ? "INCOMPARABLE" : comparison.catalogueComparison;
     return {
       lineKey: line.lineKey,
       productId: line.productId,
@@ -659,16 +850,19 @@ export class CheckoutPriceReconciliationService {
     };
   }
 
-  private logFailure(input: PriceReconciliationInput, details: Readonly<{
-    stage: string;
-    operation: string;
-    reasonCode: string;
-    durationMs: number;
-    affectedLineCount: number;
-    lineKey?: string;
-    sourceCode?: string;
-    error?: unknown;
-  }>): void {
+  private logFailure(
+    input: PriceReconciliationInput,
+    details: Readonly<{
+      stage: string;
+      operation: string;
+      reasonCode: string;
+      durationMs: number;
+      affectedLineCount: number;
+      lineKey?: string;
+      sourceCode?: string;
+      error?: unknown;
+    }>,
+  ): void {
     try {
       this.logger.error("recovery.price_reconciliation.source_failed", {
         shopId: input.shopId,
@@ -682,14 +876,19 @@ export class CheckoutPriceReconciliationService {
         affectedLineCount: details.affectedLineCount,
         ...(details.lineKey ? { lineKey: details.lineKey } : {}),
         ...(details.sourceCode ? { sourceCode: details.sourceCode } : {}),
-        ...(details.error === undefined ? {} : (() => {
-          const safeError = safeSourceErrorDiagnostic(details.error, !isProductionEnvironment(this.environment));
-          return {
-            sourceError: safeError.diagnostic,
-            redactionApplied: safeError.redactionApplied,
-            ...(safeError.truncated ? { truncated: true } : {}),
-          };
-        })()),
+        ...(details.error === undefined
+          ? {}
+          : (() => {
+              const safeError = safeSourceErrorDiagnostic(
+                details.error,
+                !isProductionEnvironment(this.environment),
+              );
+              return {
+                sourceError: safeError.diagnostic,
+                redactionApplied: safeError.redactionApplied,
+                ...(safeError.truncated ? { truncated: true } : {}),
+              };
+            })()),
       });
     } catch {
       // Logging must not alter source failures or reconciliation results.

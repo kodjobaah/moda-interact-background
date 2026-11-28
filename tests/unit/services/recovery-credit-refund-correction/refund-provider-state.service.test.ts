@@ -66,7 +66,10 @@ function harness(providerResult: typeof provider | null = provider) {
   return {
     database,
     partner,
-    service: new RefundProviderStateService(database as never, partner as never),
+    service: new RefundProviderStateService(
+      database as never,
+      partner as never,
+    ),
   };
 }
 
@@ -110,7 +113,8 @@ describe("RefundProviderStateService", () => {
 
     await expect(test.service.read(refundInput())).resolves.toEqual({
       safe: false,
-      reason: "Shopify provider context does not match frozen refund provenance",
+      reason:
+        "Shopify provider context does not match frozen refund provenance",
     });
   });
 
@@ -123,7 +127,8 @@ describe("RefundProviderStateService", () => {
 
     await expect(test.service.read(refundInput())).resolves.toEqual({
       safe: false,
-      reason: "Shopify provider context does not match frozen refund provenance",
+      reason:
+        "Shopify provider context does not match frozen refund provenance",
     });
   });
 
@@ -149,11 +154,15 @@ describe("RefundProviderStateService", () => {
   it("fails before provider lookup when the shop has no Shopify identifier", async () => {
     const test = harness();
 
-    await expect(test.service.read(refundInput({ shop: { shopifyShopId: null } }))).resolves.toEqual({
+    await expect(
+      test.service.read(refundInput({ shop: { shopifyShopId: null } })),
+    ).resolves.toEqual({
       safe: false,
       reason: "shop has no Shopify identifier",
     });
-    expect(test.partner.getSubscriptionReconciliationSnapshot).not.toHaveBeenCalled();
+    expect(
+      test.partner.getSubscriptionReconciliationSnapshot,
+    ).not.toHaveBeenCalled();
   });
 
   it("rejects a missing active Shopify subscription", async () => {

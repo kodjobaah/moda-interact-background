@@ -1,4 +1,7 @@
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import type { CommerceModelInvoker } from "@modainteract/moda-interact-shared/commerce/runner";
 import { observeAgentInvocation } from "@modainteract/moda-interact-shared/observability/genai";
 import prisma from "../lib/db.js";
@@ -27,10 +30,12 @@ export async function runCommerceAgent(
     async () => {
       const environment = resolveCommerceEnvironment();
       const db = dependencies.db ?? prisma;
-      const logger = dependencies.logger ?? createLogger({
-        serviceName: "moda-messaging-worker",
-        environment,
-      });
+      const logger =
+        dependencies.logger ??
+        createLogger({
+          serviceName: "moda-messaging-worker",
+          environment,
+        });
       let model = dependencies.model;
       let modelSelection;
       if (!model) {

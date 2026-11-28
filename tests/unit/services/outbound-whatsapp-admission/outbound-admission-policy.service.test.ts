@@ -62,7 +62,9 @@ const genericConversation = {
   checkoutRecovery: null,
 };
 
-const recoveryConversation = (status: "DETECTED" | "MESSAGE_SENT" | "ENGAGED") => ({
+const recoveryConversation = (
+  status: "DETECTED" | "MESSAGE_SENT" | "ENGAGED",
+) => ({
   shopId: null,
   checkoutRecovery: { shopId: "shop-1", status },
 });
@@ -72,7 +74,11 @@ describe("OutboundAdmissionPolicyService", () => {
     const test = harness();
 
     await expect(
-      test.service.resolve(test.transaction as never, input, genericConversation as never),
+      test.service.resolve(
+        test.transaction as never,
+        input,
+        genericConversation as never,
+      ),
     ).resolves.toMatchObject({
       kind: "resolved",
       executionScope: "general",
@@ -81,9 +87,15 @@ describe("OutboundAdmissionPolicyService", () => {
     expect(test.postContractResolver.resolve).not.toHaveBeenCalled();
   });
 
-  it("retains normal-contract general billing classification for a linked recovery",async()=>{
-    const test=harness();
-    expect(await test.service.resolve(test.transaction as never,input,recoveryConversation("ENGAGED"))).toMatchObject({kind:"resolved",executionScope:"general"});
+  it("retains normal-contract general billing classification for a linked recovery", async () => {
+    const test = harness();
+    expect(
+      await test.service.resolve(
+        test.transaction as never,
+        input,
+        recoveryConversation("ENGAGED"),
+      ),
+    ).toMatchObject({ kind: "resolved", executionScope: "general" });
     expect(test.postContractResolver.resolve).not.toHaveBeenCalled();
   });
 
@@ -94,7 +106,11 @@ describe("OutboundAdmissionPolicyService", () => {
     );
 
     await expect(
-      test.service.resolve(test.transaction as never, input, genericConversation as never),
+      test.service.resolve(
+        test.transaction as never,
+        input,
+        genericConversation as never,
+      ),
     ).resolves.toEqual({ kind: "suppressed", reason: "subscription-frozen" });
   });
 
@@ -105,7 +121,11 @@ describe("OutboundAdmissionPolicyService", () => {
     );
 
     await expect(
-      test.service.resolve(test.transaction as never, input, genericConversation as never),
+      test.service.resolve(
+        test.transaction as never,
+        input,
+        genericConversation as never,
+      ),
     ).resolves.toEqual({ kind: "suppressed", reason: "contract-required" });
     expect(test.postContractResolver.resolve).not.toHaveBeenCalled();
   });
@@ -152,7 +172,10 @@ describe("OutboundAdmissionPolicyService", () => {
           { ...input, recoveryCreditSourceKey: "recovery:shop-1:1" },
           recoveryConversation("DETECTED") as never,
         ),
-      ).resolves.toMatchObject({ kind: "resolved", executionScope: "recovery" });
+      ).resolves.toMatchObject({
+        kind: "resolved",
+        executionScope: "recovery",
+      });
     },
   );
 

@@ -12,7 +12,9 @@ export class RecipientReachabilityStore {
   constructor(private readonly database: StoreDatabase = prisma) {}
 
   async recordFailure(
-    shopId: string, recipient: string, failureAt: Date,
+    shopId: string,
+    recipient: string,
+    failureAt: Date,
     providerCode: "131026",
   ): Promise<ReachabilityWrite> {
     const policy = await this.database.platformBillingPolicy.findUnique({
@@ -25,9 +27,13 @@ export class RecipientReachabilityStore {
     }
     const until = new Date(failureAt.getTime() + days * DAY_MS);
     if (!Number.isFinite(until.getTime())) {
-      throw new Error("WhatsApp recipient suppression exceeds supported date range");
+      throw new Error(
+        "WhatsApp recipient suppression exceeds supported date range",
+      );
     }
-    const changed = await this.database.$queryRaw<Array<{ version: number }>>(Prisma.sql`
+    const changed = await this.database.$queryRaw<
+      Array<{ version: number }>
+    >(Prisma.sql`
       INSERT INTO "whatsapp"."WhatsAppRecipientReachability"
         ("id", "shopId", "recipient", "lastProviderFailureCode",
          "lastFailureAt", "suppressUntil", "version", "createdAt", "updatedAt")
@@ -49,11 +55,15 @@ export class RecipientReachabilityStore {
   }
 
   async recordSuccess(
-    shopId: string, recipient: string, successfulAt: Date,
+    shopId: string,
+    recipient: string,
+    successfulAt: Date,
   ): Promise<ReachabilityWrite> {
     // Insert positive-only evidence too: an older FAILED replay must not create
     // suppression simply because DELIVERED/READ arrived at the worker first.
-    const changed = await this.database.$queryRaw<Array<{ version: number }>>(Prisma.sql`
+    const changed = await this.database.$queryRaw<
+      Array<{ version: number }>
+    >(Prisma.sql`
       INSERT INTO "whatsapp"."WhatsAppRecipientReachability"
         ("id", "shopId", "recipient", "lastSuccessfulAt",
          "version", "createdAt", "updatedAt")

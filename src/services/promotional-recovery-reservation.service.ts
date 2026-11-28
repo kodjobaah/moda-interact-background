@@ -38,10 +38,26 @@ export type PromotionalReservationOutcome =
   | { kind: "committed"; reservation: UsageReservation; sourceKey: string }
   | { kind: "released"; reservation: UsageReservation; sourceKey: string }
   | { kind: "ambiguous"; reservation: UsageReservation; sourceKey: string }
-  | { kind: "already-reserved"; reservation: UsageReservation; sourceKey: string }
-  | { kind: "already-committed"; reservation: UsageReservation; sourceKey: string }
-  | { kind: "already-released"; reservation: UsageReservation; sourceKey: string }
-  | { kind: "already-ambiguous"; reservation: UsageReservation; sourceKey: string }
+  | {
+      kind: "already-reserved";
+      reservation: UsageReservation;
+      sourceKey: string;
+    }
+  | {
+      kind: "already-committed";
+      reservation: UsageReservation;
+      sourceKey: string;
+    }
+  | {
+      kind: "already-released";
+      reservation: UsageReservation;
+      sourceKey: string;
+    }
+  | {
+      kind: "already-ambiguous";
+      reservation: UsageReservation;
+      sourceKey: string;
+    }
   | { kind: "unavailable" };
 
 export class PromotionalRecoveryReservationError extends Error {
@@ -54,23 +70,36 @@ export class PromotionalRecoveryReservationError extends Error {
 type ReservationTransaction = Prisma.TransactionClient;
 type ReservationDatabase = Pick<
   PrismaClient,
-  "$transaction" | "usageReservation" | "promotionalCreditGrant" | "merchantPromotionSelection" | "usageEvent"
+  | "$transaction"
+  | "usageReservation"
+  | "promotionalCreditGrant"
+  | "merchantPromotionSelection"
+  | "usageEvent"
 >;
-type PolicyResolverFactory = (client: BillingPolicyClient) => Pick<EffectiveBillingPolicyResolver, "resolve">;
+type PolicyResolverFactory = (
+  client: BillingPolicyClient,
+) => Pick<EffectiveBillingPolicyResolver, "resolve">;
 
 export class PromotionalRecoveryReservationService {
   constructor(
     private readonly database: ReservationDatabase = prisma,
     private readonly maxRetries = DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES,
     private readonly now: () => Date = () => new Date(),
-    private readonly createPolicyResolver: PolicyResolverFactory = (client) => new EffectiveBillingPolicyResolver(client),
+    private readonly createPolicyResolver: PolicyResolverFactory = (client) =>
+      new EffectiveBillingPolicyResolver(client),
   ) {}
 
-  async reserve(input: PromotionalRecoveryReservationInput): Promise<PromotionalReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PromotionalRecoveryReservationError(message));
+  async reserve(
+    input: PromotionalRecoveryReservationInput,
+  ): Promise<PromotionalReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PromotionalRecoveryReservationError(message),
+    );
     return this.withRetry(() =>
       this.database.$transaction(
-        (transaction) => this.reserveInTransaction(transaction, input, quantity),
+        (transaction) =>
+          this.reserveInTransaction(transaction, input, quantity),
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
     );
@@ -81,12 +110,20 @@ export class PromotionalRecoveryReservationService {
     transaction: Prisma.TransactionClient,
     input: PromotionalRecoveryReservationInput,
   ): Promise<PromotionalReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PromotionalRecoveryReservationError(message));
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PromotionalRecoveryReservationError(message),
+    );
     return this.reserveInTransaction(transaction, input, quantity);
   }
 
-  async commit(input: PromotionalRecoveryReservationInput): Promise<PromotionalReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PromotionalRecoveryReservationError(message));
+  async commit(
+    input: PromotionalRecoveryReservationInput,
+  ): Promise<PromotionalReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PromotionalRecoveryReservationError(message),
+    );
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.commitInTransaction(transaction, input, quantity),
@@ -97,34 +134,61 @@ export class PromotionalRecoveryReservationService {
 
   async commitInExistingTransaction(
     transaction: Prisma.TransactionClient,
-    input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string },
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & {
+      planId?: string;
+    },
   ): Promise<PromotionalReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity,
-      (message) => new PromotionalRecoveryReservationError(message));
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PromotionalRecoveryReservationError(message),
+    );
     return this.commitInTransaction(transaction, input, quantity);
   }
 
   async isReservedSourceEligibleInExistingTransaction(
     transaction: Prisma.TransactionClient,
-    input: { shopId: string; reservationId: string; sourceKey: string; now: Date },
+    input: {
+      shopId: string;
+      reservationId: string;
+      sourceKey: string;
+      now: Date;
+    },
   ): Promise<boolean> {
     const reservation = await transaction.usageReservation.findUnique({
       where: { id: input.reservationId },
     });
-    if (!reservation || reservation.shopId !== input.shopId ||
-      reservation.sourceKey !== input.sourceKey || reservation.status !== UsageReservationStatus.RESERVED ||
-      !reservation.promotionalCreditGrantId) return false;
+    if (
+      !reservation ||
+      reservation.shopId !== input.shopId ||
+      reservation.sourceKey !== input.sourceKey ||
+      reservation.status !== UsageReservationStatus.RESERVED ||
+      !reservation.promotionalCreditGrantId
+    )
+      return false;
 
-    const grant = await this.findUsableGrant(transaction, { shopId: input.shopId, now: input.now });
-    return grant?.id === reservation.promotionalCreditGrantId &&
-      grant.reservedQuantity >= Number(reservation.quantity);
+    const grant = await this.findUsableGrant(transaction, {
+      shopId: input.shopId,
+      now: input.now,
+    });
+    return (
+      grant?.id === reservation.promotionalCreditGrantId &&
+      grant.reservedQuantity >= Number(reservation.quantity)
+    );
   }
 
-  async release(input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string }): Promise<PromotionalReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PromotionalRecoveryReservationError(message));
+  async release(
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & {
+      planId?: string;
+    },
+  ): Promise<PromotionalReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PromotionalRecoveryReservationError(message),
+    );
     return this.withRetry(() =>
       this.database.$transaction(
-        (transaction) => this.releaseInTransaction(transaction, input, quantity),
+        (transaction) =>
+          this.releaseInTransaction(transaction, input, quantity),
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
     );
@@ -134,15 +198,24 @@ export class PromotionalRecoveryReservationService {
    * provider-failure compensation transaction (no nested transaction). */
   async releaseInExistingTransaction(
     transaction: Prisma.TransactionClient,
-    input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string },
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & {
+      planId?: string;
+    },
   ): Promise<PromotionalReservationOutcome> {
-    const quantity = validateRecoveryReservationQuantity(input.quantity,
-      (message) => new PromotionalRecoveryReservationError(message));
+    const quantity = validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PromotionalRecoveryReservationError(message),
+    );
     return this.releaseInTransaction(transaction, input, quantity);
   }
 
-  async markAmbiguous(input: PromotionalRecoveryReservationInput): Promise<PromotionalReservationOutcome> {
-    validateRecoveryReservationQuantity(input.quantity, (message) => new PromotionalRecoveryReservationError(message));
+  async markAmbiguous(
+    input: PromotionalRecoveryReservationInput,
+  ): Promise<PromotionalReservationOutcome> {
+    validateRecoveryReservationQuantity(
+      input.quantity,
+      (message) => new PromotionalRecoveryReservationError(message),
+    );
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.markAmbiguousInTransaction(transaction, input),
@@ -160,31 +233,50 @@ export class PromotionalRecoveryReservationService {
       where: { sourceKey: input.sourceKey },
     });
     if (existing) {
-      assertRecoveryReservationShop(existing, input.shopId, (message) => new PromotionalRecoveryReservationError(message));
-      if (existing.promotionalCreditGrantId === null) return { kind: "unavailable" };
+      assertRecoveryReservationShop(
+        existing,
+        input.shopId,
+        (message) => new PromotionalRecoveryReservationError(message),
+      );
+      if (existing.promotionalCreditGrantId === null)
+        return { kind: "unavailable" };
       const transition = recoveryReservationTransitionDecision({
         reservation: existing,
         transition: "reactivate",
         requestedQuantity: quantity,
-        createError: (message) => new PromotionalRecoveryReservationError(message),
+        createError: (message) =>
+          new PromotionalRecoveryReservationError(message),
       });
       if (transition.kind === "apply") {
         const grant = await this.findUsableGrant(transaction, input);
-        if (!grant || grant.id !== existing.promotionalCreditGrantId || availableQuantity(grant) < quantity) {
-          return { kind: "already-released", reservation: existing, sourceKey: input.sourceKey };
+        if (
+          !grant ||
+          grant.id !== existing.promotionalCreditGrantId ||
+          availableQuantity(grant) < quantity
+        ) {
+          return {
+            kind: "already-released",
+            reservation: existing,
+            sourceKey: input.sourceKey,
+          };
         }
         await this.reserveGrant(transaction, grant, quantity);
         const reactivated = await transaction.usageReservation.update({
           where: { id: existing.id },
           data: { status: UsageReservationStatus.RESERVED },
         });
-        return { kind: "reserved", reservation: reactivated, sourceKey: input.sourceKey };
+        return {
+          kind: "reserved",
+          reservation: reactivated,
+          sourceKey: input.sourceKey,
+        };
       }
       return replayOutcome(existing, input.sourceKey);
     }
 
     const grant = await this.findUsableGrant(transaction, input);
-    if (!grant || availableQuantity(grant) < quantity) return { kind: "unavailable" };
+    if (!grant || availableQuantity(grant) < quantity)
+      return { kind: "unavailable" };
 
     await this.reserveGrant(transaction, grant, quantity);
     const reservation = await transaction.usageReservation.create({
@@ -200,15 +292,21 @@ export class PromotionalRecoveryReservationService {
 
   private async commitInTransaction(
     transaction: ReservationTransaction,
-    input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string },
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & {
+      planId?: string;
+    },
     quantity: number,
   ): Promise<PromotionalReservationOutcome> {
-    const reservation = await this.requirePromotionalReservation(transaction, input);
+    const reservation = await this.requirePromotionalReservation(
+      transaction,
+      input,
+    );
     const transition = recoveryReservationTransitionDecision({
       reservation,
       transition: "commit",
       requestedQuantity: quantity,
-      createError: (message) => new PromotionalRecoveryReservationError(message),
+      createError: (message) =>
+        new PromotionalRecoveryReservationError(message),
     });
     if (transition.kind === "replay") {
       return replayOutcome(reservation, input.sourceKey);
@@ -217,19 +315,33 @@ export class PromotionalRecoveryReservationService {
     const grant = await transaction.promotionalCreditGrant.findUnique({
       where: { id: reservation.promotionalCreditGrantId ?? "" },
     });
-    if (!grant || grant.shopId !== input.shopId || grant.reservedQuantity < quantity) {
-      throw new PromotionalRecoveryReservationError("Promotional grant does not exist or has insufficient reservation");
+    if (
+      !grant ||
+      grant.shopId !== input.shopId ||
+      grant.reservedQuantity < quantity
+    ) {
+      throw new PromotionalRecoveryReservationError(
+        "Promotional grant does not exist or has insufficient reservation",
+      );
     }
     const now = input.now ?? this.now();
     const committedAfter = grant.committedQuantity + quantity;
     const reservedAfter = grant.reservedQuantity - quantity;
-    const remainingAfterCommit = grant.quantity - committedAfter - reservedAfter;
+    const remainingAfterCommit =
+      grant.quantity - committedAfter - reservedAfter;
     if (reservedAfter < 0 || remainingAfterCommit < 0) {
-      throw new PromotionalRecoveryReservationError("Promotional grant accounting would become negative");
+      throw new PromotionalRecoveryReservationError(
+        "Promotional grant accounting would become negative",
+      );
     }
-    const exhaustedAt = grant.exhaustedAt ?? (remainingAfterCommit === 0 ? now : undefined);
+    const exhaustedAt =
+      grant.exhaustedAt ?? (remainingAfterCommit === 0 ? now : undefined);
     const updatedGrant = await transaction.promotionalCreditGrant.updateMany({
-      where: { id: grant.id, version: grant.version, reservedQuantity: { gte: quantity } },
+      where: {
+        id: grant.id,
+        version: grant.version,
+        reservedQuantity: { gte: quantity },
+      },
       data: {
         reservedQuantity: { decrement: quantity },
         committedQuantity: { increment: quantity },
@@ -239,15 +351,22 @@ export class PromotionalRecoveryReservationService {
         version: { increment: 1 },
       },
     });
-    if (updatedGrant.count !== 1) throw new RecoveryReservationConcurrencyConflict();
+    if (updatedGrant.count !== 1)
+      throw new RecoveryReservationConcurrencyConflict();
 
-    const provider = await resolveRecoveryUsageProvider(transaction, input.shopId);
+    const provider = await resolveRecoveryUsageProvider(
+      transaction,
+      input.shopId,
+    );
     const usageEvent = await transaction.usageEvent.create({
       data: {
         shopId: input.shopId,
         metric: UsageMetric.RECOVERY_CONVERSATION,
         quantity,
-        idempotencyKey: createRecoveryIdempotencyKey(input.shopId, input.sourceKey),
+        idempotencyKey: createRecoveryIdempotencyKey(
+          input.shopId,
+          input.sourceKey,
+        ),
         sourceType: "PROMOTIONAL_RECOVERY_CREDITS",
         sourceId: reservation.id,
         provider,
@@ -256,22 +375,35 @@ export class PromotionalRecoveryReservationService {
     });
     const committed = await transaction.usageReservation.update({
       where: { id: reservation.id },
-      data: { status: UsageReservationStatus.COMMITTED, committedUsageEventId: usageEvent.id },
+      data: {
+        status: UsageReservationStatus.COMMITTED,
+        committedUsageEventId: usageEvent.id,
+      },
     });
-    return { kind: "committed", reservation: committed, sourceKey: input.sourceKey };
+    return {
+      kind: "committed",
+      reservation: committed,
+      sourceKey: input.sourceKey,
+    };
   }
 
   private async releaseInTransaction(
     transaction: ReservationTransaction,
-    input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string },
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & {
+      planId?: string;
+    },
     quantity: number,
   ): Promise<PromotionalReservationOutcome> {
-    const reservation = await this.requirePromotionalReservation(transaction, input);
+    const reservation = await this.requirePromotionalReservation(
+      transaction,
+      input,
+    );
     const transition = recoveryReservationTransitionDecision({
       reservation,
       transition: "release",
       requestedQuantity: quantity,
-      createError: (message) => new PromotionalRecoveryReservationError(message),
+      createError: (message) =>
+        new PromotionalRecoveryReservationError(message),
     });
     if (transition.kind === "replay") {
       return replayOutcome(reservation, input.sourceKey);
@@ -279,30 +411,52 @@ export class PromotionalRecoveryReservationService {
     const grant = await transaction.promotionalCreditGrant.findUnique({
       where: { id: reservation.promotionalCreditGrantId ?? "" },
     });
-    if (!grant || grant.shopId !== input.shopId || grant.reservedQuantity < quantity) {
-      throw new PromotionalRecoveryReservationError("Promotional grant does not exist or has insufficient reservation");
+    if (
+      !grant ||
+      grant.shopId !== input.shopId ||
+      grant.reservedQuantity < quantity
+    ) {
+      throw new PromotionalRecoveryReservationError(
+        "Promotional grant does not exist or has insufficient reservation",
+      );
     }
     const updatedGrant = await transaction.promotionalCreditGrant.updateMany({
-      where: { id: grant.id, version: grant.version, reservedQuantity: { gte: quantity } },
-      data: { reservedQuantity: { decrement: quantity }, version: { increment: 1 } },
+      where: {
+        id: grant.id,
+        version: grant.version,
+        reservedQuantity: { gte: quantity },
+      },
+      data: {
+        reservedQuantity: { decrement: quantity },
+        version: { increment: 1 },
+      },
     });
-    if (updatedGrant.count !== 1) throw new RecoveryReservationConcurrencyConflict();
+    if (updatedGrant.count !== 1)
+      throw new RecoveryReservationConcurrencyConflict();
     const released = await transaction.usageReservation.update({
       where: { id: reservation.id },
       data: { status: UsageReservationStatus.RELEASED },
     });
-    return { kind: "released", reservation: released, sourceKey: input.sourceKey };
+    return {
+      kind: "released",
+      reservation: released,
+      sourceKey: input.sourceKey,
+    };
   }
 
   private async markAmbiguousInTransaction(
     transaction: ReservationTransaction,
     input: PromotionalRecoveryReservationInput,
   ): Promise<PromotionalReservationOutcome> {
-    const reservation = await this.requirePromotionalReservation(transaction, input);
+    const reservation = await this.requirePromotionalReservation(
+      transaction,
+      input,
+    );
     const transition = recoveryReservationTransitionDecision({
       reservation,
       transition: "ambiguous",
-      createError: (message) => new PromotionalRecoveryReservationError(message),
+      createError: (message) =>
+        new PromotionalRecoveryReservationError(message),
     });
     if (transition.kind === "replay") {
       return replayOutcome(reservation, input.sourceKey);
@@ -311,7 +465,11 @@ export class PromotionalRecoveryReservationService {
       where: { id: reservation.id },
       data: { status: UsageReservationStatus.AMBIGUOUS },
     });
-    return { kind: "ambiguous", reservation: ambiguous, sourceKey: input.sourceKey };
+    return {
+      kind: "ambiguous",
+      reservation: ambiguous,
+      sourceKey: input.sourceKey,
+    };
   }
 
   private async findUsableGrant(
@@ -319,7 +477,10 @@ export class PromotionalRecoveryReservationService {
     input: { shopId: string; now?: Date },
   ) {
     const now = input.now ?? this.now();
-    const policy = await this.createPolicyResolver(transaction).resolve(input.shopId, now);
+    const policy = await this.createPolicyResolver(transaction).resolve(
+      input.shopId,
+      now,
+    );
     if (policy.newRecoveriesPaused) return null;
     const selection = await transaction.merchantPromotionSelection.findUnique({
       where: { shopId: input.shopId },
@@ -327,44 +488,79 @@ export class PromotionalRecoveryReservationService {
     });
     const grant = selection?.promotionalCreditGrant;
     const campaign = grant?.campaign;
-    if (!grant || !campaign || grant.shopId !== input.shopId || campaign.status !== PromotionCampaignStatus.ACTIVE) return null;
-    if (campaign.startsAt > now || campaign.expiresAt <= now || grant.campaignId !== campaign.id) return null;
     if (
-      (campaign.scope === PromotionTargetScope.SHOP && campaign.targetShopId !== input.shopId) ||
-      (campaign.scope === PromotionTargetScope.PLAN && campaign.targetPlanId !== policy.planId) ||
-      (campaign.scope === PromotionTargetScope.GLOBAL && (campaign.targetShopId !== null || campaign.targetPlanId !== null))
-    ) return null;
+      !grant ||
+      !campaign ||
+      grant.shopId !== input.shopId ||
+      campaign.status !== PromotionCampaignStatus.ACTIVE
+    )
+      return null;
+    if (
+      campaign.startsAt > now ||
+      campaign.expiresAt <= now ||
+      grant.campaignId !== campaign.id
+    )
+      return null;
+    if (
+      (campaign.scope === PromotionTargetScope.SHOP &&
+        campaign.targetShopId !== input.shopId) ||
+      (campaign.scope === PromotionTargetScope.PLAN &&
+        campaign.targetPlanId !== policy.planId) ||
+      (campaign.scope === PromotionTargetScope.GLOBAL &&
+        (campaign.targetShopId !== null || campaign.targetPlanId !== null))
+    )
+      return null;
     return grant;
   }
 
   private async reserveGrant(
     transaction: ReservationTransaction,
-    grant: NonNullable<Awaited<ReturnType<PromotionalRecoveryReservationService["findUsableGrant"]>>>,
+    grant: NonNullable<
+      Awaited<
+        ReturnType<PromotionalRecoveryReservationService["findUsableGrant"]>
+      >
+    >,
     quantity: number,
   ): Promise<void> {
     const updatedGrant = await transaction.promotionalCreditGrant.updateMany({
       where: {
         id: grant.id,
         version: grant.version,
-        reservedQuantity: { lte: grant.quantity - grant.committedQuantity - quantity },
+        reservedQuantity: {
+          lte: grant.quantity - grant.committedQuantity - quantity,
+        },
       },
       data: {
         reservedQuantity: { increment: quantity },
         version: { increment: 1 },
       },
     });
-    if (updatedGrant.count !== 1) throw new RecoveryReservationConcurrencyConflict();
+    if (updatedGrant.count !== 1)
+      throw new RecoveryReservationConcurrencyConflict();
   }
 
   private async requirePromotionalReservation(
     transaction: ReservationTransaction,
-    input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string },
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & {
+      planId?: string;
+    },
   ): Promise<UsageReservation> {
-    const reservation = await transaction.usageReservation.findUnique({ where: { sourceKey: input.sourceKey } });
-    if (!reservation) throw new PromotionalRecoveryReservationError("Reservation does not exist");
-    assertRecoveryReservationShop(reservation, input.shopId, (message) => new PromotionalRecoveryReservationError(message));
+    const reservation = await transaction.usageReservation.findUnique({
+      where: { sourceKey: input.sourceKey },
+    });
+    if (!reservation)
+      throw new PromotionalRecoveryReservationError(
+        "Reservation does not exist",
+      );
+    assertRecoveryReservationShop(
+      reservation,
+      input.shopId,
+      (message) => new PromotionalRecoveryReservationError(message),
+    );
     if (!reservation.promotionalCreditGrantId) {
-      throw new PromotionalRecoveryReservationError("Reservation is not promotional");
+      throw new PromotionalRecoveryReservationError(
+        "Reservation is not promotional",
+      );
     }
     return reservation;
   }
@@ -373,19 +569,30 @@ export class PromotionalRecoveryReservationService {
     return withRecoveryReservationRetry({
       operation,
       maxRetries: this.maxRetries,
-      createRetryLimitError: (message) => new PromotionalRecoveryReservationError(message),
+      createRetryLimitError: (message) =>
+        new PromotionalRecoveryReservationError(message),
     });
   }
 }
 
-
-function availableQuantity(grant: { quantity: number; committedQuantity: number; reservedQuantity: number }): number {
+function availableQuantity(grant: {
+  quantity: number;
+  committedQuantity: number;
+  reservedQuantity: number;
+}): number {
   return grant.quantity - grant.committedQuantity - grant.reservedQuantity;
 }
 
-function replayOutcome(reservation: UsageReservation, sourceKey: string): PromotionalReservationOutcome {
-  return { kind: recoveryReservationReplayKind(reservation.status), reservation, sourceKey };
+function replayOutcome(
+  reservation: UsageReservation,
+  sourceKey: string,
+): PromotionalReservationOutcome {
+  return {
+    kind: recoveryReservationReplayKind(reservation.status),
+    reservation,
+    sourceKey,
+  };
 }
 
-
-export const promotionalRecoveryReservationService = new PromotionalRecoveryReservationService();
+export const promotionalRecoveryReservationService =
+  new PromotionalRecoveryReservationService();

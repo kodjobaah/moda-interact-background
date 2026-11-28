@@ -45,7 +45,10 @@ export class OpenRouterCredentialResolutionFailure extends Error {
   readonly reasonMessage: string;
   readonly operatorAction: string;
 
-  constructor(readonly reasonCode: OpenRouterCredentialFailureReason, cause?: unknown) {
+  constructor(
+    readonly reasonCode: OpenRouterCredentialFailureReason,
+    cause?: unknown,
+  ) {
     super("OpenRouter credential is unavailable", { cause });
     this.name = "OpenRouterCredentialResolutionFailure";
     this.reasonMessage = explanations[reasonCode][0];

@@ -22,69 +22,84 @@ const bullMQTelemetry = createBullMQTelemetry({
 
 export function createRecoveryCapacityResumeWorker() {
   const worker = new Worker<RecoveryCapacityResumeJob>(
-  RECOVERY_CAPACITY_RESUME_QUEUE,
-  async (job) => {
-    if (job.name !== RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB) {
-      throw new Error(`Unknown capacity resume job: ${job.name}`);
-    }
+    RECOVERY_CAPACITY_RESUME_QUEUE,
+    async (job) => {
+      if (job.name !== RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB) {
+        throw new Error(`Unknown capacity resume job: ${job.name}`);
+      }
 
-    const execution = await shopExecutionEligibilityService.evaluate(
-      job.data.shopId,
-      undefined,
-      "recovery",
-    );
-    if (!execution.allowed) return { kind: "ignored", reason: execution.reason };
-
-    if (job.data.recoveryId) {
-      return checkoutRecoveryService.resumeCapacityBlockedRecovery(
-        job.data.recoveryId,
-        job.data.trigger,
+      const execution = await shopExecutionEligibilityService.evaluate(
+        job.data.shopId,
+        undefined,
+        "recovery",
       );
-    }
+      if (!execution.allowed)
+        return { kind: "ignored", reason: execution.reason };
 
-    const batchSize = backgroundRuntimeConfigService.current().recoveryResumeBatchSize;
-    const recoveries = await findBlockedRecoveries(job.data.shopId, batchSize);
-    let attempted = 0;
-    let capacityExhausted = false;
-    for (const recovery of recoveries) {
-      attempted += 1;
-      const result = await checkoutRecoveryService.resumeCapacityBlockedRecovery(recovery.id);
-      if (result.kind === "capacity-exhausted") {
-        capacityExhausted = true;
-        break;
-      }
-      if (result.kind === "ignored" && isLifecycleDenialReason(result.reason)) {
-        return { kind: "ignored", reason: result.reason };
-      }
-    }
-
-    if (!capacityExhausted && attempted === batchSize) {
-      const lastRecovery = recoveries[attempted - 1];
-      if (lastRecovery) {
-        const finalExecution = await shopExecutionEligibilityService.evaluate(
-          job.data.shopId,
-          undefined,
-          "recovery",
+      if (job.data.recoveryId) {
+        return checkoutRecoveryService.resumeCapacityBlockedRecovery(
+          job.data.recoveryId,
+          job.data.trigger,
         );
-        if (!finalExecution.allowed) {
-          return { kind: "ignored", reason: finalExecution.reason };
+      }
+
+      const batchSize =
+        backgroundRuntimeConfigService.current().recoveryResumeBatchSize;
+      const recoveries = await findBlockedRecoveries(
+        job.data.shopId,
+        batchSize,
+      );
+      let attempted = 0;
+      let capacityExhausted = false;
+      for (const recovery of recoveries) {
+        attempted += 1;
+        const result =
+          await checkoutRecoveryService.resumeCapacityBlockedRecovery(
+            recovery.id,
+          );
+        if (result.kind === "capacity-exhausted") {
+          capacityExhausted = true;
+          break;
         }
-        await recoveryCapacityResumeService.schedule(
-          createRecoveryCapacityResumeContinuation(job.data, lastRecovery.id),
-        );
+        if (
+          result.kind === "ignored" &&
+          isLifecycleDenialReason(result.reason)
+        ) {
+          return { kind: "ignored", reason: result.reason };
+        }
       }
-    }
-    return { kind: "processed", count: attempted };
-  },
-  {
-    connection: connectionRedis,
-    telemetry: bullMQTelemetry,
-  },
-);
-  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "recoveryResumeQueueGlobalConcurrency");
+
+      if (!capacityExhausted && attempted === batchSize) {
+        const lastRecovery = recoveries[attempted - 1];
+        if (lastRecovery) {
+          const finalExecution = await shopExecutionEligibilityService.evaluate(
+            job.data.shopId,
+            undefined,
+            "recovery",
+          );
+          if (!finalExecution.allowed) {
+            return { kind: "ignored", reason: finalExecution.reason };
+          }
+          await recoveryCapacityResumeService.schedule(
+            createRecoveryCapacityResumeContinuation(job.data, lastRecovery.id),
+          );
+        }
+      }
+      return { kind: "processed", count: attempted };
+    },
+    {
+      connection: connectionRedis,
+      telemetry: bullMQTelemetry,
+    },
+  );
+  bindWorkerConcurrency(
+    worker,
+    backgroundRuntimeConfigService,
+    "recoveryResumeQueueGlobalConcurrency",
+  );
 
   worker.on("failed", (job, error) => {
-  console.error(`Recovery capacity resume job ${job?.id} failed`, error);
+    console.error(`Recovery capacity resume job ${job?.id} failed`, error);
   });
   return worker;
 }

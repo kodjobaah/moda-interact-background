@@ -21,8 +21,14 @@ function serializeAtModelBoundary(request: unknown) {
     }
   `;
   const probe = spawnSync(process.execPath, ["--input-type=module"], {
-    cwd: process.cwd(), encoding: "utf8", timeout: 60_000,
-    env: { ...process.env, DATABASE_URL: "postgresql://unit:unit@127.0.0.1:1/unit", REDIS_URL: "redis://127.0.0.1:1" },
+    cwd: process.cwd(),
+    encoding: "utf8",
+    timeout: 60_000,
+    env: {
+      ...process.env,
+      DATABASE_URL: "postgresql://unit:unit@127.0.0.1:1/unit",
+      REDIS_URL: "redis://127.0.0.1:1",
+    },
     input: `
       import { registerHooks } from "node:module";
       let networkCalls = 0;
@@ -42,43 +48,84 @@ function serializeAtModelBoundary(request: unknown) {
   expect(probe.status, probe.stderr).toBe(0);
   return JSON.parse(probe.stdout.trim()) as {
     messages: Array<{ role: string; content: string }>;
-    toolNames: string[]; maxTokens: number; signalAborted: boolean; networkCalls: number;
+    toolNames: string[];
+    maxTokens: number;
+    signalAborted: boolean;
+    networkCalls: number;
   };
 }
 
 const currentQuestion = "Can you tell me about snowboard?";
-const previousFailure = "I cannot process that request right now. Please try again later.";
+const previousFailure =
+  "I cannot process that request right now. Please try again later.";
 const base = {
   instructions: ["Help the customer using only granted tools."],
-  context: { trustedRecovery: { currentMessages: [{ role: "user", content: currentQuestion }] } },
+  context: {
+    trustedRecovery: {
+      currentMessages: [{ role: "user", content: currentQuestion }],
+    },
+  },
   messages: [],
-  tools: [{ name: "finalResponse", description: "Respond to the current customer question", inputSchema: { type: "object", properties: {} } }],
+  tools: [
+    {
+      name: "finalResponse",
+      description: "Respond to the current customer question",
+      inputSchema: { type: "object", properties: {} },
+    },
+  ],
   maxOutputTokens: 77,
 };
 
 describe("published Shared model chronology adoption", () => {
-  it.each(["content", "text"] as const)("places old %s history before the current snowboard question at the SDK boundary", (field) => {
-    const result = serializeAtModelBoundary({ ...base, history: [
-      { role: "user", [field]: "Earlier question" }, { role: "assistant", [field]: previousFailure },
-    ] });
-    expect(result.messages.map(message => message.role)).toEqual(["system", "human", "ai", "human"]);
-    expect(result.messages[1]?.content).toBe("Earlier question");
-    expect(result.messages[2]?.content).toBe(previousFailure);
-    expect(result.messages[3]?.content).toContain(currentQuestion);
-    expect(result.toolNames).toEqual(["finalResponse"]);
-    expect(result.maxTokens).toBe(77);
-    expect(result.signalAborted).toBe(false);
-    expect(result.networkCalls).toBe(0);
-  }, 65_000);
+  it.each(["content", "text"] as const)(
+    "places old %s history before the current snowboard question at the SDK boundary",
+    (field) => {
+      const result = serializeAtModelBoundary({
+        ...base,
+        history: [
+          { role: "user", [field]: "Earlier question" },
+          { role: "assistant", [field]: previousFailure },
+        ],
+      });
+      expect(result.messages.map((message) => message.role)).toEqual([
+        "system",
+        "human",
+        "ai",
+        "human",
+      ]);
+      expect(result.messages[1]?.content).toBe("Earlier question");
+      expect(result.messages[2]?.content).toBe(previousFailure);
+      expect(result.messages[3]?.content).toContain(currentQuestion);
+      expect(result.toolNames).toEqual(["finalResponse"]);
+      expect(result.maxTokens).toBe(77);
+      expect(result.signalAborted).toBe(false);
+      expect(result.networkCalls).toBe(0);
+    },
+    65_000,
+  );
 
   it("keeps current-turn tool observations after the current question", () => {
-    const result = serializeAtModelBoundary({ ...base,
+    const result = serializeAtModelBoundary({
+      ...base,
       history: [{ role: "assistant", content: previousFailure }],
-      messages: [{ tool: "commerce_get_product", result: {
-        contractVersion: "commerce.v1", status: "OK", data: { productId: "snowboard" }, renderedText: "Verified snowboard observation",
-      } }],
+      messages: [
+        {
+          tool: "commerce_get_product",
+          result: {
+            contractVersion: "commerce.v1",
+            status: "OK",
+            data: { productId: "snowboard" },
+            renderedText: "Verified snowboard observation",
+          },
+        },
+      ],
     });
-    expect(result.messages.map(message => message.role)).toEqual(["system", "ai", "human", "human"]);
+    expect(result.messages.map((message) => message.role)).toEqual([
+      "system",
+      "ai",
+      "human",
+      "human",
+    ]);
     expect(result.messages[1]?.content).toBe(previousFailure);
     expect(result.messages[2]?.content).toContain(currentQuestion);
     expect(result.messages[3]?.content).toContain("commerce_get_product");
@@ -86,22 +133,57 @@ describe("published Shared model chronology adoption", () => {
   }, 65_000);
 });
 
-
 describe("published typed current-customer message serialization", () => {
-  it.each(["How about the Studio Camera?", "How about the Stduio Camra?"])("keeps the new subject in its own Human message exactly once: %s", current => {
-    const result = serializeAtModelBoundary({ ...base,
-      context: { trustedRecovery: { status: "ENGAGED" }, productReferences: { references: [{ title: "Ski Wax", productId: "old" }] } },
-      currentCustomerMessages: [{ role: "user", content: current }],
-      history: [{ role: "user", content: "Tell me about Ski Wax" }, { role: "assistant", content: "Ski Wax has options" }],
-      messages: [{ tool: "commerce_get_product", result: { contractVersion: "commerce.v1", status: "OK", data: { productId: "new" }, renderedText: "Current lookup data" } }],
-    });
-    expect(result.messages.map(message => message.role)).toEqual(["system", "human", "ai", "human", "human", "human"]);
-    expect(result.messages[3]!.content).toContain("Trusted commerce context JSON");
-    expect(result.messages[3]!.content).not.toContain(current);
-    expect(result.messages[4]!.content).toBe(current);
-    expect(result.messages[5]!.content).toContain("commerce_get_product");
-    expect(result.messages.filter(message => message.content.includes(current))).toHaveLength(1);
-    expect(result.messages[0]!.content).toContain("A newly named product takes precedence");
-    expect(result.networkCalls).toBe(0);
-  }, 65_000);
+  it.each(["How about the Studio Camera?", "How about the Stduio Camra?"])(
+    "keeps the new subject in its own Human message exactly once: %s",
+    (current) => {
+      const result = serializeAtModelBoundary({
+        ...base,
+        context: {
+          trustedRecovery: { status: "ENGAGED" },
+          productReferences: {
+            references: [{ title: "Ski Wax", productId: "old" }],
+          },
+        },
+        currentCustomerMessages: [{ role: "user", content: current }],
+        history: [
+          { role: "user", content: "Tell me about Ski Wax" },
+          { role: "assistant", content: "Ski Wax has options" },
+        ],
+        messages: [
+          {
+            tool: "commerce_get_product",
+            result: {
+              contractVersion: "commerce.v1",
+              status: "OK",
+              data: { productId: "new" },
+              renderedText: "Current lookup data",
+            },
+          },
+        ],
+      });
+      expect(result.messages.map((message) => message.role)).toEqual([
+        "system",
+        "human",
+        "ai",
+        "human",
+        "human",
+        "human",
+      ]);
+      expect(result.messages[3]!.content).toContain(
+        "Trusted commerce context JSON",
+      );
+      expect(result.messages[3]!.content).not.toContain(current);
+      expect(result.messages[4]!.content).toBe(current);
+      expect(result.messages[5]!.content).toContain("commerce_get_product");
+      expect(
+        result.messages.filter((message) => message.content.includes(current)),
+      ).toHaveLength(1);
+      expect(result.messages[0]!.content).toContain(
+        "A newly named product takes precedence",
+      );
+      expect(result.networkCalls).toBe(0);
+    },
+    65_000,
+  );
 });

@@ -2,9 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { Queue } from "bullmq";
 import { Prisma } from "@prisma/client";
-import {
-  createTranslationBatchSubmitJobId,
-} from "@modainteract/moda-interact-shared/merchant-communications/node";
+import { createTranslationBatchSubmitJobId } from "@modainteract/moda-interact-shared/merchant-communications/node";
 import {
   MERCHANT_COMMUNICATIONS_JOB_NAMES,
   MERCHANT_COMMUNICATIONS_QUEUE_NAME,
@@ -15,7 +13,10 @@ import prisma from "../lib/db.js";
 import { resolveCommerceEnvironment } from "../commerce/model-environment.js";
 import { connectionRedis } from "../lib/redis.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
-import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
+import {
+  currentTranslationRuntimeConfig,
+  type TranslationRuntimeConfigReader,
+} from "./translation-runtime-config.js";
 
 type TranslationCandidate = {
   id: string;
@@ -31,10 +32,7 @@ type TranslationBatchAssemblyResult = {
   submitJobId: string | null;
 };
 
-type TranslationBatchQueue = Pick<
-  Queue,
-  "add"
->;
+type TranslationBatchQueue = Pick<Queue, "add">;
 
 type TranslationBatchDatabase = {
   $transaction<T>(
@@ -45,12 +43,22 @@ type TranslationBatchDatabase = {
   ): Promise<T>;
 };
 
-async function selectedAutomaticTranslationModel(): Promise<{ provider: string; model: string }> {
-  const selected = await prisma.commerceTranslationModelConfiguration.findFirst({
-    where: { environment: resolveCommerceEnvironment(), enabled: true, automaticDefault: true },
-    select: { provider: true, providerModelId: true },
-  });
-  if (!selected) throw new Error("Support translation automatic model is not configured");
+async function selectedAutomaticTranslationModel(): Promise<{
+  provider: string;
+  model: string;
+}> {
+  const selected = await prisma.commerceTranslationModelConfiguration.findFirst(
+    {
+      where: {
+        environment: resolveCommerceEnvironment(),
+        enabled: true,
+        automaticDefault: true,
+      },
+      select: { provider: true, providerModelId: true },
+    },
+  );
+  if (!selected)
+    throw new Error("Support translation automatic model is not configured");
   return { provider: selected.provider, model: selected.providerModelId };
 }
 
@@ -59,16 +67,21 @@ export class TranslationBatchAssemblyService {
   private readonly database: TranslationBatchDatabase;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
-  constructor(options: {
-    queue?: TranslationBatchQueue;
-    database?: TranslationBatchDatabase;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-  } = {}) {
-    this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
-      connection: connectionRedis,
-    });
+  constructor(
+    options: {
+      queue?: TranslationBatchQueue;
+      database?: TranslationBatchDatabase;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+    } = {},
+  ) {
+    this.queue =
+      options.queue ??
+      new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
+        connection: connectionRedis,
+      });
     this.database = options.database ?? prisma;
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
   async assembleFromDispatch(
@@ -77,7 +90,9 @@ export class TranslationBatchAssemblyService {
     TranslationDispatchJobSchema.parse(input);
     const automatic = await selectedAutomaticTranslationModel();
     const result = await this.database.$transaction(async (transaction) => {
-      const candidates = await transaction.$queryRaw<TranslationCandidate[]>(Prisma.sql`
+      const candidates = await transaction.$queryRaw<
+        TranslationCandidate[]
+      >(Prisma.sql`
         SELECT
           t."id",
           t."direction",
@@ -120,7 +135,7 @@ export class TranslationBatchAssemblyService {
       `);
 
       for (const candidate of candidates) {
-          const itemId = randomUUID();
+        const itemId = randomUUID();
         const providerCustomId = `translation-${candidate.id}-${batchId}`;
         await transaction.$executeRaw(Prisma.sql`
     INSERT INTO "support"."MerchantTranslationBatchItem" (
@@ -182,4 +197,5 @@ export class TranslationBatchAssemblyService {
   }
 }
 
-export const translationBatchAssemblyService = new TranslationBatchAssemblyService();
+export const translationBatchAssemblyService =
+  new TranslationBatchAssemblyService();

@@ -28,9 +28,8 @@ vi.mock("@opentelemetry/api", () => ({
   },
 }));
 
-const { observeWorkerJob } = await import(
-  "../../../src/observability/worker-metrics.js"
-);
+const { observeWorkerJob } =
+  await import("../../../src/observability/worker-metrics.js");
 
 const definition = {
   workerName: "checkout",

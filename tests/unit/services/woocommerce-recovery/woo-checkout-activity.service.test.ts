@@ -20,15 +20,27 @@ import type { WooLatestRecovery } from "../../../../src/services/woocommerce-rec
 import type { WooActivityWatermark } from "../../../../src/services/woocommerce-recovery/woo-activity-watermark.store.js";
 
 const NOW = Date.parse("2026-10-24T11:05:00.000Z");
-const at = (minute: number) => new Date(Date.parse("2026-10-24T11:00:00.000Z") + minute * 60_000).toISOString();
+const at = (minute: number) =>
+  new Date(
+    Date.parse("2026-10-24T11:00:00.000Z") + minute * 60_000,
+  ).toISOString();
 const key = (ref: WooCheckoutRef) => `${ref.shopId}/${ref.checkoutToken}`;
 
-function event(id: string, minute = 0, changes: Partial<WooCheckoutCapture> = {}): WooCheckoutCapture {
+function event(
+  id: string,
+  minute = 0,
+  changes: Partial<WooCheckoutCapture> = {},
+): WooCheckoutCapture {
   return {
-    schemaVersion: "woo.activity.v1", eventId: id, eventType: "CHECKOUT_UPDATED",
-    shopId: "shop-a", checkoutKey: "checkout-1", occurredAt: at(minute),
+    schemaVersion: "woo.activity.v1",
+    eventId: id,
+    eventType: "CHECKOUT_UPDATED",
+    shopId: "shop-a",
+    checkoutKey: "checkout-1",
+    occurredAt: at(minute),
     checkout: {
-      currency: "GBP", total: "29.99",
+      currency: "GBP",
+      total: "29.99",
       items: [{ productId: "sku-1", quantity: 1, total: "29.99" }],
       contact: { email: "customer@example.test", phone: "+447000000000" },
     },
@@ -56,37 +68,55 @@ function harness() {
   const terminal = new Map<string, WooTerminalObservation>();
   const lockTails = new Map<string, Promise<void>>();
   const calls: string[] = [];
-  const schedule = vi.fn(async ({ candidate }: { candidate: WooPendingCandidate }) => {
-    const name = key(candidate);
-    const updated = candidates.has(name);
-    candidates.set(name, candidate);
-    return updated ? "rescheduled" as const : "scheduled" as const;
-  });
+  const schedule = vi.fn(
+    async ({ candidate }: { candidate: WooPendingCandidate }) => {
+      const name = key(candidate);
+      const updated = candidates.has(name);
+      candidates.set(name, candidate);
+      return updated ? ("rescheduled" as const) : ("scheduled" as const);
+    },
+  );
   const cancel = vi.fn(async (ref: WooCheckoutRef) => {
     const removed = candidates.delete(key(ref));
-    return removed ? "cancelled" as const : "absent" as const;
+    return removed ? ("cancelled" as const) : ("absent" as const);
   });
   const findExisting = vi.fn(async (ref: WooCheckoutRef) => {
     calls.push("recovery");
     return recoveries.get(key(ref)) ?? null;
   });
-  const recordExternalActivity = vi.fn(async () => { calls.push("external-activity"); });
-  const closeForResumption = vi.fn(async ({ ref, recovery, occurredAt, eventId, nextGeneration }) => {
-    const changed = { ...recovery, status: "CANCELLED" as const, lastExternalActivityAt: occurredAt,
-      resumption: { eventId, nextGeneration } };
-    recoveries.set(key(ref), changed);
-    return true;
+  const recordExternalActivity = vi.fn(async () => {
+    calls.push("external-activity");
   });
+  const closeForResumption = vi.fn(
+    async ({ ref, recovery, occurredAt, eventId, nextGeneration }) => {
+      const changed = {
+        ...recovery,
+        status: "CANCELLED" as const,
+        lastExternalActivityAt: occurredAt,
+        resumption: { eventId, nextGeneration },
+      };
+      recoveries.set(key(ref), changed);
+      return true;
+    },
+  );
   const logOutcome = vi.fn();
-  const withCheckoutLock = vi.fn(async <T>(ref: WooCheckoutRef, run: () => Promise<T>): Promise<T> => {
-    const name = key(ref);
-    const previous = lockTails.get(name) ?? Promise.resolve();
-    let release!: () => void;
-    const completed = new Promise<void>((resolve) => { release = resolve; });
-    lockTails.set(name, completed);
-    await previous;
-    try { return await run(); } finally { release(); }
-  });
+  const withCheckoutLock = vi.fn(
+    async <T>(ref: WooCheckoutRef, run: () => Promise<T>): Promise<T> => {
+      const name = key(ref);
+      const previous = lockTails.get(name) ?? Promise.resolve();
+      let release!: () => void;
+      const completed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      lockTails.set(name, completed);
+      await previous;
+      try {
+        return await run();
+      } finally {
+        release();
+      }
+    },
+  );
   const deps: WooCheckoutActivityDependencies = {
     now: () => NOW,
     coordinator: { withCheckoutLock },
@@ -109,17 +139,34 @@ function harness() {
       }),
     },
     recoveries: {
-      findExisting, recordExternalActivity,
+      findExisting,
+      recordExternalActivity,
       closeForResumption,
     },
-    shops: { evaluate: vi.fn(async () => ({ allowed: true, shopDomain: "from-db.example.test" })) },
+    shops: {
+      evaluate: vi.fn(async () => ({
+        allowed: true,
+        shopDomain: "from-db.example.test",
+      })),
+    },
     resolveDelayMinutes: vi.fn(async () => 30),
     logOutcome,
   };
   return {
-    service: new WooCheckoutActivityService(deps), deps, candidates, watermarks,
-    recoveries, terminal, schedule, cancel, calls, findExisting,
-    recordExternalActivity, logOutcome, withCheckoutLock, closeForResumption,
+    service: new WooCheckoutActivityService(deps),
+    deps,
+    candidates,
+    watermarks,
+    recoveries,
+    terminal,
+    schedule,
+    cancel,
+    calls,
+    findExisting,
+    recordExternalActivity,
+    logOutcome,
+    withCheckoutLock,
+    closeForResumption,
   };
 }
 
@@ -130,12 +177,20 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
     expect(result).toEqual({ kind: "scheduled", dueAt: at(30), generation: 1 });
     expect(h.schedule).toHaveBeenCalledOnce();
     expect(h.schedule.mock.calls[0]?.[0]).toMatchObject({
-      delayMinutes: 30, dueAtMs: Date.parse(at(30)),
+      delayMinutes: 30,
+      dueAtMs: Date.parse(at(30)),
       retentionMs: expect.any(Number),
       candidate: {
-        source: "woocommerce", shopId: "shop-a", checkoutToken: "checkout-1", generation: 1,
-        lastActivityAt: at(0), lastEventId: "evt-1",
-        basket: { kind: "nonempty", checkout: { currency: "GBP", total: "29.99" } },
+        source: "woocommerce",
+        shopId: "shop-a",
+        checkoutToken: "checkout-1",
+        generation: 1,
+        lastActivityAt: at(0),
+        lastEventId: "evt-1",
+        basket: {
+          kind: "nonempty",
+          checkout: { currency: "GBP", total: "29.99" },
+        },
       },
     });
     expect(h.calls).toEqual(["recovery", "order"]);
@@ -145,71 +200,119 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
   it("reschedules using only the later received basket/contact and never creates a recovery", async () => {
     const h = harness();
     await h.service.handleCheckout(event("evt-1"));
-    const later = event("evt-2", 2, { checkout: {
-      currency: "EUR", total: "44.50",
-      items: [{ productId: "new", quantity: 2, total: "44.50" }],
-      contact: { phone: "+447000000111" },
-    } });
-    expect(await h.service.handleCheckout(later)).toEqual({ kind: "rescheduled", dueAt: at(32), generation: 1 });
-    expect(h.candidates.get("shop-a/checkout-1")?.basket).toEqual({ kind: "nonempty", checkout: later.checkout });
+    const later = event("evt-2", 2, {
+      checkout: {
+        currency: "EUR",
+        total: "44.50",
+        items: [{ productId: "new", quantity: 2, total: "44.50" }],
+        contact: { phone: "+447000000111" },
+      },
+    });
+    expect(await h.service.handleCheckout(later)).toEqual({
+      kind: "rescheduled",
+      dueAt: at(32),
+      generation: 1,
+    });
+    expect(h.candidates.get("shop-a/checkout-1")?.basket).toEqual({
+      kind: "nonempty",
+      checkout: later.checkout,
+    });
     expect(h.schedule).toHaveBeenCalledTimes(2);
     expect(h.findExisting).toHaveBeenCalledTimes(2);
   });
 
   it("replaces restoration with the newest nonempty snapshot, including coupon-only and quantity changes", async () => {
     const h = harness();
-    const first = event("evt-restore-1", 0, { checkout: {
-      currency: "GBP", total: "29.99",
-      items: [{ productId: "123", quantity: 1, total: "29.99" }],
-      restoration: supportedRestoration,
-    } });
+    const first = event("evt-restore-1", 0, {
+      checkout: {
+        currency: "GBP",
+        total: "29.99",
+        items: [{ productId: "123", quantity: 1, total: "29.99" }],
+        restoration: supportedRestoration,
+      },
+    });
     await h.service.handleCheckout(first);
     expect(h.candidates.get("shop-a/checkout-1")?.basket).toMatchObject({
-      kind: "nonempty", checkout: { restoration: supportedRestoration },
+      kind: "nonempty",
+      checkout: { restoration: supportedRestoration },
     });
 
-    const couponOnly = event("evt-restore-coupon", 1, { checkout: {
-      ...first.checkout,
-      restoration: { ...supportedRestoration, appliedCouponCodes: ["vip20"] },
-    } });
-    expect(await h.service.handleCheckout(couponOnly)).toMatchObject({ kind: "rescheduled" });
+    const couponOnly = event("evt-restore-coupon", 1, {
+      checkout: {
+        ...first.checkout,
+        restoration: { ...supportedRestoration, appliedCouponCodes: ["vip20"] },
+      },
+    });
+    expect(await h.service.handleCheckout(couponOnly)).toMatchObject({
+      kind: "rescheduled",
+    });
     expect(h.candidates.get("shop-a/checkout-1")?.basket).toMatchObject({
-      kind: "nonempty", checkout: { items: first.checkout.items, restoration: { appliedCouponCodes: ["vip20"] } },
+      kind: "nonempty",
+      checkout: {
+        items: first.checkout.items,
+        restoration: { appliedCouponCodes: ["vip20"] },
+      },
     });
 
-    const quantityChanged = event("evt-restore-quantity", 2, { checkout: {
-      currency: "GBP", total: "59.98",
-      items: [{ productId: "123", quantity: 2, total: "59.98" }],
-      restoration: unsupportedRestoration,
-    } });
-    expect(await h.service.handleCheckout(quantityChanged)).toMatchObject({ kind: "rescheduled" });
+    const quantityChanged = event("evt-restore-quantity", 2, {
+      checkout: {
+        currency: "GBP",
+        total: "59.98",
+        items: [{ productId: "123", quantity: 2, total: "59.98" }],
+        restoration: unsupportedRestoration,
+      },
+    });
+    expect(await h.service.handleCheckout(quantityChanged)).toMatchObject({
+      kind: "rescheduled",
+    });
     expect(h.candidates.get("shop-a/checkout-1")?.basket).toMatchObject({
-      kind: "nonempty", checkout: { items: quantityChanged.checkout.items, restoration: unsupportedRestoration },
+      kind: "nonempty",
+      checkout: {
+        items: quantityChanged.checkout.items,
+        restoration: unsupportedRestoration,
+      },
     });
 
-    const restorationAbsent = event("evt-restore-absent", 3, { checkout: {
-      currency: "GBP", total: "29.99",
-      items: [{ productId: "123", quantity: 1, total: "29.99" }],
-    } });
-    expect(await h.service.handleCheckout(restorationAbsent)).toMatchObject({ kind: "rescheduled" });
+    const restorationAbsent = event("evt-restore-absent", 3, {
+      checkout: {
+        currency: "GBP",
+        total: "29.99",
+        items: [{ productId: "123", quantity: 1, total: "29.99" }],
+      },
+    });
+    expect(await h.service.handleCheckout(restorationAbsent)).toMatchObject({
+      kind: "rescheduled",
+    });
     const latest = h.candidates.get("shop-a/checkout-1")!;
     expect(latest.basket.kind).toBe("nonempty");
     if (latest.basket.kind === "nonempty") {
       expect(latest.basket.checkout).not.toHaveProperty("restoration");
     }
-    const delayedSnapshot = event("evt-restore-stale", 2, { checkout: {
-      currency: "GBP", total: "29.99", items: [{ productId: "123", quantity: 1 }],
-      restoration: supportedRestoration,
-    } });
-    expect(await h.service.handleCheckout(delayedSnapshot)).toMatchObject({ kind: "ignored-stale" });
+    const delayedSnapshot = event("evt-restore-stale", 2, {
+      checkout: {
+        currency: "GBP",
+        total: "29.99",
+        items: [{ productId: "123", quantity: 1 }],
+        restoration: supportedRestoration,
+      },
+    });
+    expect(await h.service.handleCheckout(delayedSnapshot)).toMatchObject({
+      kind: "ignored-stale",
+    });
     expect(h.candidates.get("shop-a/checkout-1")).toEqual(latest);
   });
 
   it("deduplicates stable eventId and ignores older events without rewriting candidate", async () => {
     const h = harness();
     await h.service.handleCheckout(event("evt-new", 4));
-    expect(await h.service.handleCheckout(event("evt-new", 4))).toMatchObject({ kind: "ignored-stale", reason: "duplicate_event" });
-    expect(await h.service.handleCheckout(event("evt-old", 1))).toMatchObject({ kind: "ignored-stale", reason: "older_event" });
+    expect(await h.service.handleCheckout(event("evt-new", 4))).toMatchObject({
+      kind: "ignored-stale",
+      reason: "duplicate_event",
+    });
+    expect(await h.service.handleCheckout(event("evt-old", 1))).toMatchObject({
+      kind: "ignored-stale",
+      reason: "older_event",
+    });
     expect(h.schedule).toHaveBeenCalledTimes(1);
     expect(h.candidates.get("shop-a/checkout-1")?.lastEventId).toBe("evt-new");
   });
@@ -217,49 +320,81 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
   it("cancels a previously valid basket on an explicit empty snapshot, and permits a later refill", async () => {
     const h = harness();
     await h.service.handleCheckout(event("evt-1"));
-    expect(await h.service.handleCheckout(event("evt-empty", 2, { checkout: {
-      currency: "GBP", total: "0.00", items: [],
-    } }))).toEqual({ kind: "cancelled-empty", reason: "explicit_empty_basket" });
+    expect(
+      await h.service.handleCheckout(
+        event("evt-empty", 2, {
+          checkout: {
+            currency: "GBP",
+            total: "0.00",
+            items: [],
+          },
+        }),
+      ),
+    ).toEqual({ kind: "cancelled-empty", reason: "explicit_empty_basket" });
     expect(h.candidates.size).toBe(0);
     expect(h.watermarks.get("shop-a/checkout-1")?.state).toBe("empty");
-    expect((await h.service.handleCheckout(event("evt-refill", 3))).kind).toBe("scheduled");
+    expect((await h.service.handleCheckout(event("evt-refill", 3))).kind).toBe(
+      "scheduled",
+    );
     expect(h.candidates.get("shop-a/checkout-1")?.basket.kind).toBe("nonempty");
   });
 
-  it.each(["omitted", "oversized"])("treats %s items as unknown, never empty or admissible", async (mode) => {
-    const h = harness();
-    await h.service.handleCheckout(event("evt-1"));
-    const missing = event("evt-missing", 1, { checkout: {
-      currency: "GBP", total: "29.99",
-      ...(mode === "oversized"
-        ? { items: Array.from({ length: 51 }, () => ({ quantity: 1 })) }
-        : {}),
-    } });
-    expect(await h.service.handleCheckout(missing)).toMatchObject({ kind: "deferred-ambiguous" });
-    expect(h.candidates.size).toBe(0);
-    expect(h.schedule).toHaveBeenCalledTimes(1);
-    expect(h.watermarks.get("shop-a/checkout-1")?.state).toBe("unknown");
-    expect((await h.service.handleCheckout(event("evt-new", 2))).kind).toBe("scheduled");
-  });
+  it.each(["omitted", "oversized"])(
+    "treats %s items as unknown, never empty or admissible",
+    async (mode) => {
+      const h = harness();
+      await h.service.handleCheckout(event("evt-1"));
+      const missing = event("evt-missing", 1, {
+        checkout: {
+          currency: "GBP",
+          total: "29.99",
+          ...(mode === "oversized"
+            ? { items: Array.from({ length: 51 }, () => ({ quantity: 1 })) }
+            : {}),
+        },
+      });
+      expect(await h.service.handleCheckout(missing)).toMatchObject({
+        kind: "deferred-ambiguous",
+      });
+      expect(h.candidates.size).toBe(0);
+      expect(h.schedule).toHaveBeenCalledTimes(1);
+      expect(h.watermarks.get("shop-a/checkout-1")?.state).toBe("unknown");
+      expect((await h.service.handleCheckout(event("evt-new", 2))).kind).toBe(
+        "scheduled",
+      );
+    },
+  );
 
   it("quarantines same-time different versions including reused eventId/payload edits", async () => {
     const h = harness();
     await h.service.handleCheckout(event("evt-1"));
-    expect(await h.service.handleCheckout(event("evt-2"))).toEqual({ kind: "deferred-ambiguous", reason: "same_time_conflict" });
+    expect(await h.service.handleCheckout(event("evt-2"))).toEqual({
+      kind: "deferred-ambiguous",
+      reason: "same_time_conflict",
+    });
     expect(h.candidates.size).toBe(0);
     expect(h.watermarks.get("shop-a/checkout-1")?.state).toBe("conflicting");
-    expect((await h.service.handleCheckout(event("evt-1"))).kind).toBe("deferred-ambiguous");
+    expect((await h.service.handleCheckout(event("evt-1"))).kind).toBe(
+      "deferred-ambiguous",
+    );
     expect(h.schedule).toHaveBeenCalledOnce();
-    expect((await h.service.handleCheckout(event("evt-3", 1))).kind).toBe("scheduled");
-    expect((await h.service.handleCheckout(event("evt-3", 2))).kind).toBe("deferred-ambiguous");
+    expect((await h.service.handleCheckout(event("evt-3", 1))).kind).toBe(
+      "scheduled",
+    );
+    expect((await h.service.handleCheckout(event("evt-3", 2))).kind).toBe(
+      "deferred-ambiguous",
+    );
   });
 
   it("quarantines distinct versions in the same source second even with different milliseconds", async () => {
     const h = harness();
     await h.service.handleCheckout(event("evt-1"));
-    const subsecond = event("evt-2", 0, { occurredAt: "2026-10-24T11:00:00.900Z" });
+    const subsecond = event("evt-2", 0, {
+      occurredAt: "2026-10-24T11:00:00.900Z",
+    });
     expect(await h.service.handleCheckout(subsecond)).toEqual({
-      kind: "deferred-ambiguous", reason: "same_time_conflict",
+      kind: "deferred-ambiguous",
+      reason: "same_time_conflict",
     });
     expect(h.candidates.size).toBe(0);
     expect(h.watermarks.get("shop-a/checkout-1")?.state).toBe("conflicting");
@@ -267,11 +402,22 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
 
   it("checks PostgreSQL even with no job after MESSAGE_SENT; never schedules generation 2", async () => {
     const h = harness();
-    h.recoveries.set("shop-a/checkout-1", { id: "recovery-sent", generation: 1,
-      status: "MESSAGE_SENT", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
-    expect(await h.service.handleCheckout(event("evt-after-message", 3))).toEqual({
-      kind: "resumed", previousRecoveryId: "recovery-sent", nextGeneration: 2,
-      candidateOutcome: "scheduled", dueAt: at(33),
+    h.recoveries.set("shop-a/checkout-1", {
+      id: "recovery-sent",
+      generation: 1,
+      status: "MESSAGE_SENT",
+      lastExternalActivityAt: new Date(at(0)),
+      resumption: null,
+      admissionEventId: null,
+    });
+    expect(
+      await h.service.handleCheckout(event("evt-after-message", 3)),
+    ).toEqual({
+      kind: "resumed",
+      previousRecoveryId: "recovery-sent",
+      nextGeneration: 2,
+      candidateOutcome: "scheduled",
+      dueAt: at(33),
     });
     expect(h.schedule).toHaveBeenCalledOnce();
     expect(h.schedule.mock.calls[0]?.[0].candidate.generation).toBe(2);
@@ -280,77 +426,159 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
   it("checks PostgreSQL with a candidate present and retires it without another first send", async () => {
     const h = harness();
     await h.service.handleCheckout(event("evt-1"));
-    h.recoveries.set("shop-a/checkout-1", { id: "recovery-existing", generation: 1,
-      status: "DETECTED", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
-    expect((await h.service.handleCheckout(event("evt-2", 1))).kind).toBe("resumed");
+    h.recoveries.set("shop-a/checkout-1", {
+      id: "recovery-existing",
+      generation: 1,
+      status: "DETECTED",
+      lastExternalActivityAt: new Date(at(0)),
+      resumption: null,
+      admissionEventId: null,
+    });
+    expect((await h.service.handleCheckout(event("evt-2", 1))).kind).toBe(
+      "resumed",
+    );
     expect(h.candidates.get("shop-a/checkout-1")?.generation).toBe(2);
     expect(h.schedule).toHaveBeenCalledTimes(2);
   });
 
   it("does not let a resumption replay overwrite a later successor candidate or watermark", async () => {
     const h = harness();
-    h.recoveries.set("shop-a/checkout-1", { id: "recovery-1", generation: 1,
-      status: "ENGAGED", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
-    const resumed = event("evt-resume", 2, { checkout: {
-      currency: "GBP", total: "29.99", items: [{ productId: "123", quantity: 1 }],
-      restoration: supportedRestoration,
-    } });
+    h.recoveries.set("shop-a/checkout-1", {
+      id: "recovery-1",
+      generation: 1,
+      status: "ENGAGED",
+      lastExternalActivityAt: new Date(at(0)),
+      resumption: null,
+      admissionEventId: null,
+    });
+    const resumed = event("evt-resume", 2, {
+      checkout: {
+        currency: "GBP",
+        total: "29.99",
+        items: [{ productId: "123", quantity: 1 }],
+        restoration: supportedRestoration,
+      },
+    });
     expect((await h.service.handleCheckout(resumed)).kind).toBe("resumed");
     expect(h.closeForResumption).toHaveBeenCalledOnce();
     expect(h.candidates.get("shop-a/checkout-1")?.generation).toBe(2);
-    const later = event("evt-later", 3, { checkout: {
-      currency: "GBP", total: "59.98", items: [{ productId: "123", quantity: 2 }],
-      restoration: unsupportedRestoration,
-    } });
-    expect(await h.service.handleCheckout(later)).toMatchObject({ kind: "rescheduled", generation: 2 });
-    const successorBeforeReplay = structuredClone(h.candidates.get("shop-a/checkout-1"));
-    const watermarkBeforeReplay = structuredClone(h.watermarks.get("shop-a/checkout-1"));
-    expect(await h.service.handleCheckout(resumed)).toMatchObject({ kind: "resumed",
-      previousRecoveryId: "recovery-1", nextGeneration: 2 });
+    const later = event("evt-later", 3, {
+      checkout: {
+        currency: "GBP",
+        total: "59.98",
+        items: [{ productId: "123", quantity: 2 }],
+        restoration: unsupportedRestoration,
+      },
+    });
+    expect(await h.service.handleCheckout(later)).toMatchObject({
+      kind: "rescheduled",
+      generation: 2,
+    });
+    const successorBeforeReplay = structuredClone(
+      h.candidates.get("shop-a/checkout-1"),
+    );
+    const watermarkBeforeReplay = structuredClone(
+      h.watermarks.get("shop-a/checkout-1"),
+    );
+    expect(await h.service.handleCheckout(resumed)).toMatchObject({
+      kind: "resumed",
+      previousRecoveryId: "recovery-1",
+      nextGeneration: 2,
+    });
     expect(h.closeForResumption).toHaveBeenCalledOnce();
     expect(h.candidates.get("shop-a/checkout-1")?.generation).toBe(2);
-    expect(h.candidates.get("shop-a/checkout-1")).toEqual(successorBeforeReplay);
-    expect(h.watermarks.get("shop-a/checkout-1")).toEqual(watermarkBeforeReplay);
-    expect(h.candidates.get("shop-a/checkout-1")?.lastEventId).toBe("evt-later");
+    expect(h.candidates.get("shop-a/checkout-1")).toEqual(
+      successorBeforeReplay,
+    );
+    expect(h.watermarks.get("shop-a/checkout-1")).toEqual(
+      watermarkBeforeReplay,
+    );
+    expect(h.candidates.get("shop-a/checkout-1")?.lastEventId).toBe(
+      "evt-later",
+    );
     expect(h.candidates.get("shop-a/checkout-1")?.basket).toMatchObject({
-      kind: "nonempty", checkout: { restoration: unsupportedRestoration },
+      kind: "nonempty",
+      checkout: { restoration: unsupportedRestoration },
     });
   });
 
-  it.each(["stale", "duplicate", "same-second conflict", "event-ID reuse", "generation mismatch"] as const)(
+  it.each([
+    "stale",
+    "duplicate",
+    "same-second conflict",
+    "event-ID reuse",
+    "generation mismatch",
+  ] as const)(
     "does not close an active recovery when the pre-close watermark classifies the event as %s",
     async (classification) => {
       const h = harness();
-      const incoming = event(classification === "duplicate" ? "evt-watermark" : "evt-incoming", 2);
-      const watermarkEvent = classification === "stale" || classification === "event-ID reuse"
-        ? event(classification === "event-ID reuse" ? incoming.eventId : "evt-watermark", 3)
-        : classification === "generation mismatch" ? event("evt-watermark", 1)
-        : classification === "duplicate" ? incoming : event("evt-other", 2);
-      h.recoveries.set("shop-a/checkout-1", { id: "active-recovery", generation: 1,
-        status: "MESSAGE_SENT", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
+      const incoming = event(
+        classification === "duplicate" ? "evt-watermark" : "evt-incoming",
+        2,
+      );
+      const watermarkEvent =
+        classification === "stale" || classification === "event-ID reuse"
+          ? event(
+              classification === "event-ID reuse"
+                ? incoming.eventId
+                : "evt-watermark",
+              3,
+            )
+          : classification === "generation mismatch"
+            ? event("evt-watermark", 1)
+            : classification === "duplicate"
+              ? incoming
+              : event("evt-other", 2);
+      h.recoveries.set("shop-a/checkout-1", {
+        id: "active-recovery",
+        generation: 1,
+        status: "MESSAGE_SENT",
+        lastExternalActivityAt: new Date(at(0)),
+        resumption: null,
+        admissionEventId: null,
+      });
       h.watermarks.set("shop-a/checkout-1", {
         generation: classification === "generation mismatch" ? 7 : 1,
         lastEventId: watermarkEvent.eventId,
         lastActivityAt: watermarkEvent.occurredAt,
-        checkoutDigest: createHash("sha256").update(JSON.stringify(watermarkEvent.checkout)).digest("hex"),
+        checkoutDigest: createHash("sha256")
+          .update(JSON.stringify(watermarkEvent.checkout))
+          .digest("hex"),
         state: "nonempty",
       });
       const result = await h.service.handleCheckout(incoming);
       expect(h.closeForResumption).not.toHaveBeenCalled();
-      expect(h.recoveries.get("shop-a/checkout-1")).toMatchObject({ status: "MESSAGE_SENT", resumption: null });
-      expect(result.kind).toBe(classification === "stale" || classification === "duplicate"
-        ? "ignored-stale" : "deferred-ambiguous");
+      expect(h.recoveries.get("shop-a/checkout-1")).toMatchObject({
+        status: "MESSAGE_SENT",
+        resumption: null,
+      });
+      expect(result.kind).toBe(
+        classification === "stale" || classification === "duplicate"
+          ? "ignored-stale"
+          : "deferred-ambiguous",
+      );
     },
   );
 
   it("cancels terminal observed placed (not necessarily paid) and ambiguous order state", async () => {
     const h = harness();
     await h.service.handleCheckout(event("evt-1"));
-    h.terminal.set("shop-a/checkout-1", { kind: "order-placed", orderId: "order-1" });
-    expect(await h.service.handleCheckout(event("evt-2", 1))).toEqual({ kind: "ignored-terminal", reason: "order-placed" });
+    h.terminal.set("shop-a/checkout-1", {
+      kind: "order-placed",
+      orderId: "order-1",
+    });
+    expect(await h.service.handleCheckout(event("evt-2", 1))).toEqual({
+      kind: "ignored-terminal",
+      reason: "order-placed",
+    });
     expect(h.candidates.size).toBe(0);
-    h.terminal.set("shop-a/checkout-1", { kind: "ambiguous", reason: "conflicting orders" });
-    expect((await h.service.handleCheckout(event("evt-3", 2))).kind).toBe("deferred-ambiguous");
+    h.terminal.set("shop-a/checkout-1", {
+      kind: "ambiguous",
+      reason: "conflicting orders",
+    });
+    expect((await h.service.handleCheckout(event("evt-3", 2))).kind).toBe(
+      "deferred-ambiguous",
+    );
     expect(h.schedule).toHaveBeenCalledOnce();
   });
 
@@ -361,7 +589,11 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
       h.service.handleCheckout(event("evt-b", 1)),
       h.service.handleCheckout(event("evt-c", 0, { shopId: "shop-b" })),
     ]);
-    expect(outcomes.map((item) => item.kind)).toEqual(["scheduled", "rescheduled", "scheduled"]);
+    expect(outcomes.map((item) => item.kind)).toEqual([
+      "scheduled",
+      "rescheduled",
+      "scheduled",
+    ]);
     expect(h.candidates.size).toBe(2);
     expect(h.candidates.get("shop-a/checkout-1")?.lastEventId).toBe("evt-b");
     expect(h.candidates.get("shop-b/checkout-1")?.lastEventId).toBe("evt-c");
@@ -370,21 +602,37 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
 
   it("fails closed on admission/eligibility, and propagates Redis/BullMQ errors for retry", async () => {
     const h = harness();
-    vi.mocked(h.deps.shops.evaluate).mockResolvedValueOnce({ allowed: false, reason: "woo_installation_unavailable" });
-    expect(await h.service.handleCheckout(event("evt-1"))).toEqual({ kind: "not-eligible", reason: "woo_installation_unavailable" });
+    vi.mocked(h.deps.shops.evaluate).mockResolvedValueOnce({
+      allowed: false,
+      reason: "woo_installation_unavailable",
+    });
+    expect(await h.service.handleCheckout(event("evt-1"))).toEqual({
+      kind: "not-eligible",
+      reason: "woo_installation_unavailable",
+    });
     expect(h.schedule).not.toHaveBeenCalled();
     h.schedule.mockRejectedValueOnce(new Error("redis offline"));
-    await expect(h.service.handleCheckout(event("evt-2", 1))).rejects.toThrow("redis offline");
+    await expect(h.service.handleCheckout(event("evt-2", 1))).rejects.toThrow(
+      "redis offline",
+    );
     expect(h.watermarks.size).toBe(0); // never claim accepted before enqueue
-    expect((await h.service.handleCheckout(event("evt-2", 1))).kind).toBe("scheduled");
+    expect((await h.service.handleCheckout(event("evt-2", 1))).kind).toBe(
+      "scheduled",
+    );
   });
 
   it("repairs a successful queue write if watermark publication fails and capture retries", async () => {
     const h = harness();
-    vi.mocked(h.deps.watermarks.write).mockRejectedValueOnce(new Error("watermark offline"));
-    await expect(h.service.handleCheckout(event("evt-1"))).rejects.toThrow("watermark offline");
+    vi.mocked(h.deps.watermarks.write).mockRejectedValueOnce(
+      new Error("watermark offline"),
+    );
+    await expect(h.service.handleCheckout(event("evt-1"))).rejects.toThrow(
+      "watermark offline",
+    );
     expect(h.candidates.size).toBe(1);
-    expect((await h.service.handleCheckout(event("evt-1"))).kind).toBe("rescheduled");
+    expect((await h.service.handleCheckout(event("evt-1"))).kind).toBe(
+      "rescheduled",
+    );
     expect(h.watermarks.get("shop-a/checkout-1")?.state).toBe("nonempty");
     expect(h.schedule).toHaveBeenCalledTimes(2);
   });

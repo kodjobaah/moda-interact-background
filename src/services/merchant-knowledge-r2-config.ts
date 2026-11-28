@@ -20,7 +20,10 @@ function requiredTrimmed(environment: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
-function requiredPositiveSafeInteger(environment: NodeJS.ProcessEnv, name: string): number {
+function requiredPositiveSafeInteger(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+): number {
   const value = requiredTrimmed(environment, name);
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -32,23 +35,39 @@ function requiredPositiveSafeInteger(environment: NodeJS.ProcessEnv, name: strin
 export function loadMerchantKnowledgeR2Config(
   environment: NodeJS.ProcessEnv,
 ): MerchantKnowledgeR2Config {
-  const endpoint = requiredTrimmed(environment, "MERCHANT_KNOWLEDGE_R2_ENDPOINT");
+  const endpoint = requiredTrimmed(
+    environment,
+    "MERCHANT_KNOWLEDGE_R2_ENDPOINT",
+  );
   let parsedEndpoint: URL;
   try {
     parsedEndpoint = new URL(endpoint);
   } catch {
-    throw new MerchantKnowledgeR2ConfigError("INVALID_MERCHANT_KNOWLEDGE_R2_ENDPOINT");
+    throw new MerchantKnowledgeR2ConfigError(
+      "INVALID_MERCHANT_KNOWLEDGE_R2_ENDPOINT",
+    );
   }
   if (parsedEndpoint.protocol !== "https:" || !parsedEndpoint.hostname) {
-    throw new MerchantKnowledgeR2ConfigError("INVALID_MERCHANT_KNOWLEDGE_R2_ENDPOINT");
+    throw new MerchantKnowledgeR2ConfigError(
+      "INVALID_MERCHANT_KNOWLEDGE_R2_ENDPOINT",
+    );
   }
 
   return {
     endpoint: parsedEndpoint.toString().replace(/\/$/, ""),
     bucket: requiredTrimmed(environment, "MERCHANT_KNOWLEDGE_R2_BUCKET"),
-    accessKeyId: requiredTrimmed(environment, "MERCHANT_KNOWLEDGE_R2_ACCESS_KEY_ID"),
-    secretAccessKey: requiredTrimmed(environment, "MERCHANT_KNOWLEDGE_R2_SECRET_ACCESS_KEY"),
-    maxUploadBytes: requiredPositiveSafeInteger(environment, "MERCHANT_KNOWLEDGE_MAX_UPLOAD_BYTES"),
+    accessKeyId: requiredTrimmed(
+      environment,
+      "MERCHANT_KNOWLEDGE_R2_ACCESS_KEY_ID",
+    ),
+    secretAccessKey: requiredTrimmed(
+      environment,
+      "MERCHANT_KNOWLEDGE_R2_SECRET_ACCESS_KEY",
+    ),
+    maxUploadBytes: requiredPositiveSafeInteger(
+      environment,
+      "MERCHANT_KNOWLEDGE_MAX_UPLOAD_BYTES",
+    ),
     maxXlsxUncompressedBytes: requiredPositiveSafeInteger(
       environment,
       "MERCHANT_KNOWLEDGE_MAX_XLSX_UNCOMPRESSED_BYTES",

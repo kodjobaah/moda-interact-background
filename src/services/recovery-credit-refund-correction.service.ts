@@ -3,25 +3,20 @@ import {
   RecoveryCreditRefundStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import prisma from "../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import {
   shopifyPartnerBillingApi,
   type ShopifyPartnerBillingProvider,
 } from "../providers/shopify-partner-billing.provider.js";
-import {
-  RefundCompletionService,
-} from "./recovery-credit-refund-correction/refund-completion.service.js";
-import {
-  WooRefundHoldPreparationService,
-} from "./recovery-credit-refund-correction/woocommerce-refund-hold-preparation.service.js";
-import {
-  RefundPreparationService,
-} from "./recovery-credit-refund-correction/refund-preparation.service.js";
-import {
-  RefundProviderStateService,
-} from "./recovery-credit-refund-correction/refund-provider-state.service.js";
+import { RefundCompletionService } from "./recovery-credit-refund-correction/refund-completion.service.js";
+import { WooRefundHoldPreparationService } from "./recovery-credit-refund-correction/woocommerce-refund-hold-preparation.service.js";
+import { RefundPreparationService } from "./recovery-credit-refund-correction/refund-preparation.service.js";
+import { RefundProviderStateService } from "./recovery-credit-refund-correction/refund-provider-state.service.js";
 import {
   RefundReconciliationService,
   type RefundReconciliationOutcome,
@@ -68,7 +63,11 @@ export class RecoveryCreditRefundCorrectionService {
   ) {
     const providerState = new RefundProviderStateService(database, partner);
     const completion = new RefundCompletionService(database, now);
-    this.preparation = new RefundPreparationService(database, providerState, now);
+    this.preparation = new RefundPreparationService(
+      database,
+      providerState,
+      now,
+    );
     this.wooPreparation = new WooRefundHoldPreparationService(database);
     this.reconciliation = new RefundReconciliationService(
       database,
@@ -81,25 +80,39 @@ export class RecoveryCreditRefundCorrectionService {
     const take = boundedPageSize(this.pageSize);
     const [shopifyRefunds, wooRefunds] = await Promise.all([
       this.database.recoveryCreditRefund.findMany({
-        where: { provider: "SHOPIFY", status: RecoveryCreditRefundStatus.REQUESTED },
+        where: {
+          provider: "SHOPIFY",
+          status: RecoveryCreditRefundStatus.REQUESTED,
+        },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         take,
         select: refundSelect,
       }),
-      this.database.recoveryCreditRefund.findMany({
-        where: { provider: "WOOCOMMERCE", status: RecoveryCreditRefundStatus.REQUESTED },
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-        take,
-        select: refundSelect,
-      }).catch((error: unknown) => {
-        this.operationalLogger.warn("billing.refund_correction.woocommerce_scan_deferred", {
-          errorName: boundedErrorName(error),
-        });
-        return [];
-      }),
+      this.database.recoveryCreditRefund
+        .findMany({
+          where: {
+            provider: "WOOCOMMERCE",
+            status: RecoveryCreditRefundStatus.REQUESTED,
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          take,
+          select: refundSelect,
+        })
+        .catch((error: unknown) => {
+          this.operationalLogger.warn(
+            "billing.refund_correction.woocommerce_scan_deferred",
+            {
+              errorName: boundedErrorName(error),
+            },
+          );
+          return [];
+        }),
     ]);
-    const refunds = [...shopifyRefunds, ...wooRefunds]
-      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id));
+    const refunds = [...shopifyRefunds, ...wooRefunds].sort(
+      (left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() ||
+        left.id.localeCompare(right.id),
+    );
     const result: RecoveryCreditRefundCorrectionResult = {
       selected: refunds.length,
       prepared: 0,
@@ -118,9 +131,12 @@ export class RecoveryCreditRefundCorrectionService {
       try {
         if (isWoo) {
           const wooOutcome = await this.wooPreparation.prepare(refund);
-          outcome = wooOutcome === "prepared"
-            ? "provider-action-required"
-            : wooOutcome === "needs-attention" ? "needs-attention" : "reconciled";
+          outcome =
+            wooOutcome === "prepared"
+              ? "provider-action-required"
+              : wooOutcome === "needs-attention"
+                ? "needs-attention"
+                : "reconciled";
         } else if (refund.provider === "SHOPIFY") {
           outcome = refund.automaticCorrectionUsageEventId
             ? await this.reconciliation.reconcile(refund)
@@ -130,10 +146,13 @@ export class RecoveryCreditRefundCorrectionService {
         }
       } catch (error) {
         if (isWoo) {
-          this.operationalLogger.warn("billing.refund_correction.woocommerce_preparation_deferred", {
-            refundId: refund.id,
-            errorName: boundedErrorName(error),
-          });
+          this.operationalLogger.warn(
+            "billing.refund_correction.woocommerce_preparation_deferred",
+            {
+              refundId: refund.id,
+              errorName: boundedErrorName(error),
+            },
+          );
           outcome = "reconciled";
         } else {
           outcome = refund.automaticCorrectionUsageEventId
@@ -142,7 +161,9 @@ export class RecoveryCreditRefundCorrectionService {
           if (outcome === "provider-action-required") {
             await this.preparation.markProviderActionRequired(
               refund,
-              error instanceof Error ? error.message : "provider proof unavailable",
+              error instanceof Error
+                ? error.message
+                : "provider proof unavailable",
             );
           }
         }
@@ -150,7 +171,8 @@ export class RecoveryCreditRefundCorrectionService {
       result.prepared += outcome === "prepared" ? 1 : 0;
       result.reconciled += outcome === "reconciled" ? 1 : 0;
       result.completed += outcome === "completed" ? 1 : 0;
-      result.providerActionRequired += outcome === "provider-action-required" ? 1 : 0;
+      result.providerActionRequired +=
+        outcome === "provider-action-required" ? 1 : 0;
       result.needsAttention += outcome === "needs-attention" ? 1 : 0;
     }
     return result;
@@ -160,13 +182,16 @@ export class RecoveryCreditRefundCorrectionService {
     if (await this.hasEarlierLiveMeterMutation(refund)) return "reconciled";
     const result = await this.preparation.prepare(refund);
     if (result.kind === "prepared") return "prepared";
-    if (result.kind === "provider-action-required") return "provider-action-required";
+    if (result.kind === "provider-action-required")
+      return "provider-action-required";
     return result.refund
       ? this.reconciliation.reconcile(result.refund)
       : "reconciled";
   }
 
-  private async hasEarlierLiveMeterMutation(refund: RefundRow): Promise<boolean> {
+  private async hasEarlierLiveMeterMutation(
+    refund: RefundRow,
+  ): Promise<boolean> {
     const earlierRefund = await this.database.recoveryCreditRefund.findFirst({
       where: {
         shopId: refund.shopId,
@@ -182,25 +207,26 @@ export class RecoveryCreditRefundCorrectionService {
       select: { id: true },
     });
     if (earlierRefund) return true;
-    const unresolvedPurchase = await this.database.recoveryCreditPurchase.findFirst({
-      where: {
-        shopId: refund.shopId,
-        status: RecoveryCreditPurchaseStatus.REQUESTED,
-        shopifyEventHandleSnapshot: refund.eventHandleSnapshot,
-      },
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      select: { id: true },
-    });
+    const unresolvedPurchase =
+      await this.database.recoveryCreditPurchase.findFirst({
+        where: {
+          shopId: refund.shopId,
+          status: RecoveryCreditPurchaseStatus.REQUESTED,
+          shopifyEventHandleSnapshot: refund.eventHandleSnapshot,
+        },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { id: true },
+      });
     return Boolean(unresolvedPurchase);
   }
 }
 
 type CorrectionOutcome =
-  | RefundReconciliationOutcome
-  | "prepared"
-  | "provider-action-required";
+  RefundReconciliationOutcome | "prepared" | "provider-action-required";
 
-function refundMeterKey(refund: Pick<RefundRow, "shopId" | "eventHandleSnapshot">): string {
+function refundMeterKey(
+  refund: Pick<RefundRow, "shopId" | "eventHandleSnapshot">,
+): string {
   return JSON.stringify([refund.shopId, refund.eventHandleSnapshot]);
 }
 

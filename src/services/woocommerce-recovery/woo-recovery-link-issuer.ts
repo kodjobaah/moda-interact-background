@@ -9,19 +9,22 @@ export type WooRecoveryLinkOmissionReason =
   | "SHOP_DOMAIN_INVALID"
   | "SHOP_HOST_MISMATCH";
 
-export type WooRecoveryLinkPlan = Readonly<{
-  kind: "ready";
-  canonicalSiteUrl: string;
-  shopDomain: string;
-}> | Readonly<{
-  kind: "omitted";
-  reason: WooRecoveryLinkOmissionReason;
-}>;
+export type WooRecoveryLinkPlan =
+  | Readonly<{
+      kind: "ready";
+      canonicalSiteUrl: string;
+      shopDomain: string;
+    }>
+  | Readonly<{
+      kind: "omitted";
+      reason: WooRecoveryLinkOmissionReason;
+    }>;
 
 function parseShopDomain(value: string): URL | null {
   try {
     const url = new URL(URL.canParse(value) ? value : `https://${value}`);
-    if (!url.hostname || url.username || url.password || url.search || url.hash) return null;
+    if (!url.hostname || url.username || url.password || url.search || url.hash)
+      return null;
     return url;
   } catch {
     return null;
@@ -34,7 +37,21 @@ function isPublicHostname(hostname: string): boolean {
   const family = isIP(host);
   if (family !== 0) return isPublicIpAddress(host);
   if (!host.includes(".")) return false;
-  if (host === "localhost" || [".localhost", ".local", ".test", ".invalid", ".example", ".internal", ".intranet", ".lan", ".home", ".home.arpa"].some((suffix) => host.endsWith(suffix))) {
+  if (
+    host === "localhost" ||
+    [
+      ".localhost",
+      ".local",
+      ".test",
+      ".invalid",
+      ".example",
+      ".internal",
+      ".intranet",
+      ".lan",
+      ".home",
+      ".home.arpa",
+    ].some((suffix) => host.endsWith(suffix))
+  ) {
     return false;
   }
   return true;
@@ -56,9 +73,19 @@ export function prepareWooRecoveryLink(
   }
   const canonicalPath = site.pathname.replace(/\/+$/, "");
   const canonicalWithoutSlash = `${site.origin}${canonicalPath}`;
-  const isCanonical = canonicalSiteUrl === canonicalWithoutSlash || canonicalSiteUrl === `${canonicalWithoutSlash}/`;
-  if (Buffer.byteLength(canonicalSiteUrl, "utf8") > 512 || site.protocol !== "https:" ||
-      site.username || site.password || site.search || site.hash || !isPublicHostname(site.hostname) || !isCanonical) {
+  const isCanonical =
+    canonicalSiteUrl === canonicalWithoutSlash ||
+    canonicalSiteUrl === `${canonicalWithoutSlash}/`;
+  if (
+    Buffer.byteLength(canonicalSiteUrl, "utf8") > 512 ||
+    site.protocol !== "https:" ||
+    site.username ||
+    site.password ||
+    site.search ||
+    site.hash ||
+    !isPublicHostname(site.hostname) ||
+    !isCanonical
+  ) {
     return { kind: "omitted", reason: "CANONICAL_SITE_INVALID" };
   }
 

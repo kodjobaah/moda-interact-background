@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BillingPeriodEntitlementCounterKind, BillingPeriodStatus, BillingPlanKind } from "@prisma/client";
+import {
+  BillingPeriodEntitlementCounterKind,
+  BillingPeriodStatus,
+  BillingPlanKind,
+} from "@prisma/client";
 
 import { ReinstallReconciliationService } from "../../../../src/services/billing-subscription-reconciliation/reinstall-reconciliation.service.js";
 import type { ReinstallExpected } from "../../../../src/services/billing-subscription-reconciliation/classification.js";
@@ -86,15 +90,29 @@ function harness({
       return Promise.resolve([]);
     }),
     shop: {
-      findUnique: vi.fn().mockResolvedValue({ id: "shop-1", status: "UNINSTALLED", reinstallPendingAt }),
-      update: vi.fn().mockImplementation(async () => events.push("shop.update")),
+      findUnique: vi.fn().mockResolvedValue({
+        id: "shop-1",
+        status: "UNINSTALLED",
+        reinstallPendingAt,
+      }),
+      update: vi
+        .fn()
+        .mockImplementation(async () => events.push("shop.update")),
     },
     shopSettings: {
-      update: vi.fn().mockImplementation(async () => events.push("settings.update")),
+      update: vi
+        .fn()
+        .mockImplementation(async () => events.push("settings.update")),
     },
     subscription: {
-      findUnique: vi.fn(({ select }: { select?: Record<string, unknown> }) => Promise.resolve(select?.planId || select?.billingPeriodId ? current : authority)),
-      update: vi.fn().mockImplementation(async () => events.push("subscription.update")),
+      findUnique: vi.fn(({ select }: { select?: Record<string, unknown> }) =>
+        Promise.resolve(
+          select?.planId || select?.billingPeriodId ? current : authority,
+        ),
+      ),
+      update: vi
+        .fn()
+        .mockImplementation(async () => events.push("subscription.update")),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
@@ -123,7 +141,9 @@ function harness({
     shopifyDiscount: { updateMany: vi.fn() },
   };
   const database = {
-    shop: { findUnique: vi.fn().mockResolvedValue({ domain: "merchant.example" }) },
+    shop: {
+      findUnique: vi.fn().mockResolvedValue({ domain: "merchant.example" }),
+    },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(plan) },
     subscription: {
       findUnique: vi.fn().mockImplementation(async () => {
@@ -132,7 +152,10 @@ function harness({
       }),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
-    $transaction: vi.fn(async (callback: (client: typeof transaction) => unknown) => callback(transaction)),
+    $transaction: vi.fn(
+      async (callback: (client: typeof transaction) => unknown) =>
+        callback(transaction),
+    ),
   };
   const partner = {
     getActiveSubscription: vi.fn().mockImplementation(async () => {
@@ -142,10 +165,14 @@ function harness({
     getSubscriptionReconciliationSnapshot: vi.fn(),
   };
   const reconciliationQueue = {
-    publishNext: vi.fn().mockImplementation(async () => events.push("queue.publish")),
+    publishNext: vi
+      .fn()
+      .mockImplementation(async () => events.push("queue.publish")),
   };
   const discountPublisher = {
-    publishDiscountSync: vi.fn().mockImplementation(async () => events.push("discount.publish")),
+    publishDiscountSync: vi
+      .fn()
+      .mockImplementation(async () => events.push("discount.publish")),
   };
   const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
   const service = new ReinstallReconciliationService(
@@ -156,33 +183,63 @@ function harness({
     logger as never,
     () => now,
   );
-  return { database, transaction, partner, reconciliationQueue, discountPublisher, logger, service, events };
+  return {
+    database,
+    transaction,
+    partner,
+    reconciliationQueue,
+    discountPublisher,
+    logger,
+    service,
+    events,
+  };
 }
 
 describe("ReinstallReconciliationService", () => {
   it("uses one direct active-subscription lookup for a no-contract reinstall and retains lock and discount transaction order", async () => {
-    const test = harness({ current: {
-      id: "subscription-1", planId: "plan-paid", billingPeriodId: null,
-      observedShopifyPlanHandle: "paid-2026",
-      currentPeriodStart: null, currentPeriodEnd: null,
-    } });
+    const test = harness({
+      current: {
+        id: "subscription-1",
+        planId: "plan-paid",
+        billingPeriodId: null,
+        observedShopifyPlanHandle: "paid-2026",
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+      },
+    });
 
-    await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
+    await test.service.reconcileReinstall(
+      "shop-1",
+      expected,
+      "gid://shopify/Shop/1",
+    );
 
     expect(test.partner.getActiveSubscription).toHaveBeenCalledOnce();
-    expect(test.partner.getActiveSubscription).toHaveBeenCalledWith("gid://shopify/Shop/1");
-    expect(test.partner.getSubscriptionReconciliationSnapshot).not.toHaveBeenCalled();
+    expect(test.partner.getActiveSubscription).toHaveBeenCalledWith(
+      "gid://shopify/Shop/1",
+    );
+    expect(
+      test.partner.getSubscriptionReconciliationSnapshot,
+    ).not.toHaveBeenCalled();
     expect(test.database.$transaction).toHaveBeenCalledOnce();
     expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(3);
-    expect(test.transaction.$queryRaw.mock.calls.map(([query]) => query.strings?.join("?") ?? "")).toEqual([
+    expect(
+      test.transaction.$queryRaw.mock.calls.map(
+        ([query]) => query.strings?.join("?") ?? "",
+      ),
+    ).toEqual([
       expect.stringContaining('FROM "commerce"."Shop"'),
       expect.stringContaining('FROM "shopify"."ShopSettings"'),
       expect.stringContaining('FROM "billing"."Subscription"'),
     ]);
-    expect(test.transaction.shopifyDiscountCatalogue.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({ status: "UNAVAILABLE" }),
-      update: expect.objectContaining({ status: "UNAVAILABLE" }),
-    }));
+    expect(
+      test.transaction.shopifyDiscountCatalogue.upsert,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ status: "UNAVAILABLE" }),
+        update: expect.objectContaining({ status: "UNAVAILABLE" }),
+      }),
+    );
     expect(test.transaction.shopifyDiscount.updateMany).toHaveBeenCalledOnce();
     expect(test.transaction.shopifyDiscount.updateMany).toHaveBeenCalledWith({
       where: { shopId: "shop-1", unavailableAt: null },
@@ -195,37 +252,76 @@ describe("ReinstallReconciliationService", () => {
   it("commits a verified Free reinstall before discount and follow-up queue publication", async () => {
     const test = harness({ providerResult: freeProvider, plan: freePlan });
 
-    await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
+    await test.service.reconcileReinstall(
+      "shop-1",
+      expected,
+      "gid://shopify/Shop/1",
+    );
 
     expect(test.transaction.billingPeriod.create).toHaveBeenCalledOnce();
     expect(test.transaction.subscription.update).toHaveBeenCalledOnce();
     expect(test.transaction.shop.update).toHaveBeenCalledOnce();
-    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: expect.objectContaining({ onboardingCompleted: true }) });
-    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
-    expect(test.transaction.$queryRaw.mock.calls.map(([query]) => query.strings?.join("?") ?? "")).toEqual([
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({
+      where: { id: "shop-1" },
+      data: expect.objectContaining({ onboardingCompleted: true }),
+    });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({
+      where: { shopId: "shop-1" },
+      data: { onboardingCompleted: true },
+    });
+    expect(
+      test.transaction.$queryRaw.mock.calls.map(
+        ([query]) => query.strings?.join("?") ?? "",
+      ),
+    ).toEqual([
       expect.stringContaining('FROM "commerce"."Shop"'),
       expect.stringContaining('FROM "shopify"."ShopSettings"'),
       expect.stringContaining('FROM "billing"."Subscription"'),
     ]);
-    expect(test.events.indexOf("subscription.update")).toBeLessThan(test.events.indexOf("discount.publish"));
-    expect(test.events.indexOf("shop.update")).toBeLessThan(test.events.indexOf("discount.publish"));
-    expect(test.discountPublisher.publishDiscountSync).toHaveBeenCalledWith("shop-1", "REINSTALL_RECONCILED");
+    expect(test.events.indexOf("subscription.update")).toBeLessThan(
+      test.events.indexOf("discount.publish"),
+    );
+    expect(test.events.indexOf("shop.update")).toBeLessThan(
+      test.events.indexOf("discount.publish"),
+    );
+    expect(test.discountPublisher.publishDiscountSync).toHaveBeenCalledWith(
+      "shop-1",
+      "REINSTALL_RECONCILED",
+    );
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledWith(
       "shop-1",
       expected.subscriptionId,
       new Date("2026-09-30T23:55:00.000Z"),
     );
-    expect(test.events.indexOf("discount.publish")).toBeLessThan(test.events.indexOf("queue.publish"));
+    expect(test.events.indexOf("discount.publish")).toBeLessThan(
+      test.events.indexOf("queue.publish"),
+    );
   });
 
   it("keeps a committed Free reinstall when canonical post-commit queue publishers fail", async () => {
     const test = harness({ providerResult: freeProvider, plan: freePlan });
-    const billingQueue = { add: vi.fn().mockRejectedValue(new Error("billing queue unavailable")) };
-    const discountQueue = { add: vi.fn().mockRejectedValue(new Error("discount queue unavailable")) };
+    const billingQueue = {
+      add: vi.fn().mockRejectedValue(new Error("billing queue unavailable")),
+    };
+    const discountQueue = {
+      add: vi.fn().mockRejectedValue(new Error("discount queue unavailable")),
+    };
     const publisherLogger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
-    const reconciliationQueue = new ReconciliationQueueService(test.database as never, billingQueue, publisherLogger as never, () => now);
-    const discountPublisher = new DiscountSyncPublisherService(test.database as never, discountQueue, publisherLogger as never, () => now);
-    vi.spyOn(shopifyDiscountCatalogueService, "requestSync").mockResolvedValue("requested");
+    const reconciliationQueue = new ReconciliationQueueService(
+      test.database as never,
+      billingQueue,
+      publisherLogger as never,
+      () => now,
+    );
+    const discountPublisher = new DiscountSyncPublisherService(
+      test.database as never,
+      discountQueue,
+      publisherLogger as never,
+      () => now,
+    );
+    vi.spyOn(shopifyDiscountCatalogueService, "requestSync").mockResolvedValue(
+      "requested",
+    );
     const service = new ReinstallReconciliationService(
       test.database as never,
       test.partner as never,
@@ -235,14 +331,22 @@ describe("ReinstallReconciliationService", () => {
       () => now,
     );
 
-    await expect(service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1")).resolves.toBeUndefined();
+    await expect(
+      service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1"),
+    ).resolves.toBeUndefined();
 
     expect(test.transaction.subscription.update).toHaveBeenCalledOnce();
     expect(test.transaction.shop.update).toHaveBeenCalledOnce();
     expect(discountQueue.add).toHaveBeenCalledOnce();
     expect(billingQueue.add).toHaveBeenCalledOnce();
-    expect(publisherLogger.warn).toHaveBeenCalledWith("shopify.discount_sync.enqueue_failed", expect.any(Object));
-    expect(publisherLogger.error).toHaveBeenCalledWith("billing.subscription_reconciliation.enqueue_failed", expect.any(Object));
+    expect(publisherLogger.warn).toHaveBeenCalledWith(
+      "shopify.discount_sync.enqueue_failed",
+      expect.any(Object),
+    );
+    expect(publisherLogger.error).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.enqueue_failed",
+      expect.any(Object),
+    );
   });
 
   it("keeps exact-cycle Paid activation behind its period and counter integrity reads", async () => {
@@ -264,18 +368,47 @@ describe("ReinstallReconciliationService", () => {
       reservedQuantity: 3,
       forfeitedQuantity: 1,
     };
-    const test = harness({ providerResult: paidProvider, plan: paidPlan, period: existingPeriod, counter: existingCounter });
+    const test = harness({
+      providerResult: paidProvider,
+      plan: paidPlan,
+      period: existingPeriod,
+      counter: existingCounter,
+    });
 
-    await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
+    await test.service.reconcileReinstall(
+      "shop-1",
+      expected,
+      "gid://shopify/Shop/1",
+    );
 
     expect(test.database.subscription.findUnique).toHaveBeenCalledOnce();
-    expect(test.events.indexOf("alignment.read")).toBeLessThan(test.events.findIndex((event) => event.includes('FROM "commerce"."Shop"')));
-    expect(test.transaction.billingPeriod.findUnique).toHaveBeenCalledWith({ where: { id: "period-paid" } });
-    expect(test.transaction.billingPeriodEntitlementCounter.findUnique).toHaveBeenCalledWith({
-      where: { billingPeriodId_counter: { billingPeriodId: "period-paid", counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS } },
+    expect(test.events.indexOf("alignment.read")).toBeLessThan(
+      test.events.findIndex((event) =>
+        event.includes('FROM "commerce"."Shop"'),
+      ),
+    );
+    expect(test.transaction.billingPeriod.findUnique).toHaveBeenCalledWith({
+      where: { id: "period-paid" },
     });
-    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: expect.objectContaining({ onboardingCompleted: true }) });
-    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
+    expect(
+      test.transaction.billingPeriodEntitlementCounter.findUnique,
+    ).toHaveBeenCalledWith({
+      where: {
+        billingPeriodId_counter: {
+          billingPeriodId: "period-paid",
+          counter:
+            BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+        },
+      },
+    });
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({
+      where: { id: "shop-1" },
+      data: expect.objectContaining({ onboardingCompleted: true }),
+    });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({
+      where: { shopId: "shop-1" },
+      data: { onboardingCompleted: true },
+    });
     expect(test.discountPublisher.publishDiscountSync).toHaveBeenCalledOnce();
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledOnce();
   });
@@ -284,7 +417,11 @@ describe("ReinstallReconciliationService", () => {
     const oldStart = new Date("2026-08-01T00:00:00.000Z");
     const oldEnd = new Date("2026-09-01T00:00:00.000Z");
     const test = harness({
-      providerResult: { ...paidProvider, currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z") },
+      providerResult: {
+        ...paidProvider,
+        currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+        currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      },
       plan: paidPlan,
       current: {
         id: "subscription-1",
@@ -295,39 +432,74 @@ describe("ReinstallReconciliationService", () => {
         currentPeriodEnd: oldEnd,
       },
     });
-    const transition = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transitionInTransaction").mockImplementation(async () => {
-      test.events.push("rollover.transition");
-      return {
-        kind: "transitioned",
-        billingPeriodId: "period-new",
-        nextReconcileAt: new Date("2026-09-30T23:55:00.000Z"),
-        planKind: BillingPlanKind.PAID_METERED,
-      };
-    });
+    const transition = vi
+      .spyOn(
+        SamePlanBillingPeriodRolloverService.prototype,
+        "transitionInTransaction",
+      )
+      .mockImplementation(async () => {
+        test.events.push("rollover.transition");
+        return {
+          kind: "transitioned",
+          billingPeriodId: "period-new",
+          nextReconcileAt: new Date("2026-09-30T23:55:00.000Z"),
+          planKind: BillingPlanKind.PAID_METERED,
+        };
+      });
 
-    await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
+    await test.service.reconcileReinstall(
+      "shop-1",
+      expected,
+      "gid://shopify/Shop/1",
+    );
 
     expect(test.database.subscription.findUnique).toHaveBeenCalledOnce();
     expect(test.database.$transaction).toHaveBeenCalledOnce();
     expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(2);
-    expect(test.transaction.$queryRaw.mock.calls.map(([query]) => query.strings?.join("?") ?? "")).toEqual([
+    expect(
+      test.transaction.$queryRaw.mock.calls.map(
+        ([query]) => query.strings?.join("?") ?? "",
+      ),
+    ).toEqual([
       expect.stringContaining('FROM "commerce"."Shop"'),
       expect.stringContaining('FROM "shopify"."ShopSettings"'),
     ]);
-    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: expect.objectContaining({ onboardingCompleted: true }) });
-    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({
+      where: { id: "shop-1" },
+      data: expect.objectContaining({ onboardingCompleted: true }),
+    });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({
+      where: { shopId: "shop-1" },
+      data: { onboardingCompleted: true },
+    });
     expect(transition).toHaveBeenCalledOnce();
-    expect(test.events.indexOf("alignment.read")).toBeLessThan(test.events.findIndex((event) => event.includes('FROM "commerce"."Shop"')));
-    expect(test.events.findIndex((event) => event.includes('FROM "shopify"."ShopSettings"'))).toBeLessThan(test.events.indexOf("rollover.transition"));
-    expect(test.events.indexOf("shop.update")).toBeLessThan(test.events.indexOf("discount.publish"));
-    expect(test.events.indexOf("discount.publish")).toBeLessThan(test.events.indexOf("queue.publish"));
+    expect(test.events.indexOf("alignment.read")).toBeLessThan(
+      test.events.findIndex((event) =>
+        event.includes('FROM "commerce"."Shop"'),
+      ),
+    );
+    expect(
+      test.events.findIndex((event) =>
+        event.includes('FROM "shopify"."ShopSettings"'),
+      ),
+    ).toBeLessThan(test.events.indexOf("rollover.transition"));
+    expect(test.events.indexOf("shop.update")).toBeLessThan(
+      test.events.indexOf("discount.publish"),
+    );
+    expect(test.events.indexOf("discount.publish")).toBeLessThan(
+      test.events.indexOf("queue.publish"),
+    );
     transition.mockRestore();
   });
 
   it("records provider transport failure with the age-based retry and preserves the reinstall marker", async () => {
     const test = harness({ providerError: new Error("provider offline") });
 
-    await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
+    await test.service.reconcileReinstall(
+      "shop-1",
+      expected,
+      "gid://shopify/Shop/1",
+    );
 
     expect(test.database.$transaction).not.toHaveBeenCalled();
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith({
@@ -338,84 +510,163 @@ describe("ReinstallReconciliationService", () => {
         nextReconcileAt: new Date("2026-09-12T12:05:00.000Z"),
       }),
     });
-    expect(test.logger.error).toHaveBeenCalledWith("billing.subscription_reconciliation.reinstall_provider_failed", expect.objectContaining({ shopId: "shop-1" }));
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.reinstall_provider_failed",
+      expect.objectContaining({ shopId: "shop-1" }),
+    );
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledOnce();
   });
 
   it("projects an unmapped plan without a sync error or retry", async () => {
-    const test = harness({ providerResult: paidProvider, plan: null, current: {
-      id: "subscription-1", planId: "plan-paid", billingPeriodId: null,
-      observedShopifyPlanHandle: "paid-2026",
-      currentPeriodStart: null, currentPeriodEnd: null,
-    } });
-
-    await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
-
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: expected.subscriptionId },
-      data: expect.objectContaining({
-        status: "UNMAPPED",
-        planId: null,
+    const test = harness({
+      providerResult: paidProvider,
+      plan: null,
+      current: {
+        id: "subscription-1",
+        planId: "plan-paid",
+        billingPeriodId: null,
         observedShopifyPlanHandle: "paid-2026",
-        lastSyncErrorCode: null,
-        lastSyncErrorAt: null,
-        nextReconcileAt: null,
-        unmappedShopifyUsageEventHandles: expect.any(Array),
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+      },
+    });
+
+    await test.service.reconcileReinstall(
+      "shop-1",
+      expected,
+      "gid://shopify/Shop/1",
+    );
+
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: expected.subscriptionId },
+        data: expect.objectContaining({
+          status: "UNMAPPED",
+          planId: null,
+          observedShopifyPlanHandle: "paid-2026",
+          lastSyncErrorCode: null,
+          lastSyncErrorAt: null,
+          nextReconcileAt: null,
+          unmappedShopifyUsageEventHandles: expect.any(Array),
+        }),
       }),
-    }));
-    expect(test.logger.warn).toHaveBeenCalledWith("billing.subscription_reconciliation.reinstall_unmapped_plan", expect.objectContaining({
-      shopId: "shop-1",
-      subscriptionId: expected.subscriptionId,
-      planHandle: "paid-2026",
-    }));
+    );
+    expect(test.logger.warn).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.reinstall_unmapped_plan",
+      expect.objectContaining({
+        shopId: "shop-1",
+        subscriptionId: expected.subscriptionId,
+        planHandle: "paid-2026",
+      }),
+    );
     expect(test.transaction.shop.update).not.toHaveBeenCalled();
   });
 
   it.each([
-    { mode: "no contract", plan: null, providerResult: null, closeReason: "CONTRACT_ENDED", status: "NO_CONTRACT" },
-    { mode: "unmapped", plan: null, providerResult: paidProvider, closeReason: "PLAN_CHANGED", status: "UNMAPPED" },
-  ])("closes a prior paid period exactly once before $mode reinstall projection", async ({ plan, providerResult, closeReason, status }) => {
-    const period = {
-      id: "period-paid", subscriptionId: "subscription-1", status: BillingPeriodStatus.OPEN,
-      planKindSnapshot: BillingPlanKind.PAID_METERED, planId: "plan-paid",
-    };
-    const counter = {
-      id: "counter-1", version: 4, grantedQuantity: 10,
-      committedQuantity: 3, reservedQuantity: 2, forfeitedQuantity: 0,
-    };
-    const test = harness({ plan, providerResult, period, counter });
-    test.transaction.usageReservation.aggregate.mockResolvedValue({ _sum: { quantity: 2 } });
-    test.transaction.billingPeriodEntitlementCounter.findUnique
-      .mockResolvedValueOnce(counter)
-      .mockResolvedValueOnce({ ...counter, reservedQuantity: 0, forfeitedQuantity: 7 });
+    {
+      mode: "no contract",
+      plan: null,
+      providerResult: null,
+      closeReason: "CONTRACT_ENDED",
+      status: "NO_CONTRACT",
+    },
+    {
+      mode: "unmapped",
+      plan: null,
+      providerResult: paidProvider,
+      closeReason: "PLAN_CHANGED",
+      status: "UNMAPPED",
+    },
+  ])(
+    "closes a prior paid period exactly once before $mode reinstall projection",
+    async ({ plan, providerResult, closeReason, status }) => {
+      const period = {
+        id: "period-paid",
+        subscriptionId: "subscription-1",
+        status: BillingPeriodStatus.OPEN,
+        planKindSnapshot: BillingPlanKind.PAID_METERED,
+        planId: "plan-paid",
+      };
+      const counter = {
+        id: "counter-1",
+        version: 4,
+        grantedQuantity: 10,
+        committedQuantity: 3,
+        reservedQuantity: 2,
+        forfeitedQuantity: 0,
+      };
+      const test = harness({ plan, providerResult, period, counter });
+      test.transaction.usageReservation.aggregate.mockResolvedValue({
+        _sum: { quantity: 2 },
+      });
+      test.transaction.billingPeriodEntitlementCounter.findUnique
+        .mockResolvedValueOnce(counter)
+        .mockResolvedValueOnce({
+          ...counter,
+          reservedQuantity: 0,
+          forfeitedQuantity: 7,
+        });
 
-    await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
+      await test.service.reconcileReinstall(
+        "shop-1",
+        expected,
+        "gid://shopify/Shop/1",
+      );
 
-    expect(test.transaction.usageReservation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "RELEASED" }),
-    }));
-    expect(test.transaction.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ id: "counter-1", version: 4, reservedQuantity: 2 }),
-    }));
-    expect(test.transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "period-paid", status: "OPEN" },
-      data: expect.objectContaining({ status: "CLOSED", closeReason }),
-    }));
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status, planId: null, billingPeriodId: null, currentPeriodStart: null, currentPeriodEnd: null,
-      }),
-    }));
-    expect(test.transaction.billingPeriod.updateMany.mock.invocationCallOrder[0])
-      .toBeLessThan(test.transaction.subscription.update.mock.invocationCallOrder[0]);
-  });
+      expect(test.transaction.usageReservation.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: "RELEASED" }),
+        }),
+      );
+      expect(
+        test.transaction.billingPeriodEntitlementCounter.updateMany,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "counter-1",
+            version: 4,
+            reservedQuantity: 2,
+          }),
+        }),
+      );
+      expect(test.transaction.billingPeriod.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "period-paid", status: "OPEN" },
+          data: expect.objectContaining({ status: "CLOSED", closeReason }),
+        }),
+      );
+      expect(test.transaction.subscription.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status,
+            planId: null,
+            billingPeriodId: null,
+            currentPeriodStart: null,
+            currentPeriodEnd: null,
+          }),
+        }),
+      );
+      expect(
+        test.transaction.billingPeriod.updateMany.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        test.transaction.subscription.update.mock.invocationCallOrder[0],
+      );
+    },
+  );
 
   it("does not mutate or publish when the locked reinstall authority has changed", async () => {
     const test = harness({
-      authority: { id: "subscription-1", nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") },
+      authority: {
+        id: "subscription-1",
+        nextReconcileAt: new Date("2026-09-12T12:01:00.000Z"),
+      },
     });
 
-    await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
+    await test.service.reconcileReinstall(
+      "shop-1",
+      expected,
+      "gid://shopify/Shop/1",
+    );
 
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.transaction.shop.update).not.toHaveBeenCalled();

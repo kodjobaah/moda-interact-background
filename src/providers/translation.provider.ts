@@ -7,7 +7,10 @@ import {
   type MerchantTranslationDirection,
 } from "@modainteract/moda-interact-shared/merchant-communications";
 
-const KEYED_SEGMENTS_RESPONSE_FORMAT = zodTextFormat(ResultSchema, "keyed_translation_segments_v1");
+const KEYED_SEGMENTS_RESPONSE_FORMAT = zodTextFormat(
+  ResultSchema,
+  "keyed_translation_segments_v1",
+);
 
 const BATCH_ENDPOINT = "/v1/responses";
 const COMPLETION_WINDOW = "24h" as const;
@@ -55,11 +58,7 @@ export type TranslationRequest = {
 };
 
 export type NormalizedProviderStatus =
-  | "nonterminal"
-  | "completed"
-  | "failed"
-  | "expired"
-  | "cancelled";
+  "nonterminal" | "completed" | "failed" | "expired" | "cancelled";
 
 export type TranslationProviderRequestCounts = {
   total: number | null;
@@ -224,9 +223,10 @@ export function createOpenAITranslationProvider(
         );
       }
 
-      const jsonl = requests
-        .map((request) => buildBatchRequestLine(request, model))
-        .join("\n") + "\n";
+      const jsonl =
+        requests
+          .map((request) => buildBatchRequestLine(request, model))
+          .join("\n") + "\n";
       const inputFile = await client.files.create({
         file: await toFile(Buffer.from(jsonl, "utf8"), "translations.jsonl"),
         purpose: "batch",
@@ -248,7 +248,9 @@ export function createOpenAITranslationProvider(
           completion_window: COMPLETION_WINDOW,
           metadata: {
             [CORRELATION_METADATA_KEY]: logicalBatchId,
-            [SCHEMA_METADATA_KEY]: String(MERCHANT_COMMUNICATIONS_SCHEMA_VERSION),
+            [SCHEMA_METADATA_KEY]: String(
+              MERCHANT_COMMUNICATIONS_SCHEMA_VERSION,
+            ),
           },
         });
       } catch (error) {
@@ -271,7 +273,11 @@ export function createOpenAITranslationProvider(
       const matches: TranslationProviderBatch[] = [];
       let after: string | undefined;
 
-      for (let pageNumber = 0; pageNumber < maxCorrelationPages; pageNumber += 1) {
+      for (
+        let pageNumber = 0;
+        pageNumber < maxCorrelationPages;
+        pageNumber += 1
+      ) {
         const page = (await client.batches.list({
           limit: MAX_PAGE_SIZE,
           ...(after ? { after } : {}),
@@ -314,11 +320,15 @@ export function createOpenAITranslationProvider(
   };
 }
 
-function buildBatchRequestLine(request: TranslationRequest, model: string): string {
+function buildBatchRequestLine(
+  request: TranslationRequest,
+  model: string,
+): string {
   if (request.direction !== undefined) {
     MerchantTranslationDirectionSchema.parse(request.direction);
   }
-  const customId = request.providerCustomId ?? encodeTranslationId(request.translationId);
+  const customId =
+    request.providerCustomId ?? encodeTranslationId(request.translationId);
 
   return JSON.stringify({
     custom_id: customId,
@@ -327,17 +337,24 @@ function buildBatchRequestLine(request: TranslationRequest, model: string): stri
     body: {
       model,
       input: [
-        { role: "system", content: request.translationFormat === "keyed-segments-v1"
-          ? KEYED_SEGMENTS_SYSTEM_PROMPT : TRANSLATION_SYSTEM_PROMPT },
+        {
+          role: "system",
+          content:
+            request.translationFormat === "keyed-segments-v1"
+              ? KEYED_SEGMENTS_SYSTEM_PROMPT
+              : TRANSLATION_SYSTEM_PROMPT,
+        },
         {
           role: "user",
           content: `Translate from ${request.sourceLanguageTag} to ${request.targetLanguageTag}.\n\n${request.sourceText}`,
         },
       ],
       ...(request.translationFormat === "keyed-segments-v1"
-        ? { text: { format: KEYED_SEGMENTS_RESPONSE_FORMAT } } : {}),
+        ? { text: { format: KEYED_SEGMENTS_RESPONSE_FORMAT } }
+        : {}),
       tools: [],
-      max_output_tokens: request.translationFormat === "keyed-segments-v1" ? 8_192 : 2_000,
+      max_output_tokens:
+        request.translationFormat === "keyed-segments-v1" ? 8_192 : 2_000,
     },
   });
 }
@@ -362,14 +379,17 @@ function encodeTranslationId(translationId: string): string {
 function classifyCreateFailure(error: unknown): Error {
   if (!error || typeof error !== "object") return error as Error;
 
-  const status = "status" in error && typeof error.status === "number"
-    ? error.status
-    : undefined;
-  const classification = status === 429
-    ? "DEFINITE_RETRYABLE_NOT_CREATED"
-    : status !== undefined && [400, 401, 403, 404, 409, 413, 422].includes(status)
-      ? "DEFINITE_TERMINAL_NOT_CREATED"
-      : "AMBIGUOUS_CREATE";
+  const status =
+    "status" in error && typeof error.status === "number"
+      ? error.status
+      : undefined;
+  const classification =
+    status === 429
+      ? "DEFINITE_RETRYABLE_NOT_CREATED"
+      : status !== undefined &&
+          [400, 401, 403, 404, 409, 413, 422].includes(status)
+        ? "DEFINITE_TERMINAL_NOT_CREATED"
+        : "AMBIGUOUS_CREATE";
   const classified = new TranslationProviderResponseError(
     error instanceof Error ? error.message : "OpenAI Batch create failed",
   );
@@ -438,12 +458,16 @@ function normalizeRequestCounts(
 
 function parseOutputFile(body: string): TranslationProviderResult[] {
   if (Buffer.byteLength(body, "utf8") > MAX_OUTPUT_BYTES) {
-    throw new TranslationProviderResponseError("Batch output file is too large");
+    throw new TranslationProviderResponseError(
+      "Batch output file is too large",
+    );
   }
 
   const lines = body.split("\n").filter((line) => line.trim().length > 0);
   if (lines.length > MAX_OUTPUT_LINES) {
-    throw new TranslationProviderResponseError("Batch output has too many lines");
+    throw new TranslationProviderResponseError(
+      "Batch output has too many lines",
+    );
   }
 
   const seenProviderCustomIds = new Set<string>();
@@ -452,7 +476,9 @@ function parseOutputFile(body: string): TranslationProviderResult[] {
     try {
       parsed = JSON.parse(line) as ParsedOutputLine;
     } catch {
-      throw new TranslationProviderResponseError("Batch output contains invalid JSON");
+      throw new TranslationProviderResponseError(
+        "Batch output contains invalid JSON",
+      );
     }
 
     if (
@@ -460,7 +486,9 @@ function parseOutputFile(body: string): TranslationProviderResult[] {
       typeof parsed !== "object" ||
       typeof parsed.custom_id !== "string"
     ) {
-      throw new TranslationProviderResponseError("Batch output is missing custom_id");
+      throw new TranslationProviderResponseError(
+        "Batch output is missing custom_id",
+      );
     }
     const providerCustomId = parsed.custom_id;
     if (seenProviderCustomIds.has(providerCustomId)) {
@@ -475,25 +503,35 @@ function parseOutputFile(body: string): TranslationProviderResult[] {
         status: "failed",
         translatedText: null,
         failureCode:
-          typeof parsed.error.code === "string" ? parsed.error.code : "provider-error",
+          typeof parsed.error.code === "string"
+            ? parsed.error.code
+            : "provider-error",
       };
     }
 
     const statusCode = parsed.response?.status_code;
-    if (typeof statusCode !== "number" || statusCode < 200 || statusCode >= 300) {
+    if (
+      typeof statusCode !== "number" ||
+      statusCode < 200 ||
+      statusCode >= 300
+    ) {
       return {
         providerCustomId,
         status: "failed",
         translatedText: null,
         failureCode:
-          typeof statusCode === "number" ? `http-${statusCode}` : "malformed-provider-output",
+          typeof statusCode === "number"
+            ? `http-${statusCode}`
+            : "malformed-provider-output",
       };
     }
 
     const output = parsed.response?.body?.output;
     const translatedText = output
       ?.flatMap((item) => item.content ?? [])
-      .filter((item) => item.type === "output_text" && typeof item.text === "string")
+      .filter(
+        (item) => item.type === "output_text" && typeof item.text === "string",
+      )
       .map((item) => item.text as string)
       .join("")
       .trim();

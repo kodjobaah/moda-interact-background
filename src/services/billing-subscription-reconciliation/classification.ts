@@ -75,9 +75,14 @@ export type ReconciliationClassificationRow = {
   subscription: ClassificationSubscription | null;
 };
 
-export type ClassifiedReconciliationRow = Omit<ReconciliationClassificationRow, "shopifyShopId" | "subscription"> & {
+export type ClassifiedReconciliationRow = Omit<
+  ReconciliationClassificationRow,
+  "shopifyShopId" | "subscription"
+> & {
   shopifyShopId: string;
-  subscription: Omit<ClassificationSubscription, "nextReconcileAt"> & { nextReconcileAt: Date };
+  subscription: Omit<ClassificationSubscription, "nextReconcileAt"> & {
+    nextReconcileAt: Date;
+  };
 };
 
 export type ReconciliationSkipReason =
@@ -90,19 +95,58 @@ export type ReconciliationSkipReason =
   | "subscription-state-ineligible";
 
 export type ReconciliationClassification =
-  | { type: "skip"; reason: ReconciliationSkipReason; fields?: Record<string, unknown> }
-  | { type: "accepted"; kind: "reinstall"; expected: ReinstallExpected; row: ClassifiedReconciliationRow }
-  | { type: "accepted"; kind: "initial-activation"; expected: InitialActivationExpected; row: ClassifiedReconciliationRow }
-  | { type: "accepted"; kind: "cycle-discovery"; expected: RolloverExpected; row: ClassifiedReconciliationRow }
-  | { type: "accepted"; kind: "rollover"; expected: RolloverExpected; row: ClassifiedReconciliationRow }
-  | { type: "accepted"; kind: "established-plan-change"; expected: EstablishedPlanChangeExpected; row: ClassifiedReconciliationRow }
-  | { type: "accepted"; kind: "frozen-reconciliation"; expected: RolloverExpected; row: ClassifiedReconciliationRow };
+  | {
+      type: "skip";
+      reason: ReconciliationSkipReason;
+      fields?: Record<string, unknown>;
+    }
+  | {
+      type: "accepted";
+      kind: "reinstall";
+      expected: ReinstallExpected;
+      row: ClassifiedReconciliationRow;
+    }
+  | {
+      type: "accepted";
+      kind: "initial-activation";
+      expected: InitialActivationExpected;
+      row: ClassifiedReconciliationRow;
+    }
+  | {
+      type: "accepted";
+      kind: "cycle-discovery";
+      expected: RolloverExpected;
+      row: ClassifiedReconciliationRow;
+    }
+  | {
+      type: "accepted";
+      kind: "rollover";
+      expected: RolloverExpected;
+      row: ClassifiedReconciliationRow;
+    }
+  | {
+      type: "accepted";
+      kind: "established-plan-change";
+      expected: EstablishedPlanChangeExpected;
+      row: ClassifiedReconciliationRow;
+    }
+  | {
+      type: "accepted";
+      kind: "frozen-reconciliation";
+      expected: RolloverExpected;
+      row: ClassifiedReconciliationRow;
+    };
 
-type ReconciliationJobFence = Pick<BillingSubscriptionReconcileJob, "subscriptionId" | "expectedNextReconcileAt">;
+type ReconciliationJobFence = Pick<
+  BillingSubscriptionReconcileJob,
+  "subscriptionId" | "expectedNextReconcileAt"
+>;
 
 export function sameDate(left: Date | null, right: Date | null): boolean {
-  return left === null && right === null
-    || left !== null && right !== null && left.getTime() === right.getTime();
+  return (
+    (left === null && right === null) ||
+    (left !== null && right !== null && left.getTime() === right.getTime())
+  );
 }
 
 export function classifySubscriptionReconciliation(
@@ -115,7 +159,10 @@ export function classifySubscriptionReconciliation(
 
   const subscription = row.subscription;
   if (row.status === "UNINSTALLED") {
-    if (row.reinstallPendingAt == null || subscription.nextReconcileAt === null) {
+    if (
+      row.reinstallPendingAt == null ||
+      subscription.nextReconcileAt === null
+    ) {
       return { type: "skip", reason: "uninstalled-reconciliation-not-due" };
     }
     if (subscription.id !== job.subscriptionId) {
@@ -125,11 +172,15 @@ export function classifySubscriptionReconciliation(
         fields: { currentSubscriptionId: subscription.id },
       };
     }
-    if (subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt) {
+    if (
+      subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt
+    ) {
       return {
         type: "skip",
         reason: "stale-next-reconcile-at",
-        fields: { currentNextReconcileAt: subscription.nextReconcileAt.toISOString() },
+        fields: {
+          currentNextReconcileAt: subscription.nextReconcileAt.toISOString(),
+        },
       };
     }
     return {
@@ -145,47 +196,58 @@ export function classifySubscriptionReconciliation(
   }
 
   if (row.status !== "ACTIVE") {
-    return { type: "skip", reason: "shop-not-active", fields: { shopStatus: row.status } };
+    return {
+      type: "skip",
+      reason: "shop-not-active",
+      fields: { shopStatus: row.status },
+    };
   }
 
-  const isInitialActivation = subscription.status === SubscriptionProjectionStatus.NO_CONTRACT
-    && subscription.planId === null
-    && subscription.pendingPlanId !== null
-    && subscription.pendingShopifyPlanHandle !== null
-    && subscription.nextReconcileAt !== null;
-  const isCycleDiscovery = row.onboardingCompleted
-    && (subscription.status === SubscriptionProjectionStatus.ACTIVE || subscription.status === SubscriptionProjectionStatus.TRIALING)
-    && subscription.planId !== null
-    && subscription.billingPeriodId === null
-    && subscription.pendingPlanId === null
-    && subscription.pendingShopifyPlanHandle === null
-    && subscription.pendingEffectiveAt === null
-    && subscription.nextReconcileAt !== null;
-  const isRollover = row.onboardingCompleted
-    && (subscription.status === SubscriptionProjectionStatus.ACTIVE || subscription.status === SubscriptionProjectionStatus.TRIALING)
-    && subscription.planId !== null
-    && subscription.billingPeriodId !== null
-    && subscription.pendingPlanId === null
-    && subscription.pendingShopifyPlanHandle === null
-    && subscription.pendingEffectiveAt === null
-    && subscription.nextReconcileAt !== null;
-  const isFrozenReconciliation = row.onboardingCompleted
-    && (subscription.status === SubscriptionProjectionStatus.FROZEN
-      || isBlockedUnfreezeAccountingState(subscription))
-    && subscription.planId !== null
-    && subscription.nextReconcileAt !== null;
-  const isEstablishedPlanChange = row.onboardingCompleted
-    && (
-      subscription.status === SubscriptionProjectionStatus.ACTIVE
-      || subscription.status === SubscriptionProjectionStatus.TRIALING
-      || (subscription.status === SubscriptionProjectionStatus.SYNC_ERROR
-        && RETRYABLE_PLAN_CHANGE_SYNC_ERRORS.includes(subscription.lastSyncErrorCode as typeof RETRYABLE_PLAN_CHANGE_SYNC_ERRORS[number]))
-    )
-    && subscription.planId !== null
-    && subscription.pendingPlanId !== null
-    && subscription.pendingShopifyPlanHandle !== null
-    && subscription.pendingEffectiveAt !== null
-    && subscription.nextReconcileAt !== null;
+  const isInitialActivation =
+    subscription.status === SubscriptionProjectionStatus.NO_CONTRACT &&
+    subscription.planId === null &&
+    subscription.pendingPlanId !== null &&
+    subscription.pendingShopifyPlanHandle !== null &&
+    subscription.nextReconcileAt !== null;
+  const isCycleDiscovery =
+    row.onboardingCompleted &&
+    (subscription.status === SubscriptionProjectionStatus.ACTIVE ||
+      subscription.status === SubscriptionProjectionStatus.TRIALING) &&
+    subscription.planId !== null &&
+    subscription.billingPeriodId === null &&
+    subscription.pendingPlanId === null &&
+    subscription.pendingShopifyPlanHandle === null &&
+    subscription.pendingEffectiveAt === null &&
+    subscription.nextReconcileAt !== null;
+  const isRollover =
+    row.onboardingCompleted &&
+    (subscription.status === SubscriptionProjectionStatus.ACTIVE ||
+      subscription.status === SubscriptionProjectionStatus.TRIALING) &&
+    subscription.planId !== null &&
+    subscription.billingPeriodId !== null &&
+    subscription.pendingPlanId === null &&
+    subscription.pendingShopifyPlanHandle === null &&
+    subscription.pendingEffectiveAt === null &&
+    subscription.nextReconcileAt !== null;
+  const isFrozenReconciliation =
+    row.onboardingCompleted &&
+    (subscription.status === SubscriptionProjectionStatus.FROZEN ||
+      isBlockedUnfreezeAccountingState(subscription)) &&
+    subscription.planId !== null &&
+    subscription.nextReconcileAt !== null;
+  const isEstablishedPlanChange =
+    row.onboardingCompleted &&
+    (subscription.status === SubscriptionProjectionStatus.ACTIVE ||
+      subscription.status === SubscriptionProjectionStatus.TRIALING ||
+      (subscription.status === SubscriptionProjectionStatus.SYNC_ERROR &&
+        RETRYABLE_PLAN_CHANGE_SYNC_ERRORS.includes(
+          subscription.lastSyncErrorCode as (typeof RETRYABLE_PLAN_CHANGE_SYNC_ERRORS)[number],
+        ))) &&
+    subscription.planId !== null &&
+    subscription.pendingPlanId !== null &&
+    subscription.pendingShopifyPlanHandle !== null &&
+    subscription.pendingEffectiveAt !== null &&
+    subscription.nextReconcileAt !== null;
 
   if (subscription.id !== job.subscriptionId) {
     return {
@@ -197,14 +259,24 @@ export function classifySubscriptionReconciliation(
   if (!subscription.nextReconcileAt) {
     return { type: "skip", reason: "next-reconcile-at-cleared" };
   }
-  if (subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt) {
+  if (
+    subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt
+  ) {
     return {
       type: "skip",
       reason: "stale-next-reconcile-at",
-      fields: { currentNextReconcileAt: subscription.nextReconcileAt.toISOString() },
+      fields: {
+        currentNextReconcileAt: subscription.nextReconcileAt.toISOString(),
+      },
     };
   }
-  if (!isInitialActivation && !isCycleDiscovery && !isRollover && !isEstablishedPlanChange && !isFrozenReconciliation) {
+  if (
+    !isInitialActivation &&
+    !isCycleDiscovery &&
+    !isRollover &&
+    !isEstablishedPlanChange &&
+    !isFrozenReconciliation
+  ) {
     return {
       type: "skip",
       reason: "subscription-state-ineligible",
@@ -245,10 +317,20 @@ export function classifySubscriptionReconciliation(
     };
   }
   if (isCycleDiscovery) {
-    return { type: "accepted", kind: "cycle-discovery", expected: periodExpected, row: acceptedRow };
+    return {
+      type: "accepted",
+      kind: "cycle-discovery",
+      expected: periodExpected,
+      row: acceptedRow,
+    };
   }
   if (isRollover) {
-    return { type: "accepted", kind: "rollover", expected: periodExpected, row: acceptedRow };
+    return {
+      type: "accepted",
+      kind: "rollover",
+      expected: periodExpected,
+      row: acceptedRow,
+    };
   }
   if (isEstablishedPlanChange) {
     return {
@@ -268,5 +350,10 @@ export function classifySubscriptionReconciliation(
       row: acceptedRow,
     };
   }
-  return { type: "accepted", kind: "frozen-reconciliation", expected: periodExpected, row: acceptedRow };
+  return {
+    type: "accepted",
+    kind: "frozen-reconciliation",
+    expected: periodExpected,
+    row: acceptedRow,
+  };
 }

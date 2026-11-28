@@ -21,7 +21,10 @@ import {
   backgroundRuntimeConfigService,
   type BackgroundRuntimeConfigSnapshot,
 } from "../runtime/background-runtime-config.js";
-import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
+import {
+  currentTranslationRuntimeConfig,
+  type TranslationRuntimeConfigReader,
+} from "./translation-runtime-config.js";
 import { isTranslationProviderFailureRetryable } from "./translation-batch-runtime/failure-policy.js";
 import {
   pollTranslationProviderBatch,
@@ -50,11 +53,17 @@ type PollTransaction = {
 };
 
 type PollDatabase = {
-  $transaction<T>(callback: (transaction: PollTransaction) => Promise<T>): Promise<T>;
+  $transaction<T>(
+    callback: (transaction: PollTransaction) => Promise<T>,
+  ): Promise<T>;
 };
 
 type PollQueue = Pick<Queue, "add">;
-type ProviderFactory = (options: { provider: string; model: string; apiKey?: string }) => TranslationProvider;
+type ProviderFactory = (options: {
+  provider: string;
+  model: string;
+  apiKey?: string;
+}) => TranslationProvider;
 
 export type TranslationBatchPollResult =
   | { status: "stale"; batchId: string }
@@ -69,24 +78,33 @@ export class TranslationBatchPollService {
   private readonly queue: PollQueue;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
-  constructor(options: {
-    database?: PollDatabase;
-    providerFactory?: ProviderFactory;
-    credentialReader?: (provider: string) => Promise<string>;
-    queue?: PollQueue;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-  } = {}) {
+  constructor(
+    options: {
+      database?: PollDatabase;
+      providerFactory?: ProviderFactory;
+      credentialReader?: (provider: string) => Promise<string>;
+      queue?: PollQueue;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+    } = {},
+  ) {
     this.database = options.database ?? prisma;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) =>
-      createOpenAITranslationProvider(providerOptions));
-    this.credentialReader = options.credentialReader ?? readSupportTranslationCredential;
-    this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
-      connection: connectionRedis,
-    });
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.credentialReader =
+      options.credentialReader ?? readSupportTranslationCredential;
+    this.queue =
+      options.queue ??
+      new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
+        connection: connectionRedis,
+      });
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
-  async poll(input: TranslationBatchPollJob): Promise<TranslationBatchPollResult> {
+  async poll(
+    input: TranslationBatchPollJob,
+  ): Promise<TranslationBatchPollResult> {
     const batch = await this.loadBatch(input.translationBatchId);
     if (
       !batch ||
@@ -101,20 +119,37 @@ export class TranslationBatchPollService {
 
     return pollTranslationProviderBatch({
       retrieve: async () => {
-        const provider = this.providerFactory({ provider: batch.provider, model: batch.model,
-          apiKey: await this.credentialReader(batch.provider) });
+        const provider = this.providerFactory({
+          provider: batch.provider,
+          model: batch.model,
+          apiKey: await this.credentialReader(batch.provider),
+        });
         return provider.retrieveBatch(providerBatchId);
       },
       onReadFailure: async (error) => {
-        const nextSequence = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
+        const nextSequence = await this.rescheduleAfterReadFailure(
+          batch,
+          runtimeConfig,
+        );
         await this.enqueuePoll(batch.id, nextSequence, runtimeConfig);
         console.error("translation batch poll failed", error);
-        return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
+        return {
+          status: "rescheduled",
+          batchId: batch.id,
+          pollSequence: nextSequence,
+        };
       },
       onNonterminal: async () => {
-        const nextSequence = await this.advanceNonterminal(batch, runtimeConfig);
+        const nextSequence = await this.advanceNonterminal(
+          batch,
+          runtimeConfig,
+        );
         await this.enqueuePoll(batch.id, nextSequence, runtimeConfig);
-        return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
+        return {
+          status: "rescheduled",
+          batchId: batch.id,
+          pollSequence: nextSequence,
+        };
       },
       onCompleted: async (providerBatch) => {
         const updated = await this.database.$transaction(async (transaction) =>
@@ -131,8 +166,10 @@ export class TranslationBatchPollService {
             WHERE "id" = ${batch.id}
               AND "status" = 'SUBMITTED'
               AND "pollSequence" = ${batch.pollSequence}
-          `));
-        if (updated !== 1) return { status: "stale", batchId: batch.id } as const;
+          `),
+        );
+        if (updated !== 1)
+          return { status: "stale", batchId: batch.id } as const;
         await this.enqueueResults(batch.id);
         return { status: "completed", batchId: batch.id } as const;
       },
@@ -143,7 +180,8 @@ export class TranslationBatchPollService {
           providerBatch.failureCode,
           runtimeConfig,
         );
-        if (!terminalApplied) return { status: "stale", batchId: batch.id } as const;
+        if (!terminalApplied)
+          return { status: "stale", batchId: batch.id } as const;
         return {
           status: "terminal",
           batchId: batch.id,
@@ -169,7 +207,9 @@ export class TranslationBatchPollService {
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<number> {
     return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<Array<{ pollSequence: number }>>(Prisma.sql`
+      const rows = await transaction.$queryRaw<
+        Array<{ pollSequence: number }>
+      >(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
@@ -191,7 +231,9 @@ export class TranslationBatchPollService {
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<number> {
     return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<Array<{ pollSequence: number }>>(Prisma.sql`
+      const rows = await transaction.$queryRaw<
+        Array<{ pollSequence: number }>
+      >(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
@@ -256,7 +298,11 @@ export class TranslationBatchPollService {
             AND "status" = 'PENDING'
             AND "currentBatchId" = ${batch.id}
         `);
-        if (affected === 1 && !disposition.shouldRetry && item.kind !== "MERCHANT") {
+        if (
+          affected === 1 &&
+          !disposition.shouldRetry &&
+          item.kind !== "MERCHANT"
+        ) {
           await transaction.$executeRaw(Prisma.sql`
             UPDATE "support"."MerchantSupportMessage"
             SET "state" = 'FAILED', "updatedAt" = NOW()

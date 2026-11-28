@@ -28,5 +28,7 @@ export function nextWooEntitlementReconciliationAt(
   currentPeriodEnd: Date,
   providerCoverageEndAt: Date,
 ): Date {
-  return new Date(Math.min(currentPeriodEnd.getTime(), providerCoverageEndAt.getTime()));
+  return new Date(
+    Math.min(currentPeriodEnd.getTime(), providerCoverageEndAt.getTime()),
+  );
 }

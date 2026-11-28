@@ -30,11 +30,7 @@
           ],
           "properties": {
             "scope": {
-              "enum": [
-                "PRODUCT_ONLY",
-                "ADD_TO_BASKET",
-                "REPLACE_BASKET_LINE"
-              ],
+              "enum": ["PRODUCT_ONLY", "ADD_TO_BASKET", "REPLACE_BASKET_LINE"],
               "type": "string",
               "maxLength": 19
             },
@@ -58,27 +54,17 @@
               "minLength": 1
             },
             "variantId": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": ["string", "null"],
               "maxLength": 128,
               "minLength": 1
             },
             "basketLineId": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": ["string", "null"],
               "maxLength": 128,
               "minLength": 1
             },
             "promotionKind": {
-              "enum": [
-                "NONE",
-                "NATIVE_SALE",
-                "DISCOUNT"
-              ],
+              "enum": ["NONE", "NATIVE_SALE", "DISCOUNT"],
               "type": "string",
               "maxLength": 11
             }
@@ -92,10 +78,7 @@
         "type": "array",
         "items": {
           "type": "object",
-          "required": [
-            "productId",
-            "variantId"
-          ],
+          "required": ["productId", "variantId"],
           "properties": {
             "productId": {
               "type": "string",
@@ -103,10 +86,7 @@
               "minLength": 1
             },
             "variantId": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": ["string", "null"],
               "maxLength": 128,
               "minLength": 1
             }
@@ -119,10 +99,7 @@
         "type": "array",
         "items": {
           "type": "object",
-          "required": [
-            "productId",
-            "variantId"
-          ],
+          "required": ["productId", "variantId"],
           "properties": {
             "productId": {
               "type": "string",
@@ -130,10 +107,7 @@
               "minLength": 1
             },
             "variantId": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": ["string", "null"],
               "maxLength": 128,
               "minLength": 1
             }
@@ -143,32 +117,21 @@
         "maxItems": 3
       },
       "productRecommendationVersion": {
-        "enum": [
-          "1"
-        ],
+        "enum": ["1"],
         "type": "string",
         "maxLength": 1
       },
       "shippingInformationSelection": {
         "type": "object",
-        "required": [
-          "productId",
-          "variantId"
-        ],
+        "required": ["productId", "variantId"],
         "properties": {
           "productId": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": ["string", "null"],
             "maxLength": 128,
             "minLength": 1
           },
           "variantId": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": ["string", "null"],
             "maxLength": 128,
             "minLength": 1
           }

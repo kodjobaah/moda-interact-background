@@ -17,8 +17,7 @@ function client(overrides: Record<string, unknown> = {}) {
     version: 3,
   };
   const customPlatformPolicy = overrides.platformBillingPolicy as
-    | { findUnique?: () => Promise<Record<string, unknown>> }
-    | undefined;
+    { findUnique?: () => Promise<Record<string, unknown>> } | undefined;
   const planFeatures = overrides.planFeatures as unknown[] | undefined;
   const plan = {
     id: "plan-free",
@@ -27,7 +26,16 @@ function client(overrides: Record<string, unknown> = {}) {
     active: true,
     shopifyUsageEventHandle: null,
     updatedAt: now,
-    features: planFeatures ?? [{ feature: { key: "checkout_recovery", active: true, activationMode: "ALWAYS_ENABLED" }, enabled: true }],
+    features: planFeatures ?? [
+      {
+        feature: {
+          key: "checkout_recovery",
+          active: true,
+          activationMode: "ALWAYS_ENABLED",
+        },
+        enabled: true,
+      },
+    ],
   };
 
   return {
@@ -47,7 +55,11 @@ function client(overrides: Record<string, unknown> = {}) {
     },
     shopBillingPolicyOverride: { findUnique: async () => null },
     shopEntitlementCounter: {
-      findUnique: async () => ({ grantedQuantity: 5, committedQuantity: 2, reservedQuantity: 1 }),
+      findUnique: async () => ({
+        grantedQuantity: 5,
+        committedQuantity: 2,
+        reservedQuantity: 1,
+      }),
     },
     billingPeriodEntitlementCounter: {
       findUnique: async () => ({
@@ -77,13 +89,21 @@ function client(overrides: Record<string, unknown> = {}) {
 }
 
 describe("EffectiveBillingPolicyResolver", () => {
-  const mappedFeature = (key: string, activationMode = "ALWAYS_ENABLED", active = true, enabled = true) => ({
+  const mappedFeature = (
+    key: string,
+    activationMode = "ALWAYS_ENABLED",
+    active = true,
+    enabled = true,
+  ) => ({
     feature: { key, active, activationMode },
     enabled,
   });
 
   it("resolves the plan-independent lifetime Free grant from the durable counter", async () => {
-    const policy = await new EffectiveBillingPolicyResolver(client()).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(client()).resolve(
+      "shop-1",
+      now,
+    );
 
     expect(policy.freeAllowance).toEqual({
       grant: 5,
@@ -129,14 +149,26 @@ describe("EffectiveBillingPolicyResolver", () => {
         }),
       },
     });
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
-    expect(policy.freeAllowance).toMatchObject({ grant: 5, effective: 5, committed: 2, reserved: 1 });
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
+    expect(policy.freeAllowance).toMatchObject({
+      grant: 5,
+      effective: 5,
+      committed: 2,
+      reserved: 1,
+    });
     expect(policy.shopifyUsageEventHandle).toBe("basic-usage");
-    expect(policy.billingPeriod?.start).toEqual(new Date("2026-09-01T00:00:00.000Z"));
+    expect(policy.billingPeriod?.start).toEqual(
+      new Date("2026-09-01T00:00:00.000Z"),
+    );
     expect(policy.billingPeriod?.status).toBe("OPEN");
     expect(policy.billingPeriod?.includedCounter.grantedQuantity).toBe(10);
     expect(policy.platform).toBe("SHOPIFY");
-    expect(policy.billingPeriod?.includedCounter.currentAllowanceQuantity).toBeNull();
+    expect(
+      policy.billingPeriod?.includedCounter.currentAllowanceQuantity,
+    ).toBeNull();
   });
 
   it("resolves dynamic feature activation from plan mappings and preferences", async () => {
@@ -156,7 +188,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
 
     expect(policy.features.has("always_feature")).toBe(true);
     expect(policy.features.has("future_feature")).toBe(true);
@@ -170,7 +205,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       planFeatures: [mappedFeature("optional_feature", "MERCHANT_OPT_IN")],
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
 
     expect(policy.features.has("optional_feature")).toBe(false);
   });
@@ -190,14 +228,19 @@ describe("EffectiveBillingPolicyResolver", () => {
   it("fails closed when lifetime usage exceeds the durable grant", async () => {
     const fake = client({
       shopEntitlementCounter: {
-        findUnique: async () => ({ grantedQuantity: 2, committedQuantity: 1, reservedQuantity: 2 }),
+        findUnique: async () => ({
+          grantedQuantity: 2,
+          committedQuantity: 1,
+          reservedQuantity: 2,
+        }),
       },
     });
 
-    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
-      .rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
-        reason: "INVALID_CONFIGURATION",
-      });
+    await expect(
+      new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now),
+    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+      reason: "INVALID_CONFIGURATION",
+    });
   });
 
   it("ignores expired overrides and always bounds hard limits by platform", async () => {
@@ -214,7 +257,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
     expect(policy.outboundSoftLimit).toBe(10);
     expect(policy.outboundHardLimit).toBe(15);
     expect(policy.newRecoveriesPaused).toBe(false);
@@ -236,7 +282,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
     expect(policy.outboundSoftLimit).toBe(12);
     expect(policy.outboundHardLimit).toBe(14);
   });
@@ -255,7 +304,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
     expect(policy.outboundSoftLimit).toBe(15);
     expect(policy.outboundHardLimit).toBe(15);
   });
@@ -282,7 +334,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
     expect(policy.newRecoveriesPaused).toBe(true);
     expect(policy.automatedWhatsappPaused).toBe(true);
     expect(policy.paused).toBe(true);
@@ -316,7 +371,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
     expect(policy.newRecoveriesPaused).toBe(true);
     expect(policy.automatedWhatsappPaused).toBe(true);
     expect(policy.pauseReasons).toEqual([
@@ -380,7 +438,9 @@ describe("EffectiveBillingPolicyResolver", () => {
     });
     await expect(
       new EffectiveBillingPolicyResolver(inactive).resolve("shop-1", now),
-    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({ reason: "UNMAPPED_PLAN" });
+    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+      reason: "UNMAPPED_PLAN",
+    });
   });
 
   it("returns a distinct frozen denial before plan resolution", async () => {
@@ -446,7 +506,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
     expect(policy).toMatchObject({
       platform: "WOOCOMMERCE",
       subscriptionStatus: "FROZEN",
@@ -508,7 +571,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
     expect(policy).toMatchObject({
       providerCoverageEndAt: new Date("2026-09-07T00:00:00.000Z"),
       billingPeriod: { phase: "EXPIRED_RECONCILING" },
@@ -580,8 +646,11 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
-      .rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({ reason: "INVALID_CONFIGURATION" });
+    await expect(
+      new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now),
+    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+      reason: "INVALID_CONFIGURATION",
+    });
   });
 
   it("allows an otherwise valid paid Shopify policy without an optional App Events reporting handle", async () => {
@@ -618,10 +687,16 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve(
+      "shop-1",
+      now,
+    );
     expect(policy.shopifyUsageEventHandle).toBeNull();
     expect(policy.planKind).toBe("PAID_METERED");
-    expect(policy.billingPeriod).toMatchObject({ id: "period-1", phase: "ACTIVE" });
+    expect(policy.billingPeriod).toMatchObject({
+      id: "period-1",
+      phase: "ACTIVE",
+    });
   });
 
   it("preserves the effective billing error for invalid outbound overrides", async () => {
@@ -635,12 +710,14 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
-      .rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
-        name: "EffectiveBillingPolicyError",
-        reason: "INVALID_CONFIGURATION",
-        message: "Invalid billing policy for shop shop-1: shop soft limit exceeds shop hard limit",
-      });
+    await expect(
+      new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now),
+    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+      name: "EffectiveBillingPolicyError",
+      reason: "INVALID_CONFIGURATION",
+      message:
+        "Invalid billing policy for shop shop-1: shop soft limit exceeds shop hard limit",
+    });
   });
 
   it("fails closed for missing contracts and invalid limits", async () => {
@@ -651,7 +728,9 @@ describe("EffectiveBillingPolicyResolver", () => {
     });
     await expect(
       new EffectiveBillingPolicyResolver(noContract).resolve("shop-1", now),
-    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({ reason: "NO_CONTRACT" });
+    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+      reason: "NO_CONTRACT",
+    });
 
     const invalid = client({
       platformBillingPolicy: {

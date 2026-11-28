@@ -11,13 +11,26 @@ import {
 
 function reservationHarness() {
   const free = {
-    reserve: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })),
-    reservePostContract: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })),
-    commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    reserve: vi.fn(async () => ({
+      kind: "allowance-exhausted" as const,
+      remaining: 0,
+    })),
+    reservePostContract: vi.fn(async () => ({
+      kind: "allowance-exhausted" as const,
+      remaining: 0,
+    })),
+    commit: vi.fn(),
+    release: vi.fn(),
+    markAmbiguous: vi.fn(),
   };
   const purchased = {
-    reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })),
-    commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    reserve: vi.fn(async () => ({
+      kind: "credits-exhausted" as const,
+      available: 0,
+    })),
+    commit: vi.fn(),
+    release: vi.fn(),
+    markAmbiguous: vi.fn(),
   };
   const paid = {
     reserve: vi.fn(async ({ recoveryId }: { recoveryId?: string }) => ({
@@ -27,11 +40,15 @@ function reservationHarness() {
       sourceKey: `paid-included:period-1:${recoveryId}`,
       policy: paidPolicy(),
     })),
-    commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    commit: vi.fn(),
+    release: vi.fn(),
+    markAmbiguous: vi.fn(),
   };
   const promotional = {
     reserve: vi.fn(async () => ({ kind: "unavailable" as const })),
-    commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    commit: vi.fn(),
+    release: vi.fn(),
+    markAmbiguous: vi.fn(),
   };
   return { free, purchased, paid, promotional };
 }
@@ -73,12 +90,21 @@ describe("RecoveryBillingService pre-provider revalidation", () => {
     const current = admission("paid");
 
     await expect(
-      h.service.revalidateBeforeProvider({ admission: current, recoveryId: "recovery-1" }),
+      h.service.revalidateBeforeProvider({
+        admission: current,
+        recoveryId: "recovery-1",
+      }),
     ).resolves.toEqual({ kind: "admitted", admission: current });
     expect(h.reservations.paid.release).not.toHaveBeenCalled();
   });
 
-  it.each(["paid", "purchased", "free", "lifetime-free", "promotional"] as const)(
+  it.each([
+    "paid",
+    "purchased",
+    "free",
+    "lifetime-free",
+    "promotional",
+  ] as const)(
     "releases %s capacity when new recoveries become paused",
     async (kind) => {
       const h = service({
@@ -103,7 +129,10 @@ describe("RecoveryBillingService pre-provider revalidation", () => {
     const current = admission("purchased", postContractPolicy());
 
     await expect(
-      h.service.revalidateBeforeProvider({ admission: current, recoveryId: "recovery-1" }),
+      h.service.revalidateBeforeProvider({
+        admission: current,
+        recoveryId: "recovery-1",
+      }),
     ).resolves.toEqual({ kind: "admitted", admission: current });
     expect(h.reservations.purchased.release).not.toHaveBeenCalled();
   });
@@ -114,7 +143,10 @@ describe("RecoveryBillingService pre-provider revalidation", () => {
         throw new EffectiveBillingPolicyError("NO_CONTRACT", "ended");
       },
       postContractResolve: async () => {
-        throw new PostContractRecoveryPolicyError("CONTRACT_REQUIRED", "required");
+        throw new PostContractRecoveryPolicyError(
+          "CONTRACT_REQUIRED",
+          "required",
+        );
       },
     });
 
@@ -134,10 +166,15 @@ describe("RecoveryBillingService pre-provider revalidation", () => {
       reservation: {},
       counter: "INCLUDED_RECOVERY_CREDITS" as const,
       sourceKey: "paid-included:period-2:recovery-1",
-      policy: paidPolicy("ACTIVE", { billingPeriod: { id: "period-2", phase: "ACTIVE" } }),
+      policy: paidPolicy("ACTIVE", {
+        billingPeriod: { id: "period-2", phase: "ACTIVE" },
+      }),
     });
     const h = service({
-      resolve: async () => paidPolicy("ACTIVE", { billingPeriod: { id: "period-2", phase: "ACTIVE" } }),
+      resolve: async () =>
+        paidPolicy("ACTIVE", {
+          billingPeriod: { id: "period-2", phase: "ACTIVE" },
+        }),
       reservations,
     });
 
@@ -153,7 +190,10 @@ describe("RecoveryBillingService pre-provider revalidation", () => {
 
   it("releases ACTIVE Paid capacity and uses DRAINING durable fallback order once", async () => {
     const reservations = reservationHarness();
-    const h = service({ resolve: async () => paidPolicy("DRAINING"), reservations });
+    const h = service({
+      resolve: async () => paidPolicy("DRAINING"),
+      reservations,
+    });
 
     await expect(
       h.service.revalidateBeforeProvider({
@@ -168,28 +208,45 @@ describe("RecoveryBillingService pre-provider revalidation", () => {
   });
 
   it.each([
-    ["frozen", paidPolicy("ACTIVE", { platform: "WOOCOMMERCE", subscriptionStatus: "FROZEN" })],
-    ["expired", paidPolicy("ACTIVE", { platform: "WOOCOMMERCE", billingPeriod: { id: "period-1", phase: "EXPIRED_RECONCILING" } })],
-  ] as const)("releases paid included and re-admits purchased capacity after Woo becomes %s", async (_label, currentPolicy) => {
-    const reservations = reservationHarness();
-    reservations.purchased.reserve.mockResolvedValue({
-      kind: "reserved" as const,
-      reservation: {},
-      counter: "PURCHASED_RECOVERY_CREDITS" as const,
-    });
-    const h = service({ resolve: async () => currentPolicy, reservations });
+    [
+      "frozen",
+      paidPolicy("ACTIVE", {
+        platform: "WOOCOMMERCE",
+        subscriptionStatus: "FROZEN",
+      }),
+    ],
+    [
+      "expired",
+      paidPolicy("ACTIVE", {
+        platform: "WOOCOMMERCE",
+        billingPeriod: { id: "period-1", phase: "EXPIRED_RECONCILING" },
+      }),
+    ],
+  ] as const)(
+    "releases paid included and re-admits purchased capacity after Woo becomes %s",
+    async (_label, currentPolicy) => {
+      const reservations = reservationHarness();
+      reservations.purchased.reserve.mockResolvedValue({
+        kind: "reserved" as const,
+        reservation: {},
+        counter: "PURCHASED_RECOVERY_CREDITS" as const,
+      });
+      const h = service({ resolve: async () => currentPolicy, reservations });
 
-    await expect(h.service.revalidateBeforeProvider({
-      admission: admission("paid"),
-      recoveryId: "recovery-1",
-    })).resolves.toMatchObject({
-      kind: "admitted",
-      admission: { kind: "purchased" },
-    });
-    expect(reservations.paid.release).toHaveBeenCalledOnce();
-    expect(reservations.paid.reserve).not.toHaveBeenCalled();
-    expect(reservations.purchased.reserve).toHaveBeenCalledOnce();
-  });
+      await expect(
+        h.service.revalidateBeforeProvider({
+          admission: admission("paid"),
+          recoveryId: "recovery-1",
+        }),
+      ).resolves.toMatchObject({
+        kind: "admitted",
+        admission: { kind: "purchased" },
+      });
+      expect(reservations.paid.release).toHaveBeenCalledOnce();
+      expect(reservations.paid.reserve).not.toHaveBeenCalled();
+      expect(reservations.purchased.reserve).toHaveBeenCalledOnce();
+    },
+  );
 
   it("keeps a reserved Woo promotional admission across a freeze race", async () => {
     const current = paidPolicy("ACTIVE", {
@@ -199,17 +256,24 @@ describe("RecoveryBillingService pre-provider revalidation", () => {
     const h = service({ resolve: async () => current });
     const existing = admission("promotional", current);
 
-    await expect(h.service.revalidateBeforeProvider({
-      admission: existing,
-      recoveryId: "recovery-1",
-    })).resolves.toEqual({ kind: "admitted", admission: existing });
+    await expect(
+      h.service.revalidateBeforeProvider({
+        admission: existing,
+        recoveryId: "recovery-1",
+      }),
+    ).resolves.toEqual({ kind: "admitted", admission: existing });
     expect(h.reservations.promotional.release).not.toHaveBeenCalled();
   });
 
   it.each(["paid", "purchased"] as const)(
     "releases %s capacity during EXPIRED_RECONCILING",
     async (kind) => {
-      const h = service({ resolve: async () => paidPolicy("ACTIVE", { billingPeriod: { id: "period-1", phase: "EXPIRED_RECONCILING" } }) });
+      const h = service({
+        resolve: async () =>
+          paidPolicy("ACTIVE", {
+            billingPeriod: { id: "period-1", phase: "EXPIRED_RECONCILING" },
+          }),
+      });
 
       await expect(
         h.service.revalidateBeforeProvider({
@@ -220,7 +284,9 @@ describe("RecoveryBillingService pre-provider revalidation", () => {
         kind: "blocked",
         reason: "billing-period-reconciliation",
       });
-      expect(h.reservations[kind === "paid" ? "paid" : "purchased"].release).toHaveBeenCalledOnce();
+      expect(
+        h.reservations[kind === "paid" ? "paid" : "purchased"].release,
+      ).toHaveBeenCalledOnce();
     },
   );
 });

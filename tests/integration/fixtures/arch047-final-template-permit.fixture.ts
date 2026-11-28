@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { expect, vi } from "vitest";
-import { formatMetaTemplateStatusEventIdentity } from
-  "@modainteract/moda-interact-shared/whatsapp-template-events";
-import { MetaManagementError, observedContentHash } from
-  "../../../src/services/meta-template-management/contracts.js";
-import type { FinalTemplateIdentity } from
-  "../../../src/services/recovery-template-integration/final-template-registration.service.js";
+import { formatMetaTemplateStatusEventIdentity } from "@modainteract/moda-interact-shared/whatsapp-template-events";
+import {
+  MetaManagementError,
+  observedContentHash,
+} from "../../../src/services/meta-template-management/contracts.js";
+import type { FinalTemplateIdentity } from "../../../src/services/recovery-template-integration/final-template-registration.service.js";
 import { seedWooInitialPermit } from "./woo-initial-send-fence.fixture.js";
 
 export const BG006_WABA = "123456789";
@@ -21,46 +21,94 @@ export async function seedApprovedWooTemplate(db: PrismaClient) {
   const name = `moda_bg006_${token}`;
   // (wabaId, providerTemplateId) is globally unique across registrations.
   const providerId = BigInt(`0x${token}`).toString(10);
-  const admin = await db.platformAdmin.create({ data: {
-    email: `bg006-${token}@example.invalid`,
-  } });
-  const definition = await db.whatsAppTemplateDefinition.create({ data: {
-    kind: "META_RECOVERY", purpose: "INITIAL", offerType: "NO_OFFER",
-    providerTemplateName: name, category: "MARKETING", sourceLanguageTag: "en",
-    astSchemaVersion: 1, sourceHash: "b".repeat(64), status: "PUBLISHED",
-    publishedAt: new Date(Date.now() - 60_000), createdByAdminId: admin.id,
-  } });
-  const locale = await db.whatsAppTemplateLocale.create({ data: {
-    definitionId: definition.id, languageTag: "en", providerLanguageCode: "en_GB",
-    status: "REVIEWED", contentHash: BG006_HASH, reviewedAt: new Date(),
-    reviewedByAdminId: admin.id,
-  } });
-  const registration = await db.whatsAppTemplateMetaRegistration.create({ data: {
-    localeId: locale.id, wabaId: BG006_WABA,
-    providerTemplateName: name, providerLanguageCode: "en_GB",
-    category: "MARKETING", componentsSnapshot: [{ type: "BODY", text: "Welcome" }],
-    parameterBindingsSnapshot: { header: [], body: [], buttons: [] },
-    submittedContentHash: BG006_HASH, providerTemplateId: providerId,
-    submissionState: "SUBMITTED", providerStatus: "APPROVED",
-    lastObservedContentHash: observedContentHash([{ type: "BODY", text: "Welcome" }]), lastObservedCategory: "MARKETING",
-    lastReconciledAt: new Date(Date.now() - 60_000),
-  } });
-  const variant = await db.whatsAppTemplateVariant.create({ data: {
-    shopId: seeded.shopId, providerAccountId: BG006_WABA,
-    purpose: "INITIAL_NO_OFFER", languageTag: "en", providerLanguageCode: "en_GB",
-    providerTemplateName: name, providerTemplateId: providerId,
-    metaRegistrationId: registration.id, status: "APPROVED", enabled: true,
-  } });
+  const admin = await db.platformAdmin.create({
+    data: {
+      email: `bg006-${token}@example.invalid`,
+    },
+  });
+  const definition = await db.whatsAppTemplateDefinition.create({
+    data: {
+      kind: "META_RECOVERY",
+      purpose: "INITIAL",
+      offerType: "NO_OFFER",
+      providerTemplateName: name,
+      category: "MARKETING",
+      sourceLanguageTag: "en",
+      astSchemaVersion: 1,
+      sourceHash: "b".repeat(64),
+      status: "PUBLISHED",
+      publishedAt: new Date(Date.now() - 60_000),
+      createdByAdminId: admin.id,
+    },
+  });
+  const locale = await db.whatsAppTemplateLocale.create({
+    data: {
+      definitionId: definition.id,
+      languageTag: "en",
+      providerLanguageCode: "en_GB",
+      status: "REVIEWED",
+      contentHash: BG006_HASH,
+      reviewedAt: new Date(),
+      reviewedByAdminId: admin.id,
+    },
+  });
+  const registration = await db.whatsAppTemplateMetaRegistration.create({
+    data: {
+      localeId: locale.id,
+      wabaId: BG006_WABA,
+      providerTemplateName: name,
+      providerLanguageCode: "en_GB",
+      category: "MARKETING",
+      componentsSnapshot: [{ type: "BODY", text: "Welcome" }],
+      parameterBindingsSnapshot: { header: [], body: [], buttons: [] },
+      submittedContentHash: BG006_HASH,
+      providerTemplateId: providerId,
+      submissionState: "SUBMITTED",
+      providerStatus: "APPROVED",
+      lastObservedContentHash: observedContentHash([
+        { type: "BODY", text: "Welcome" },
+      ]),
+      lastObservedCategory: "MARKETING",
+      lastReconciledAt: new Date(Date.now() - 60_000),
+    },
+  });
+  const variant = await db.whatsAppTemplateVariant.create({
+    data: {
+      shopId: seeded.shopId,
+      providerAccountId: BG006_WABA,
+      purpose: "INITIAL_NO_OFFER",
+      languageTag: "en",
+      providerLanguageCode: "en_GB",
+      providerTemplateName: name,
+      providerTemplateId: providerId,
+      metaRegistrationId: registration.id,
+      status: "APPROVED",
+      enabled: true,
+    },
+  });
   const identity: FinalTemplateIdentity = {
-    shopId: seeded.shopId, senderWabaId: BG006_WABA, purpose: "INITIAL_NO_OFFER",
-    variantId: variant.id, registrationId: registration.id, definitionId: definition.id,
-    providerTemplateId: providerId, providerTemplateName: name,
-    providerLanguageCode: "en_GB", submittedContentHash: BG006_HASH,
+    shopId: seeded.shopId,
+    senderWabaId: BG006_WABA,
+    purpose: "INITIAL_NO_OFFER",
+    variantId: variant.id,
+    registrationId: registration.id,
+    definitionId: definition.id,
+    providerTemplateId: providerId,
+    providerTemplateName: name,
+    providerLanguageCode: "en_GB",
+    submittedContentHash: BG006_HASH,
     bindingFingerprint: BG006_HASH,
   };
   return {
-    ...seeded, registrationId: registration.id, identity,
-    input: { ...seeded.input, templateName: name, languageCode: "en_GB", templateRegistration: identity },
+    ...seeded,
+    registrationId: registration.id,
+    identity,
+    input: {
+      ...seeded.input,
+      templateName: name,
+      languageCode: "en_GB",
+      templateRegistration: identity,
+    },
   };
 }
 
@@ -71,31 +119,53 @@ export async function seedSecondWooTemplatePermit(
   template: Awaited<ReturnType<typeof seedApprovedWooTemplate>>,
 ) {
   const second = await seedWooInitialPermit(db);
-  const variant = await db.whatsAppTemplateVariant.create({ data: {
-    shopId: second.shopId, providerAccountId: BG006_WABA,
-    purpose: "INITIAL_NO_OFFER", languageTag: "en", providerLanguageCode: "en_GB",
-    providerTemplateName: template.identity.providerTemplateName,
-    providerTemplateId: template.identity.providerTemplateId, metaRegistrationId: template.registrationId,
-    status: "APPROVED", enabled: true,
-  } });
-  return { ...second, input: { ...second.input,
-    templateName: template.identity.providerTemplateName, languageCode: "en_GB",
-    templateRegistration: { ...template.identity, shopId: second.shopId, variantId: variant.id },
-  } };
+  const variant = await db.whatsAppTemplateVariant.create({
+    data: {
+      shopId: second.shopId,
+      providerAccountId: BG006_WABA,
+      purpose: "INITIAL_NO_OFFER",
+      languageTag: "en",
+      providerLanguageCode: "en_GB",
+      providerTemplateName: template.identity.providerTemplateName,
+      providerTemplateId: template.identity.providerTemplateId,
+      metaRegistrationId: template.registrationId,
+      status: "APPROVED",
+      enabled: true,
+    },
+  });
+  return {
+    ...second,
+    input: {
+      ...second.input,
+      templateName: template.identity.providerTemplateName,
+      languageCode: "en_GB",
+      templateRegistration: {
+        ...template.identity,
+        shopId: second.shopId,
+        variantId: variant.id,
+      },
+    },
+  };
 }
 
 export function deferred() {
   let resolve!: () => void;
-  const promise = new Promise<void>((done) => { resolve = done; });
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
-export function pausedObservation(template: Awaited<ReturnType<typeof seedApprovedWooTemplate>>) {
+export function pausedObservation(
+  template: Awaited<ReturnType<typeof seedApprovedWooTemplate>>,
+) {
   return {
     eventIdentity: formatMetaTemplateStatusEventIdentity(randomUUID()),
-    wabaId: BG006_WABA, providerTemplateId: template.identity.providerTemplateId,
+    wabaId: BG006_WABA,
+    providerTemplateId: template.identity.providerTemplateId,
     providerTemplateName: template.identity.providerTemplateName,
-    providerLanguageCode: "en_GB", providerStatus: "PAUSED",
+    providerLanguageCode: "en_GB",
+    providerStatus: "PAUSED",
     occurredAt: new Date().toISOString(),
   };
 }
@@ -106,7 +176,10 @@ export function failingMetaGet(onFind: () => Promise<void> = async () => {}) {
     failure,
     provider: {
       verifyWaba: vi.fn(async () => undefined),
-      find: vi.fn(async () => { await onFind(); throw failure; }),
+      find: vi.fn(async () => {
+        await onFind();
+        throw failure;
+      }),
     },
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   };
@@ -114,8 +187,10 @@ export function failingMetaGet(onFind: () => Promise<void> = async () => {}) {
 
 /** Read the durable charge boundary; the existing UsageEvent is a provisional
  * reservation, not a settled charge. Denying a permit must never commit credit. */
-export async function expectUnadmittedAndUncharged(db: PrismaClient,
-  seeded: Awaited<ReturnType<typeof seedApprovedWooTemplate>>) {
+export async function expectUnadmittedAndUncharged(
+  db: PrismaClient,
+  seeded: Awaited<ReturnType<typeof seedApprovedWooTemplate>>,
+) {
   const message = await db.conversationMessage.findUniqueOrThrow({
     where: { id: seeded.input.messageId },
   });
@@ -127,11 +202,17 @@ export async function expectUnadmittedAndUncharged(db: PrismaClient,
   });
   expect(credit.status).toBe("RESERVED");
   const counter = await db.shopEntitlementCounter.findUniqueOrThrow({
-    where: { shopId_counter: { shopId: seeded.shopId,
-      counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
+    where: {
+      shopId_counter: {
+        shopId: seeded.shopId,
+        counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+      },
+    },
   });
   expect(counter.committedQuantity).toBe(0);
-  expect(await db.usageEvent.count({
-    where: { idempotencyKey: seeded.input.idempotencyKey },
-  })).toBe(1); // existing reservation only; no second usage or charge
+  expect(
+    await db.usageEvent.count({
+      where: { idempotencyKey: seeded.input.idempotencyKey },
+    }),
+  ).toBe(1); // existing reservation only; no second usage or charge
 }

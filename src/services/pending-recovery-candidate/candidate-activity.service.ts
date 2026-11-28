@@ -21,7 +21,11 @@ export type CandidateActivityInput = {
 };
 
 export type CandidateActivityResult =
-  | { outcome: "rescheduled"; jobId: string; candidate: PendingRecoveryCandidate }
+  | {
+      outcome: "rescheduled";
+      jobId: string;
+      candidate: PendingRecoveryCandidate;
+    }
   | { outcome: "stale"; jobId: string; candidate: PendingRecoveryCandidate }
   | { outcome: "not-found" }
   | { outcome: "not-reschedulable"; state: string; jobId: string }
@@ -51,7 +55,12 @@ type CandidateActivityIndexStore = {
     shouldIndexShop: boolean;
   }): Promise<unknown>;
   removeCartAlias(shopId: string, cartToken: string): Promise<unknown>;
-  addCartAlias(shopId: string, cartToken: string, jobId: string, delayMinutes: number): Promise<unknown>;
+  addCartAlias(
+    shopId: string,
+    cartToken: string,
+    jobId: string,
+    delayMinutes: number,
+  ): Promise<unknown>;
 };
 
 type CandidateActivityDependencies = {
@@ -79,7 +88,9 @@ export class PendingRecoveryCandidateActivityService {
     this.now = dependencies.now ?? Date.now;
   }
 
-  async refresh(input: CandidateActivityInput): Promise<CandidateActivityResult> {
+  async refresh(
+    input: CandidateActivityInput,
+  ): Promise<CandidateActivityResult> {
     const initialMatch = await this.dependencies.resolveCandidate(input);
     if (!initialMatch || initialMatch.candidate.shopId !== input.shopId) {
       return { outcome: "not-found" };
@@ -110,14 +121,17 @@ export class PendingRecoveryCandidateActivityService {
       input.activityAt,
       this.now(),
     );
-    const existingActivityAt = matched.candidate.lastActivityAt
-      ?? matched.candidate.checkoutCreatedAt;
+    const existingActivityAt =
+      matched.candidate.lastActivityAt ?? matched.candidate.checkoutCreatedAt;
     const isStale = Boolean(
-      existingActivityAt
-      && Date.parse(incomingActivityAt) <= Date.parse(existingActivityAt)
+      existingActivityAt &&
+      Date.parse(incomingActivityAt) <= Date.parse(existingActivityAt),
     );
     if (isStale) {
-      const candidate = this.enrichMissingLookupContext(input, matched.candidate);
+      const candidate = this.enrichMissingLookupContext(
+        input,
+        matched.candidate,
+      );
       if (candidate === matched.candidate) {
         return {
           outcome: "stale",
@@ -127,7 +141,7 @@ export class PendingRecoveryCandidateActivityService {
       }
 
       const job = await this.dependencies.getQueue().getJob(matched.jobId);
-      if (!job || await job.getState() !== "delayed") {
+      if (!job || (await job.getState()) !== "delayed") {
         return {
           outcome: "stale",
           jobId: matched.jobId,
@@ -137,7 +151,9 @@ export class PendingRecoveryCandidateActivityService {
 
       await job.updateData(candidate);
       if (!matched.candidate.cartToken && candidate.cartToken) {
-        const delayMinutes = await this.dependencies.resolveDelayMinutes(input.shopId);
+        const delayMinutes = await this.dependencies.resolveDelayMinutes(
+          input.shopId,
+        );
         await this.dependencies.candidateIndexStore.addCartAlias(
           input.shopId,
           candidate.cartToken,
@@ -166,12 +182,16 @@ export class PendingRecoveryCandidateActivityService {
       return { outcome: "not-reschedulable", state, jobId: matched.jobId };
     }
 
-    const delayMinutes = await this.dependencies.resolveDelayMinutes(input.shopId);
+    const delayMinutes = await this.dependencies.resolveDelayMinutes(
+      input.shopId,
+    );
     const candidate: PendingRecoveryCandidate = {
       ...matched.candidate,
       cartToken: input.checkoutCartToken ?? matched.candidate.cartToken,
-      checkoutCreatedAt: input.checkoutCreatedAt ?? matched.candidate.checkoutCreatedAt,
-      abandonedCheckoutUrl: input.abandonedCheckoutUrl ?? matched.candidate.abandonedCheckoutUrl,
+      checkoutCreatedAt:
+        input.checkoutCreatedAt ?? matched.candidate.checkoutCreatedAt,
+      abandonedCheckoutUrl:
+        input.abandonedCheckoutUrl ?? matched.candidate.abandonedCheckoutUrl,
       ...optionalCandidateInternationalContext(
         mergeCandidateInternationalContext(
           matched.candidate.internationalContext,
@@ -181,7 +201,10 @@ export class PendingRecoveryCandidateActivityService {
       lastActivityAt: incomingActivityAt,
     };
     delete candidate.shopifyVerification; // A new customer event restarts verification after the full merchant delay.
-    if (matched.candidate.cartToken && matched.candidate.cartToken !== candidate.cartToken) {
+    if (
+      matched.candidate.cartToken &&
+      matched.candidate.cartToken !== candidate.cartToken
+    ) {
       await this.dependencies.candidateIndexStore.removeCartAlias(
         input.shopId,
         matched.candidate.cartToken,
@@ -209,13 +232,20 @@ export class PendingRecoveryCandidateActivityService {
     input: CandidateActivityInput,
     existing: PendingRecoveryCandidate,
   ): PendingRecoveryCandidate {
-    const cartToken = existing.cartToken ?? input.checkoutCartToken ?? input.cartToken ?? null;
-    const checkoutCreatedAt = existing.checkoutCreatedAt ?? input.checkoutCreatedAt ?? existing.checkoutCreatedAt;
-    const abandonedCheckoutUrl = existing.abandonedCheckoutUrl ?? input.abandonedCheckoutUrl ?? existing.abandonedCheckoutUrl;
+    const cartToken =
+      existing.cartToken ?? input.checkoutCartToken ?? input.cartToken ?? null;
+    const checkoutCreatedAt =
+      existing.checkoutCreatedAt ??
+      input.checkoutCreatedAt ??
+      existing.checkoutCreatedAt;
+    const abandonedCheckoutUrl =
+      existing.abandonedCheckoutUrl ??
+      input.abandonedCheckoutUrl ??
+      existing.abandonedCheckoutUrl;
     if (
-      cartToken === existing.cartToken
-      && checkoutCreatedAt === existing.checkoutCreatedAt
-      && abandonedCheckoutUrl === existing.abandonedCheckoutUrl
+      cartToken === existing.cartToken &&
+      checkoutCreatedAt === existing.checkoutCreatedAt &&
+      abandonedCheckoutUrl === existing.abandonedCheckoutUrl
     ) {
       return existing;
     }

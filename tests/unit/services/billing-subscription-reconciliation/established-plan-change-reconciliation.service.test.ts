@@ -6,15 +6,20 @@ import type { EstablishedPlanChangeExpected } from "../../../../src/services/bil
 
 const { transitionMock } = vi.hoisted(() => ({ transitionMock: vi.fn() }));
 
-vi.mock("../../../../src/services/shopify-plan-change-transition.service.js", async () => {
-  const actual = await vi.importActual<typeof import("../../../../src/services/shopify-plan-change-transition.service.js")>("../../../../src/services/shopify-plan-change-transition.service.js");
-  return {
-    ...actual,
-    ShopifyPlanChangeTransitionService: class {
-      transition = transitionMock;
-    },
-  };
-});
+vi.mock(
+  "../../../../src/services/shopify-plan-change-transition.service.js",
+  async () => {
+    const actual = await vi.importActual<
+      typeof import("../../../../src/services/shopify-plan-change-transition.service.js")
+    >("../../../../src/services/shopify-plan-change-transition.service.js");
+    return {
+      ...actual,
+      ShopifyPlanChangeTransitionService: class {
+        transition = transitionMock;
+      },
+    };
+  },
+);
 
 const now = new Date("2026-10-03T12:00:00.000Z");
 const pendingEffectiveAt = new Date("2026-10-03T13:00:00.000Z");
@@ -68,31 +73,64 @@ const targetPlan = {
   includedRecoveryConversationAllowance: 200,
 };
 
-function harness({ updateCount = 1, capacityResume = vi.fn().mockResolvedValue(undefined) } = {}) {
+function harness({
+  updateCount = 1,
+  capacityResume = vi.fn().mockResolvedValue(undefined),
+} = {}) {
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
-    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }] }) },
+    merchantPricingPlan: {
+      findUnique: vi.fn().mockResolvedValue({
+        usageEvents: [{ eventHandle: "recovery-meter" }],
+      }),
+    },
     subscription: {
-      findFirst: vi.fn().mockResolvedValue({ id: expected.subscriptionId, billingPeriodId: "period-1" }),
+      findFirst: vi.fn().mockResolvedValue({
+        id: expected.subscriptionId,
+        billingPeriodId: "period-1",
+      }),
       updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
     },
     billingPeriod: {
-      findUnique: vi.fn().mockResolvedValue({ id: "period-1", subscriptionId: expected.subscriptionId, status: "CLOSED" }),
+      findUnique: vi.fn().mockResolvedValue({
+        id: "period-1",
+        subscriptionId: expected.subscriptionId,
+        status: "CLOSED",
+      }),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
-    billingPlan: { findUnique: vi.fn().mockResolvedValue({ kind: BillingPlanKind.PAID_METERED }) },
+    billingPlan: {
+      findUnique: vi
+        .fn()
+        .mockResolvedValue({ kind: BillingPlanKind.PAID_METERED }),
+    },
     usageEvent: { updateMany: vi.fn() },
-    usageReservation: { aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }), updateMany: vi.fn() },
+    usageReservation: {
+      aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }),
+      updateMany: vi.fn(),
+    },
     billingPeriodEntitlementCounter: {
-      findUnique: vi.fn().mockResolvedValue(null), updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findUnique: vi.fn().mockResolvedValue(null),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
   };
   const database = {
-    billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "pending-plan", active: true }) },
-    subscription: { updateMany: vi.fn().mockResolvedValue({ count: updateCount }) },
-    $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)),
+    billingPlan: {
+      findUnique: vi
+        .fn()
+        .mockResolvedValue({ id: "pending-plan", active: true }),
+    },
+    subscription: {
+      updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
+    },
+    $transaction: vi.fn(
+      async (callback: (value: typeof transaction) => unknown) =>
+        callback(transaction),
+    ),
   };
-  const reconciliationQueue = { publishNext: vi.fn().mockResolvedValue(undefined) };
+  const reconciliationQueue = {
+    publishNext: vi.fn().mockResolvedValue(undefined),
+  };
   const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
   const service = new EstablishedPlanChangeReconciliationService(
     database as never,
@@ -101,7 +139,14 @@ function harness({ updateCount = 1, capacityResume = vi.fn().mockResolvedValue(u
     () => now,
     { schedule: capacityResume },
   );
-  return { database, transaction, reconciliationQueue, logger, service, capacityResume };
+  return {
+    database,
+    transaction,
+    reconciliationQueue,
+    logger,
+    service,
+    capacityResume,
+  };
 }
 
 beforeEach(() => {
@@ -118,51 +163,97 @@ describe("EstablishedPlanChangeReconciliationService", () => {
       pendingEffectiveAt,
     };
 
-    await test.service.reconcile("shop-1", expected, currentProvider as never, currentPlan, targetPlan);
+    await test.service.reconcile(
+      "shop-1",
+      expected,
+      currentProvider as never,
+      currentPlan,
+      targetPlan,
+    );
 
     expect(test.database.billingPlan.findUnique).toHaveBeenCalledWith({
       where: { shopifyPlanHandle: expected.pendingShopifyPlanHandle },
       select: { id: true, active: true },
     });
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        id: expected.subscriptionId,
-        planId: expected.currentPlanId,
-        pendingPlanId: expected.pendingPlanId,
-        nextReconcileAt: expected.nextReconcileAt,
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: expected.subscriptionId,
+          planId: expected.currentPlanId,
+          pendingPlanId: expected.pendingPlanId,
+          nextReconcileAt: expected.nextReconcileAt,
+        }),
+        data: expect.objectContaining({
+          pendingPlanId: "pending-plan",
+          pendingShopifyPlanHandle: expected.pendingShopifyPlanHandle,
+          pendingEffectiveAt,
+          nextReconcileAt: pendingEffectiveAt,
+        }),
       }),
-      data: expect.objectContaining({
-        pendingPlanId: "pending-plan",
-        pendingShopifyPlanHandle: expected.pendingShopifyPlanHandle,
-        pendingEffectiveAt,
-        nextReconcileAt: pendingEffectiveAt,
-      }),
-    }));
-    expect(test.reconciliationQueue.publishNext).toHaveBeenCalledWith("shop-1", expected.subscriptionId, pendingEffectiveAt);
+    );
+    expect(test.reconciliationQueue.publishNext).toHaveBeenCalledWith(
+      "shop-1",
+      expected.subscriptionId,
+      pendingEffectiveAt,
+    );
     expect(transitionMock).not.toHaveBeenCalled();
   });
 
   it("uses the current plan drain boundary when no provider pending change remains", async () => {
     const test = harness();
-    const drainAt = new Date(expected.currentPeriodEnd!.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
+    const drainAt = new Date(
+      expected.currentPeriodEnd!.getTime() -
+        APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS,
+    );
 
-    await test.service.reconcile("shop-1", expected, { ...provider, planHandle: currentPlan.shopifyPlanHandle } as never, currentPlan, null);
+    await test.service.reconcile(
+      "shop-1",
+      expected,
+      { ...provider, planHandle: currentPlan.shopifyPlanHandle } as never,
+      currentPlan,
+      null,
+    );
 
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ pendingPlanId: null, pendingShopifyPlanHandle: null, nextReconcileAt: drainAt }),
-    }));
-    expect(test.reconciliationQueue.publishNext).toHaveBeenCalledWith("shop-1", expected.subscriptionId, drainAt);
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          pendingPlanId: null,
+          pendingShopifyPlanHandle: null,
+          nextReconcileAt: drainAt,
+        }),
+      }),
+    );
+    expect(test.reconciliationQueue.publishNext).toHaveBeenCalledWith(
+      "shop-1",
+      expected.subscriptionId,
+      drainAt,
+    );
   });
 
   it("schedules a target plan exactly at its future effective time without transitioning", async () => {
     const test = harness();
 
-    await test.service.reconcile("shop-1", expected, provider as never, currentPlan, targetPlan);
+    await test.service.reconcile(
+      "shop-1",
+      expected,
+      provider as never,
+      currentPlan,
+      targetPlan,
+    );
 
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ nextReconcileAt: pendingEffectiveAt, lastSyncErrorCode: null }),
-    }));
-    expect(test.reconciliationQueue.publishNext).toHaveBeenCalledWith("shop-1", expected.subscriptionId, pendingEffectiveAt);
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          nextReconcileAt: pendingEffectiveAt,
+          lastSyncErrorCode: null,
+        }),
+      }),
+    );
+    expect(test.reconciliationQueue.publishNext).toHaveBeenCalledWith(
+      "shop-1",
+      expected.subscriptionId,
+      pendingEffectiveAt,
+    );
     expect(transitionMock).not.toHaveBeenCalled();
   });
 
@@ -174,30 +265,68 @@ describe("EstablishedPlanChangeReconciliationService", () => {
       currentPeriodEnd: expected.currentPeriodEnd,
     };
 
-    await test.service.reconcile("shop-1", expected, sameCycleProvider as never, currentPlan, targetPlan);
+    await test.service.reconcile(
+      "shop-1",
+      expected,
+      sameCycleProvider as never,
+      currentPlan,
+      targetPlan,
+    );
 
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE" }),
-    }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: SubscriptionProjectionStatus.SYNC_ERROR,
+          lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
+        }),
+      }),
+    );
     expect(transitionMock).not.toHaveBeenCalled();
   });
 
   it.each([
-    ["billing cycle", { ...provider, currentPeriodStart: null }, targetPlan, "MISSING_BILLING_CYCLE"],
-    ["allowance", provider, { ...targetPlan, includedRecoveryConversationAllowance: null }, "INVALID_INCLUDED_ALLOWANCE"],
-  ])("fails closed when the target is missing its required %s", async (_label, providerState, plan, errorCode) => {
-    const test = harness();
-    const alreadyEffective = new Date("2026-10-03T10:00:00.000Z");
-    const effectiveExpected = { ...expected, pendingEffectiveAt: alreadyEffective };
+    [
+      "billing cycle",
+      { ...provider, currentPeriodStart: null },
+      targetPlan,
+      "MISSING_BILLING_CYCLE",
+    ],
+    [
+      "allowance",
+      provider,
+      { ...targetPlan, includedRecoveryConversationAllowance: null },
+      "INVALID_INCLUDED_ALLOWANCE",
+    ],
+  ])(
+    "fails closed when the target is missing its required %s",
+    async (_label, providerState, plan, errorCode) => {
+      const test = harness();
+      const alreadyEffective = new Date("2026-10-03T10:00:00.000Z");
+      const effectiveExpected = {
+        ...expected,
+        pendingEffectiveAt: alreadyEffective,
+      };
 
-    await test.service.reconcile("shop-1", effectiveExpected, providerState as never, currentPlan, plan as never);
+      await test.service.reconcile(
+        "shop-1",
+        effectiveExpected,
+        providerState as never,
+        currentPlan,
+        plan as never,
+      );
 
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: errorCode }),
-    }));
-    expect(test.reconciliationQueue.publishNext).toHaveBeenCalledOnce();
-    expect(transitionMock).not.toHaveBeenCalled();
-  });
+      expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: SubscriptionProjectionStatus.SYNC_ERROR,
+            lastSyncErrorCode: errorCode,
+          }),
+        }),
+      );
+      expect(test.reconciliationQueue.publishNext).toHaveBeenCalledOnce();
+      expect(transitionMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("delegates a verified effective transition and resumes Paid capacity after commit", async () => {
     const test = harness();
@@ -209,71 +338,154 @@ describe("EstablishedPlanChangeReconciliationService", () => {
     });
     const alreadyEffective = new Date("2026-10-03T10:00:00.000Z");
 
-    await test.service.reconcile("shop-1", { ...expected, pendingEffectiveAt: alreadyEffective }, provider as never, currentPlan, targetPlan);
+    await test.service.reconcile(
+      "shop-1",
+      { ...expected, pendingEffectiveAt: alreadyEffective },
+      provider as never,
+      currentPlan,
+      targetPlan,
+    );
 
-    expect(transitionMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(transitionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shopId: "shop-1",
+        subscriptionId: expected.subscriptionId,
+        provider,
+        plan: targetPlan,
+        expectedCurrentPlanId: expected.currentPlanId,
+        now,
+      }),
+    );
+    expect(test.reconciliationQueue.publishNext).toHaveBeenCalledWith(
+      "shop-1",
+      expected.subscriptionId,
+      new Date("2026-11-03T00:00:00.000Z"),
+    );
+    expect(test.capacityResume).toHaveBeenCalledWith({
       shopId: "shop-1",
-      subscriptionId: expected.subscriptionId,
-      provider,
-      plan: targetPlan,
-      expectedCurrentPlanId: expected.currentPlanId,
-      now,
-    }));
-    expect(test.reconciliationQueue.publishNext).toHaveBeenCalledWith("shop-1", expected.subscriptionId, new Date("2026-11-03T00:00:00.000Z"));
-    expect(test.capacityResume).toHaveBeenCalledWith({ shopId: "shop-1", trigger: "plan-change" });
+      trigger: "plan-change",
+    });
     expect(test.database.billingPlan.findUnique).not.toHaveBeenCalled();
   });
 
-
   it("does not require the optional App Events reporting handle to transition a Paid plan", async () => {
     const test = harness();
-    transitionMock.mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-2", nextReconcileAt: null, planKind: BillingPlanKind.PAID_METERED });
+    transitionMock.mockResolvedValue({
+      kind: "transitioned",
+      billingPeriodId: "period-2",
+      nextReconcileAt: null,
+      planKind: BillingPlanKind.PAID_METERED,
+    });
     const alreadyEffective = new Date("2026-10-03T10:00:00.000Z");
-    const planWithoutReportingHandle = { ...targetPlan, shopifyUsageEventHandle: null };
-    const providerWithoutReportingEvent = { ...provider, usageEventHandles: [] };
+    const planWithoutReportingHandle = {
+      ...targetPlan,
+      shopifyUsageEventHandle: null,
+    };
+    const providerWithoutReportingEvent = {
+      ...provider,
+      usageEventHandles: [],
+    };
 
-    await test.service.reconcile("shop-1", { ...expected, pendingEffectiveAt: alreadyEffective }, providerWithoutReportingEvent as never, currentPlan, planWithoutReportingHandle);
+    await test.service.reconcile(
+      "shop-1",
+      { ...expected, pendingEffectiveAt: alreadyEffective },
+      providerWithoutReportingEvent as never,
+      currentPlan,
+      planWithoutReportingHandle,
+    );
 
-    expect(transitionMock).toHaveBeenCalledWith(expect.objectContaining({ plan: planWithoutReportingHandle, provider: providerWithoutReportingEvent }));
+    expect(transitionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plan: planWithoutReportingHandle,
+        provider: providerWithoutReportingEvent,
+      }),
+    );
     expect(test.transaction.subscription.updateMany).not.toHaveBeenCalled();
   });
 
   it("keeps a successful plan transition when capacity resume enqueue fails", async () => {
-    const capacityResume = vi.fn().mockRejectedValue(new Error("queue unavailable"));
+    const capacityResume = vi
+      .fn()
+      .mockRejectedValue(new Error("queue unavailable"));
     const test = harness({ capacityResume });
-    transitionMock.mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-2", nextReconcileAt: null, planKind: BillingPlanKind.PAID_METERED });
+    transitionMock.mockResolvedValue({
+      kind: "transitioned",
+      billingPeriodId: "period-2",
+      nextReconcileAt: null,
+      planKind: BillingPlanKind.PAID_METERED,
+    });
     const alreadyEffective = new Date("2026-10-03T10:00:00.000Z");
 
-    await expect(test.service.reconcile("shop-1", { ...expected, pendingEffectiveAt: alreadyEffective }, provider as never, currentPlan, targetPlan)).resolves.toBeUndefined();
+    await expect(
+      test.service.reconcile(
+        "shop-1",
+        { ...expected, pendingEffectiveAt: alreadyEffective },
+        provider as never,
+        currentPlan,
+        targetPlan,
+      ),
+    ).resolves.toBeUndefined();
 
-    expect(test.logger.warn).toHaveBeenCalledWith("billing.recovery_capacity_resume.enqueue_failed", expect.objectContaining({
-      shopId: "shop-1",
-      errorMessage: "queue unavailable",
-      error: expect.any(Error),
-    }));
+    expect(test.logger.warn).toHaveBeenCalledWith(
+      "billing.recovery_capacity_resume.enqueue_failed",
+      expect.objectContaining({
+        shopId: "shop-1",
+        errorMessage: "queue unavailable",
+        error: expect.any(Error),
+      }),
+    );
     expect(transitionMock).toHaveBeenCalledOnce();
   });
 
   it("marks unknown handles unmapped without scheduling another retry", async () => {
     const test = harness();
 
-    await test.service.reconcile("shop-1", expected, { ...provider, planHandle: "unknown" } as never, currentPlan, null);
+    await test.service.reconcile(
+      "shop-1",
+      expected,
+      { ...provider, planHandle: "unknown" } as never,
+      currentPlan,
+      null,
+    );
 
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: SubscriptionProjectionStatus.UNMAPPED, planId: null, lastSyncErrorCode: null, lastSyncErrorAt: null, nextReconcileAt: null }),
-    }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: SubscriptionProjectionStatus.UNMAPPED,
+          planId: null,
+          lastSyncErrorCode: null,
+          lastSyncErrorAt: null,
+          nextReconcileAt: null,
+        }),
+      }),
+    );
     expect(test.reconciliationQueue.publishNext).not.toHaveBeenCalled();
   });
 
   it("fails closed for a mapped provider plan that is neither current nor pending", async () => {
     const test = harness();
-    const unrelatedPlan = { ...targetPlan, id: "plan-unrelated", shopifyPlanHandle: "unrelated-2026" };
+    const unrelatedPlan = {
+      ...targetPlan,
+      id: "plan-unrelated",
+      shopifyPlanHandle: "unrelated-2026",
+    };
 
-    await test.service.reconcile("shop-1", expected, { ...provider, planHandle: "unrelated-2026" } as never, currentPlan, unrelatedPlan);
+    await test.service.reconcile(
+      "shop-1",
+      expected,
+      { ...provider, planHandle: "unrelated-2026" } as never,
+      currentPlan,
+      unrelatedPlan,
+    );
 
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE" }),
-    }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: SubscriptionProjectionStatus.SYNC_ERROR,
+          lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
+        }),
+      }),
+    );
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledOnce();
   });
 
@@ -281,22 +493,40 @@ describe("EstablishedPlanChangeReconciliationService", () => {
     const test = harness();
     const error = new Error("provider unavailable");
 
-    await test.service.recordRetry("shop-1", expected, "PARTNER_API_ERROR", error);
-    await test.service.recordRetry("shop-1", expected, "PROVIDER_STATE_UNRESOLVED");
+    await test.service.recordRetry(
+      "shop-1",
+      expected,
+      "PARTNER_API_ERROR",
+      error,
+    );
+    await test.service.recordRetry(
+      "shop-1",
+      expected,
+      "PROVIDER_STATE_UNRESOLVED",
+    );
 
     expect(test.transaction.subscription.updateMany).toHaveBeenCalledTimes(2);
-    expect(test.logger.error).toHaveBeenCalledWith("billing.subscription_reconciliation.provider_failed", {
-      shopId: "shop-1",
-      subscriptionId: expected.subscriptionId,
-      errorMessage: "provider unavailable",
-      error,
-    });
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.provider_failed",
+      {
+        shopId: "shop-1",
+        subscriptionId: expected.subscriptionId,
+        errorMessage: "provider unavailable",
+        error,
+      },
+    );
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledTimes(2);
   });
   it("does not retire a stale scheduled plan-change period", async () => {
     const test = harness();
     test.transaction.subscription.findFirst.mockResolvedValue(null);
-    await test.service.reconcile("shop-1", expected, { ...provider, planHandle: "unknown" } as never, currentPlan, null);
+    await test.service.reconcile(
+      "shop-1",
+      expected,
+      { ...provider, planHandle: "unknown" } as never,
+      currentPlan,
+      null,
+    );
     expect(test.transaction.subscription.updateMany).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriod.findUnique).not.toHaveBeenCalled();
   });
@@ -304,19 +534,51 @@ describe("EstablishedPlanChangeReconciliationService", () => {
   it("retires the old paid period before an unknown scheduled plan change", async () => {
     const test = harness();
     test.transaction.billingPeriod.findUnique.mockResolvedValue({
-      id: "period-1", subscriptionId: expected.subscriptionId,
-      status: "OPEN", planKindSnapshot: "PAID_METERED",
+      id: "period-1",
+      subscriptionId: expected.subscriptionId,
+      status: "OPEN",
+      planKindSnapshot: "PAID_METERED",
     });
     test.transaction.billingPeriodEntitlementCounter.findUnique
-      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 12, committedQuantity: 5, reservedQuantity: 0, forfeitedQuantity: 0, version: 1 })
-      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 12, committedQuantity: 5, reservedQuantity: 0, forfeitedQuantity: 7, version: 2 });
-    await test.service.reconcile("shop-1", expected, { ...provider, planHandle: "unknown" } as never, currentPlan, null);
-    expect(test.transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "CLOSED", closeReason: "PLAN_CHANGED" }),
-    }));
-    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "UNMAPPED", planId: null, billingPeriodId: null }),
-    }));
+      .mockResolvedValueOnce({
+        id: "counter-1",
+        grantedQuantity: 12,
+        committedQuantity: 5,
+        reservedQuantity: 0,
+        forfeitedQuantity: 0,
+        version: 1,
+      })
+      .mockResolvedValueOnce({
+        id: "counter-1",
+        grantedQuantity: 12,
+        committedQuantity: 5,
+        reservedQuantity: 0,
+        forfeitedQuantity: 7,
+        version: 2,
+      });
+    await test.service.reconcile(
+      "shop-1",
+      expected,
+      { ...provider, planHandle: "unknown" } as never,
+      currentPlan,
+      null,
+    );
+    expect(test.transaction.billingPeriod.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "CLOSED",
+          closeReason: "PLAN_CHANGED",
+        }),
+      }),
+    );
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "UNMAPPED",
+          planId: null,
+          billingPeriodId: null,
+        }),
+      }),
+    );
   });
-
 });

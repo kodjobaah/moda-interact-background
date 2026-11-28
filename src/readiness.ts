@@ -17,12 +17,16 @@ if (!isWorkerServiceName(serviceName)) {
     })
     .catch((error: unknown) => {
       console.error(
-        error instanceof Error ? error.message : `${serviceName} readiness failed`,
+        error instanceof Error
+          ? error.message
+          : `${serviceName} readiness failed`,
       );
       process.exitCode = 1;
     });
 }
 
-function isWorkerServiceName(value: string | undefined): value is WorkerServiceName {
+function isWorkerServiceName(
+  value: string | undefined,
+): value is WorkerServiceName {
   return value !== undefined && value in WORKER_DEPENDENCIES;
 }

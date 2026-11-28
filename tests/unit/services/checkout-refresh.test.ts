@@ -36,11 +36,13 @@ const hoisted = vi.hoisted(() => {
         findUnique: vi.fn(async () => null),
       },
       recoveryOutreachAttempt: {
-        upsert: vi.fn(async ({ create }: { create: Record<string, unknown> }) => ({
-          id: "attempt-1",
-          status: "PENDING",
-          ...create,
-        })),
+        upsert: vi.fn(
+          async ({ create }: { create: Record<string, unknown> }) => ({
+            id: "attempt-1",
+            status: "PENDING",
+            ...create,
+          }),
+        ),
       },
       // This history-ordering fixture has no resolved routing associations.
       recoveryBasketRoutingTurn: {
@@ -80,7 +82,12 @@ const hoisted = vi.hoisted(() => {
     },
     conversationMessageServiceMock: {
       buildRecoveryTemplateDescriptor: vi.fn(
-        ({ purpose, templateName, canonicalLanguageTag, providerLanguageCode }) =>
+        ({
+          purpose,
+          templateName,
+          canonicalLanguageTag,
+          providerLanguageCode,
+        }) =>
           `[WhatsApp template sent; purpose=${purpose}; template=${templateName}; canonicalLanguage=${canonicalLanguageTag}; providerLanguage=${providerLanguageCode}]`,
       ),
     },
@@ -90,22 +97,38 @@ const hoisted = vi.hoisted(() => {
         providerMessageId: "wamid-1",
       })),
       getProviderAccountId: vi.fn(() => "provider-account-1"),
-    inspectInitialOutreachAdmission: vi.fn(async () => ({ kind: "absent" })),
+      inspectInitialOutreachAdmission: vi.fn(async () => ({ kind: "absent" })),
     },
     automatedTemplateMock: {
       prepare: vi.fn(async () => ({
         kind: "prepared",
-        prepared: { purpose: "INITIAL_NO_OFFER", providerTemplateName: "checkout_recovery", canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB" },
-        send: { templateName: "checkout_recovery", languageCode: "en_GB", templateRegistration: { shopId: "shop_1", purpose: "INITIAL_NO_OFFER" } },
+        prepared: {
+          purpose: "INITIAL_NO_OFFER",
+          providerTemplateName: "checkout_recovery",
+          canonicalLanguageTag: "en-GB",
+          providerLanguageCode: "en_GB",
+        },
+        send: {
+          templateName: "checkout_recovery",
+          languageCode: "en_GB",
+          templateRegistration: {
+            shopId: "shop_1",
+            purpose: "INITIAL_NO_OFFER",
+          },
+        },
       })),
     },
     pendingCandidateServiceMock: {
       refreshCandidateActivity: vi.fn(),
       scheduleFromCheckoutUpdated: vi.fn(),
-      withCheckoutLock: vi.fn(async (_shopId, _checkoutToken, callback) => callback()),
+      withCheckoutLock: vi.fn(async (_shopId, _checkoutToken, callback) =>
+        callback(),
+      ),
     },
     recoveryBillingServiceMock: {
-      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "absent" })),
+      revalidateExistingInitialOutreach: vi.fn(async () => ({
+        kind: "absent",
+      })),
       admit: vi.fn(async () => ({
         kind: "admitted",
         admission: {
@@ -124,7 +147,10 @@ const hoisted = vi.hoisted(() => {
 const { prismaMock } = hoisted;
 const { lookupServiceMock } = hoisted;
 
-vi.mock("../../../src/services/recovery-sender-pool/sender-pool.service.js", () => ({ recoverySenderPoolService: hoisted.senderPoolMock }));
+vi.mock(
+  "../../../src/services/recovery-sender-pool/sender-pool.service.js",
+  () => ({ recoverySenderPoolService: hoisted.senderPoolMock }),
+);
 
 vi.mock("../../../src/lib/db.js", () => ({
   default: hoisted.prismaMock,
@@ -144,18 +170,31 @@ vi.mock("../../../src/services/customer.service.js", () => ({
 }));
 // This file's direct initial-outreach case tests language selection, not
 // native Shopify permission. Supply a verified customer and allowed consent.
-vi.mock("../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
-  recoveryShopifyCustomerService: { resolve: vi.fn(async () => ({ id: "customer-1" })) },
-}));
-vi.mock("../../../src/services/checkout-recovery/recovery-consent-admission.service.js", () => ({
-  recoveryConsentAdmissionService: {
-    evaluateFirst: vi.fn(async () => true),
-    evaluateReentry: vi.fn(async () => true),
-    notifyMissingRecipient: vi.fn(async () => undefined),
-  },
-}));
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-shopify-customer.service.js",
+  () => ({
+    recoveryShopifyCustomerService: {
+      resolve: vi.fn(async () => ({ id: "customer-1" })),
+    },
+  }),
+);
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-consent-admission.service.js",
+  () => ({
+    recoveryConsentAdmissionService: {
+      evaluateFirst: vi.fn(async () => true),
+      evaluateReentry: vi.fn(async () => true),
+      notifyMissingRecipient: vi.fn(async () => undefined),
+    },
+  }),
+);
 vi.mock("../../../src/services/recovery-policy.service.js", () => ({
-  recoveryPolicyService: { resolve: vi.fn(async () => ({ followUpEnabled: false, followUpDelayMinutes: null })) },
+  recoveryPolicyService: {
+    resolve: vi.fn(async () => ({
+      followUpEnabled: false,
+      followUpDelayMinutes: null,
+    })),
+  },
 }));
 vi.mock("../../../src/services/conversation.service.js", () => ({
   conversationService: hoisted.conversationServiceMock,
@@ -166,9 +205,12 @@ vi.mock("../../../src/services/conversation.message.service.js", () => ({
 vi.mock("../../../src/services/whatsapp.service.js", () => ({
   whatsAppService: hoisted.whatsAppServiceMock,
 }));
-vi.mock("../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
-  automatedRecoveryTemplateService: hoisted.automatedTemplateMock,
-}));
+vi.mock(
+  "../../../src/services/recovery-template-integration/automated-recovery-template.service.js",
+  () => ({
+    automatedRecoveryTemplateService: hoisted.automatedTemplateMock,
+  }),
+);
 vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
   pendingRecoveryCandidateService: hoisted.pendingCandidateServiceMock,
 }));
@@ -185,9 +227,12 @@ vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
 // This file tests checkout and history ordering, not moderation admission.
 // Treat its synthetic history as already approved; production history still
 // requires content-specific moderation evidence and fails closed on errors.
-vi.mock("../../../src/services/conversation-moderation/moderation-history.js", () => ({
-  allowedHistoryCandidates: vi.fn(async (items: unknown[]) => items),
-}));
+vi.mock(
+  "../../../src/services/conversation-moderation/moderation-history.js",
+  () => ({
+    allowedHistoryCandidates: vi.fn(async (items: unknown[]) => items),
+  }),
+);
 
 import { CheckoutRecoveryService } from "../../../src/services/checkout-recovery.service.js";
 
@@ -252,7 +297,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
       prismaMock.checkoutRecovery.findUnique(args),
     );
     prismaMock.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
-    prismaMock.$transaction.mockImplementation(async (callback) => callback(prismaMock));
+    prismaMock.$transaction.mockImplementation(async (callback) =>
+      callback(prismaMock),
+    );
     lookupServiceMock.lookup.mockResolvedValue({
       kind: "found",
       checkout: currentCheckout,
@@ -262,10 +309,12 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
         outcome: "not-found",
       },
     );
-    hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated.mockResolvedValue({
-      outcome: "enqueued",
-      jobId: "candidate-1",
-    });
+    hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated.mockResolvedValue(
+      {
+        outcome: "enqueued",
+        jobId: "candidate-1",
+      },
+    );
   });
 
   it("schedules the update without calling Shopify when no recovery exists", async () => {
@@ -273,8 +322,14 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
 
     const result = await service.handleCheckoutUpdatedContract(event);
 
-    expect(result).toEqual({ kind: "pending", outcome: "enqueued", jobId: "candidate-1" });
-    expect(hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated).toHaveBeenCalledOnce();
+    expect(result).toEqual({
+      kind: "pending",
+      outcome: "enqueued",
+      jobId: "candidate-1",
+    });
+    expect(
+      hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated,
+    ).toHaveBeenCalledOnce();
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
@@ -322,12 +377,17 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
   });
 
   it("stops an inactive checkout update before candidate refresh or Shopify work", async () => {
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "UNINSTALLED",
+    });
 
     const result = await service.handleCheckoutUpdatedContract(event);
 
     expect(result).toEqual({ kind: "ignored", reason: "shop-unavailable" });
-    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+    expect(
+      hoisted.pendingCandidateServiceMock.refreshCandidateActivity,
+    ).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
@@ -343,7 +403,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     const result = await service.handleCheckoutUpdatedContract(event);
 
     expect(result).toEqual({ kind: "ignored", reason: "subscription-frozen" });
-    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+    expect(
+      hoisted.pendingCandidateServiceMock.refreshCandidateActivity,
+    ).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
@@ -353,21 +415,26 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     ["NO_CONTRACT", "contract-required"],
     ["UNMAPPED", "shop-unavailable"],
     ["SYNC_ERROR", "shop-unavailable"],
-  ])("stops a %s checkout update before candidate or Shopify work", async (status, reason) => {
-    prismaMock.shop.findUnique.mockResolvedValue({
-      id: "shop_1",
-      status: "ACTIVE",
-      subscription: { status },
-    });
+  ])(
+    "stops a %s checkout update before candidate or Shopify work",
+    async (status, reason) => {
+      prismaMock.shop.findUnique.mockResolvedValue({
+        id: "shop_1",
+        status: "ACTIVE",
+        subscription: { status },
+      });
 
-    const result = await service.handleCheckoutUpdatedContract(event);
+      const result = await service.handleCheckoutUpdatedContract(event);
 
-    expect(result).toEqual({ kind: "ignored", reason });
-    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
-    expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
-    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
-    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
-  });
+      expect(result).toEqual({ kind: "ignored", reason });
+      expect(
+        hoisted.pendingCandidateServiceMock.refreshCandidateActivity,
+      ).not.toHaveBeenCalled();
+      expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
+      expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+      expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+    },
+  );
 
   it("reschedules a matching pending candidate before checking durable recovery", async () => {
     hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue(
@@ -434,7 +501,10 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
   });
 
   it("stops inactive cart activity before refreshing a pending candidate", async () => {
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "UNINSTALLED",
+    });
 
     const result = await service.handleCartActivityContract({
       shopId: "shop_1",
@@ -445,7 +515,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     });
 
     expect(result).toEqual({ kind: "ignored", reason: "shop-unavailable" });
-    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+    expect(
+      hoisted.pendingCandidateServiceMock.refreshCandidateActivity,
+    ).not.toHaveBeenCalled();
   });
 
   it("stops frozen cart activity after one lifecycle lookup", async () => {
@@ -465,7 +537,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
 
     expect(result).toEqual({ kind: "ignored", reason: "subscription-frozen" });
     expect(prismaMock.shop.findUnique).toHaveBeenCalledTimes(1);
-    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+    expect(
+      hoisted.pendingCandidateServiceMock.refreshCandidateActivity,
+    ).not.toHaveBeenCalled();
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
   });
 
@@ -473,26 +547,31 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     ["NO_CONTRACT", "contract-required"],
     ["UNMAPPED", "shop-unavailable"],
     ["SYNC_ERROR", "shop-unavailable"],
-  ])("stops a %s cart activity before refreshing a candidate", async (status, reason) => {
-    prismaMock.shop.findUnique.mockResolvedValue({
-      id: "shop_1",
-      status: "ACTIVE",
-      subscription: { status },
-    });
+  ])(
+    "stops a %s cart activity before refreshing a candidate",
+    async (status, reason) => {
+      prismaMock.shop.findUnique.mockResolvedValue({
+        id: "shop_1",
+        status: "ACTIVE",
+        subscription: { status },
+      });
 
-    const result = await service.handleCartActivityContract({
-      shopId: "shop_1",
-      shopDomain: "shop.myshopify.com",
-      cartToken: "cart_1",
-      isEmpty: false,
-      activityAt: "2026-08-28T00:04:00.000Z",
-    });
+      const result = await service.handleCartActivityContract({
+        shopId: "shop_1",
+        shopDomain: "shop.myshopify.com",
+        cartToken: "cart_1",
+        isEmpty: false,
+        activityAt: "2026-08-28T00:04:00.000Z",
+      });
 
-    expect(result).toEqual({ kind: "ignored", reason });
-    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
-    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
-    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
-  });
+      expect(result).toEqual({ kind: "ignored", reason });
+      expect(
+        hoisted.pendingCandidateServiceMock.refreshCandidateActivity,
+      ).not.toHaveBeenCalled();
+      expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+      expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not use webhook basket data (only the Shopify lookup result)", async () => {
     // The v2 checkout-updated contract carries only shopDomain + checkoutToken,
@@ -547,10 +626,12 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
       ...activeRecovery,
       status: "EXPIRED",
     });
-    hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated.mockResolvedValue({
-      outcome: "scheduled",
-      jobId: "candidate-restart-1",
-    });
+    hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated.mockResolvedValue(
+      {
+        outcome: "scheduled",
+        jobId: "candidate-restart-1",
+      },
+    );
 
     const result = await service.handleCheckoutUpdatedContract({
       ...event,
@@ -689,10 +770,22 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
       },
     } as any);
 
-    prismaMock.conversationMessage.findMany.mockResolvedValueOnce([
-      { id: "message-1", direction: "INBOUND", senderType: "CUSTOMER", content: "first" },
-      { id: "message-2", direction: "INBOUND", senderType: "CUSTOMER", content: "second" },
-    ]).mockResolvedValueOnce([]);
+    prismaMock.conversationMessage.findMany
+      .mockResolvedValueOnce([
+        {
+          id: "message-1",
+          direction: "INBOUND",
+          senderType: "CUSTOMER",
+          content: "first",
+        },
+        {
+          id: "message-2",
+          direction: "INBOUND",
+          senderType: "CUSTOMER",
+          content: "second",
+        },
+      ])
+      .mockResolvedValueOnce([]);
     const context = await service.getAgentContext({
       checkoutRecoveryId: "recovery-1",
       conversationId: "conversation-1",
@@ -703,26 +796,56 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
       { role: "user", content: "second" },
     ]);
     expect(prismaMock.recoveryBasketRoutingTurn.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { selectedConversationId: "conversation-1", state: "RESOLVED" } }),
+      expect.objectContaining({
+        where: { selectedConversationId: "conversation-1", state: "RESOLVED" },
+      }),
     );
-    expect(context.conversation.history).toContainEqual({role:"user",content:"first"});
-    expect(prismaMock.conversationMessage.findMany.mock.calls.at(-2)?.[0]).toMatchObject({orderBy:[{createdAt:"asc"},{id:"asc"}]});
+    expect(context.conversation.history).toContainEqual({
+      role: "user",
+      content: "first",
+    });
+    expect(
+      prismaMock.conversationMessage.findMany.mock.calls.at(-2)?.[0],
+    ).toMatchObject({ orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
   });
 });
 
 it("initial outreach delegates template preparation without forwarding checkout language", async () => {
-  const recovery = { id: "recovery-initial", shopId: "shop_1", status: "DETECTED", customerId: "customer-1" };
+  const recovery = {
+    id: "recovery-initial",
+    shopId: "shop_1",
+    status: "DETECTED",
+    customerId: "customer-1",
+  };
   prismaMock.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop_1" });
   prismaMock.checkoutRecovery.findFirst.mockResolvedValue(null);
   vi.spyOn(service, "upsertRecovery").mockResolvedValueOnce(recovery as never);
   hoisted.automatedTemplateMock.prepare.mockClear();
-  hoisted.automatedTemplateMock.prepare.mockResolvedValueOnce({ kind: "unavailable", reason: "no-approved-template" } as never);
+  hoisted.automatedTemplateMock.prepare.mockResolvedValueOnce({
+    kind: "unavailable",
+    reason: "no-approved-template",
+  } as never);
   await service.handleCheckoutCreated({
-    shop: "shop.myshopify.com", checkoutToken: "initial",
-    customer: { shopifyCustomerId: "gid://shopify/Customer/1", phone: "+33123456789" },
-    internationalContext: { languageTag: "fr-FR", languageSource: "shopify", countryCode: "FR", currencyCode: "GBP", timeZone: "Europe/London" },
+    shop: "shop.myshopify.com",
+    checkoutToken: "initial",
+    customer: {
+      shopifyCustomerId: "gid://shopify/Customer/1",
+      phone: "+33123456789",
+    },
+    internationalContext: {
+      languageTag: "fr-FR",
+      languageSource: "shopify",
+      countryCode: "FR",
+      currencyCode: "GBP",
+      timeZone: "Europe/London",
+    },
   } as never);
   expect(hoisted.automatedTemplateMock.prepare).toHaveBeenCalledExactlyOnceWith(
-    expect.objectContaining({ shopId: "shop_1", recoveryId: "recovery-initial", stage: "INITIAL", conversationLanguageTag: null }),
+    expect.objectContaining({
+      shopId: "shop_1",
+      recoveryId: "recovery-initial",
+      stage: "INITIAL",
+      conversationLanguageTag: null,
+    }),
   );
 });

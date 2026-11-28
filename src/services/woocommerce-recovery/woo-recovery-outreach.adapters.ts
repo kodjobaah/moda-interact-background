@@ -1,6 +1,9 @@
 import { recoverySenderPoolService } from "../recovery-sender-pool/sender-pool.service.js";
 import prisma from "../../lib/db.js";
-import { initialFollowUpDeadline, RecoveryOutreachFinalizationService } from "../checkout-recovery/recovery-outreach-finalization.service.js";
+import {
+  initialFollowUpDeadline,
+  RecoveryOutreachFinalizationService,
+} from "../checkout-recovery/recovery-outreach-finalization.service.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
 import { recoveryPolicyService } from "../recovery-policy.service.js";
 import { recoveryBillingService } from "../recovery-billing.service.js";
@@ -10,8 +13,15 @@ import { automatedRecoveryTemplateService } from "../recovery-template-integrati
 import { wooRecoveryConsentReader } from "../woocommerce-recovery-consent.service.js";
 import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
 import { recoveryDeliveryCompensationService } from "../recovery-delivery-compensation/reconcile.service.js";
-import { WooRecoveryOutreachService, type WooOutreachDependencies, type WooGuardedInitialSender } from "./woo-recovery-outreach.service.js";
-import type { WooCheckoutCoordinator, WooObservedOrderStateReader } from "./contracts.js";
+import {
+  WooRecoveryOutreachService,
+  type WooOutreachDependencies,
+  type WooGuardedInitialSender,
+} from "./woo-recovery-outreach.service.js";
+import type {
+  WooCheckoutCoordinator,
+  WooObservedOrderStateReader,
+} from "./contracts.js";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { WooResumedOutreachSettlementAdapter } from "./woo-resumed-outreach-settlement.adapter.js";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
@@ -42,8 +52,12 @@ export function createWooRecoveryOutreachService(input: {
         return prisma.checkoutRecovery.findUnique({
           where: { id: recoveryId },
           select: {
-            id: true, shopId: true, checkoutToken: true, customerId: true,
-            status: true, completedAt: true,
+            id: true,
+            shopId: true,
+            checkoutToken: true,
+            customerId: true,
+            status: true,
+            completedAt: true,
             shop: { select: { platform: true, status: true } },
           },
         });
@@ -54,26 +68,52 @@ export function createWooRecoveryOutreachService(input: {
     attempts: {
       async findInitial(recoveryId) {
         return prisma.recoveryOutreachAttempt.findUnique({
-          where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: recoveryId, sequence: 1 } },
-          select: { id: true, sequence: true, recipient: true, status: true,
-            sentAt: true, outboundMessageId: true, followUpDueAt: true },
+          where: {
+            checkoutRecoveryId_sequence: {
+              checkoutRecoveryId: recoveryId,
+              sequence: 1,
+            },
+          },
+          select: {
+            id: true,
+            sequence: true,
+            recipient: true,
+            status: true,
+            sentAt: true,
+            outboundMessageId: true,
+            followUpDueAt: true,
+          },
         });
       },
       getOrCreateInitial: async ({ recoveryId, recipient, policy }) =>
-        recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, recipient, policy }),
+        recoveryOutreachAttemptService.getOrCreate({
+          recoveryId,
+          sequence: 1,
+          recipient,
+          policy,
+        }),
       async markFailed(attemptId, reason) {
         const updated = await prisma.recoveryOutreachAttempt.updateMany({
           where: {
-            id: attemptId, sequence: 1, sentAt: null, outboundMessageId: null,
+            id: attemptId,
+            sequence: 1,
+            sentAt: null,
+            outboundMessageId: null,
             status: { in: ["PENDING", "CAPACITY_BLOCKED", "CANCELLED"] },
           },
           data: { status: "FAILED", failureCode: reason },
         });
         if (updated.count === 0) {
           const current = await prisma.recoveryOutreachAttempt.findUnique({
-            where: { id: attemptId }, select: { status: true, sentAt: true, outboundMessageId: true },
+            where: { id: attemptId },
+            select: { status: true, sentAt: true, outboundMessageId: true },
           });
-          if (!current || current.sentAt || current.outboundMessageId || current.status !== "FAILED")
+          if (
+            !current ||
+            current.sentAt ||
+            current.outboundMessageId ||
+            current.status !== "FAILED"
+          )
             throw new Error("WOO_ATTEMPT_FAILURE_TRANSITION_CONFLICT");
         }
       },
@@ -87,9 +127,11 @@ export function createWooRecoveryOutreachService(input: {
           select: { languageTag: true },
         });
         const selected = await automatedRecoveryTemplateService.prepare({
-          shopId, recoveryId, stage: "INITIAL",
+          shopId,
+          recoveryId,
+          stage: "INITIAL",
           outreachAttemptId: attemptId,
-          policy: policy ?? await recoveryPolicyService.resolve(shopId),
+          policy: policy ?? (await recoveryPolicyService.resolve(shopId)),
           conversationLanguageTag: conversation?.languageTag ?? null,
         });
         if (selected.kind !== "prepared") {
@@ -103,11 +145,14 @@ export function createWooRecoveryOutreachService(input: {
             canonicalLanguageTag: selected.prepared.canonicalLanguageTag,
             verifiedCategory: "MARKETING" as const,
             sendFields: selected.send,
-              ...(selected.admissionToken ? { admissionToken: selected.admissionToken } : {}),
+            ...(selected.admissionToken
+              ? { admissionToken: selected.admissionToken }
+              : {}),
           },
         };
       },
-      validateAdmission: (token, signal) => automatedRecoveryTemplateService.validateAdmission(token, signal),
+      validateAdmission: (token, signal) =>
+        automatedRecoveryTemplateService.validateAdmission(token, signal),
     },
     conversations: {
       async getOrCreate(recoveryId) {
@@ -122,83 +167,150 @@ export function createWooRecoveryOutreachService(input: {
         // compensates the exact source and notifies the merchant. Do not
         // duplicate that correction in another owner.
         if (!isSynchronousRecipientFailure(error)) {
-          await recoveryBillingService.handleProviderFailure({ admission, error });
+          await recoveryBillingService.handleProviderFailure({
+            admission,
+            error,
+          });
         }
       },
       async reconcileRecorded({ admission, messageId, error }) {
         if (isSynchronousRecipientFailure(error)) {
-          const result = await recoveryDeliveryCompensationService.reconcileMessage(messageId);
+          const result =
+            await recoveryDeliveryCompensationService.reconcileMessage(
+              messageId,
+            );
           if (result === "not-terminal" || result === "not-recovery")
-            throw new Error("WOO_RECORDED_PROVIDER_FAILURE_COMPENSATION_UNRESOLVED");
+            throw new Error(
+              "WOO_RECORDED_PROVIDER_FAILURE_COMPENSATION_UNRESOLVED",
+            );
           return;
         }
-        await recoveryBillingService.handleProviderFailure({ admission, error });
+        await recoveryBillingService.handleProviderFailure({
+          admission,
+          error,
+        });
       },
     },
     resumedSettlement: new WooResumedOutreachSettlementAdapter(),
     finalize: {
-      ensureScheduledFollowUp: (recoveryId) => followUpFinalizer.ensureScheduledInitialFollowUp(recoveryId),
+      ensureScheduledFollowUp: (recoveryId) =>
+        followUpFinalizer.ensureScheduledInitialFollowUp(recoveryId),
       async confirmed({ recovery, attempt, message }) {
-        const alreadyFinalized = attempt.outboundMessageId === message.id &&
+        const alreadyFinalized =
+          attempt.outboundMessageId === message.id &&
           attempt.sentAt?.getTime() === message.sentAt.getTime();
-        if (attempt.sequence !== 1 || (attempt.followUpDueAt !== null && !alreadyFinalized))
+        if (
+          attempt.sequence !== 1 ||
+          (attempt.followUpDueAt !== null && !alreadyFinalized)
+        )
           throw new Error("WOO_INITIAL_ATTEMPT_CONFLICT");
-        if (message.conversationId !== (await prisma.conversation.findUnique({
-          where: { checkoutRecoveryId: recovery.id }, select: { id: true },
-        }))?.id) throw new Error("WOO_INITIAL_MESSAGE_CONVERSATION_MISMATCH");
-        let stage: "billing" | "policy" | "support_notice" | "recovery_status" | "follow_up" = "billing";
+        if (
+          message.conversationId !==
+          (
+            await prisma.conversation.findUnique({
+              where: { checkoutRecoveryId: recovery.id },
+              select: { id: true },
+            })
+          )?.id
+        )
+          throw new Error("WOO_INITIAL_MESSAGE_CONVERSATION_MISMATCH");
+        let stage:
+          | "billing"
+          | "policy"
+          | "support_notice"
+          | "recovery_status"
+          | "follow_up" = "billing";
         try {
-          const settlement = await recoveryBillingService.settleConfirmedInitialOutreach({
-            shopId: recovery.shopId,
-            recoveryId: recovery.id,
-            outreachAttemptId: attempt.id,
-            outboundMessageId: message.id,
-          });
+          const settlement =
+            await recoveryBillingService.settleConfirmedInitialOutreach({
+              shopId: recovery.shopId,
+              recoveryId: recovery.id,
+              outreachAttemptId: attempt.id,
+              outboundMessageId: message.id,
+            });
           if (settlement.kind === "held") return settlement;
-          if (settlement.outboundMessageId !== message.id ||
-            settlement.sentAt.getTime() !== message.sentAt.getTime()) {
+          if (
+            settlement.outboundMessageId !== message.id ||
+            settlement.sentAt.getTime() !== message.sentAt.getTime()
+          ) {
             return { kind: "held", reason: "lineage-conflict" };
           }
           stage = "policy";
-          const policy = alreadyFinalized ? undefined : await recoveryPolicyService.resolve(recovery.shopId);
-          const followUpDueAt = initialFollowUpDeadline(attempt, message, policy);
+          const policy = alreadyFinalized
+            ? undefined
+            : await recoveryPolicyService.resolve(recovery.shopId);
+          const followUpDueAt = initialFollowUpDeadline(
+            attempt,
+            message,
+            policy,
+          );
           stage = "support_notice";
-          await recoveryInitialOutreachSupportNoticeService.finalizeConfirmedInitial({
-            shopId: recovery.shopId,
-            checkoutRecoveryId: recovery.id,
-            outreachAttemptId: attempt.id,
-            outboundMessageId: message.id,
-            sentAt: settlement.sentAt,
-            followUpDueAt,
-          });
-          stage = "recovery_status";
-          const transitioned = await prisma.checkoutRecovery.updateMany({
-            where: { id: recovery.id, shopId: recovery.shopId, status: "DETECTED" },
-            data: { status: "MESSAGE_SENT", messageSentAt: settlement.sentAt,
-              admissionBlockedAt: null, admissionBlockReason: null },
-          });
-          if (transitioned.count !== 1) {
-            const current = await prisma.checkoutRecovery.findUnique({
-              where: { id: recovery.id }, select: { shopId: true, status: true },
-            });
-            if (current?.shopId !== recovery.shopId ||
-              !["MESSAGE_SENT", "ENGAGED", "COMPLETED", "CANCELLED", "EXPIRED"].includes(current.status)) {
-              throw new Error("WOO_CONFIRMED_RECOVERY_STATUS_CONFLICT");
-            }
-          }
-          stage = "follow_up";
-          if (followUpDueAt) await followUpFinalizer.ensureScheduledInitialFollowUp(recovery.id, message.conversationId);
-          return { kind: "finalized", outboundMessageId: message.id, sentAt: settlement.sentAt };
-        } catch (error) {
-          try {
-            input.logger.error("recovery.initial_outreach_support_notice.woocommerce_finalization_failed", {
+          await recoveryInitialOutreachSupportNoticeService.finalizeConfirmedInitial(
+            {
               shopId: recovery.shopId,
               checkoutRecoveryId: recovery.id,
               outreachAttemptId: attempt.id,
               outboundMessageId: message.id,
-              stage,
-              sourceError: initialOutreachDiagnostic(error),
+              sentAt: settlement.sentAt,
+              followUpDueAt,
+            },
+          );
+          stage = "recovery_status";
+          const transitioned = await prisma.checkoutRecovery.updateMany({
+            where: {
+              id: recovery.id,
+              shopId: recovery.shopId,
+              status: "DETECTED",
+            },
+            data: {
+              status: "MESSAGE_SENT",
+              messageSentAt: settlement.sentAt,
+              admissionBlockedAt: null,
+              admissionBlockReason: null,
+            },
+          });
+          if (transitioned.count !== 1) {
+            const current = await prisma.checkoutRecovery.findUnique({
+              where: { id: recovery.id },
+              select: { shopId: true, status: true },
             });
+            if (
+              current?.shopId !== recovery.shopId ||
+              ![
+                "MESSAGE_SENT",
+                "ENGAGED",
+                "COMPLETED",
+                "CANCELLED",
+                "EXPIRED",
+              ].includes(current.status)
+            ) {
+              throw new Error("WOO_CONFIRMED_RECOVERY_STATUS_CONFLICT");
+            }
+          }
+          stage = "follow_up";
+          if (followUpDueAt)
+            await followUpFinalizer.ensureScheduledInitialFollowUp(
+              recovery.id,
+              message.conversationId,
+            );
+          return {
+            kind: "finalized",
+            outboundMessageId: message.id,
+            sentAt: settlement.sentAt,
+          };
+        } catch (error) {
+          try {
+            input.logger.error(
+              "recovery.initial_outreach_support_notice.woocommerce_finalization_failed",
+              {
+                shopId: recovery.shopId,
+                checkoutRecoveryId: recovery.id,
+                outreachAttemptId: attempt.id,
+                outboundMessageId: message.id,
+                stage,
+                sourceError: initialOutreachDiagnostic(error),
+              },
+            );
           } catch {
             // Preserve the original finalization failure if the logging sink fails.
           }

@@ -1,7 +1,9 @@
 import { expect, it, vi } from "vitest";
 import type { ConversationTurnFacadeContext } from "../conversation-turn-processor.service.test.js";
 
-export function registerAbuseAdmissionCases(context: ConversationTurnFacadeContext) {
+export function registerAbuseAdmissionCases(
+  context: ConversationTurnFacadeContext,
+) {
   const { harness, state, first, ConversationTurnProcessor } = context;
 
   it("B011-16 handles a settled abuse denial without outbound or agent work", async () => {
@@ -90,7 +92,9 @@ export function registerAbuseAdmissionCases(context: ConversationTurnFacadeConte
     expect(test.queue.add).toHaveBeenCalledWith(
       "process-conversation-turn",
       { conversationId: "conversation-1", observedVersion: 4 },
-      expect.objectContaining({ jobId: "conversation-turn__conversation-1__4" }),
+      expect.objectContaining({
+        jobId: "conversation-turn__conversation-1__4",
+      }),
     );
     expect(test.admission.reserve).not.toHaveBeenCalled();
     expect(test.runAgent).not.toHaveBeenCalled();

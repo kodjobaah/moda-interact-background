@@ -48,8 +48,8 @@ describe("Merchant Knowledge HTML extraction", () => {
   });
 
   it("decodes malformed UTF-8 with replacement without normalization", () => {
-    expect(decodeMerchantKnowledgeUtf8(Buffer.from([0x41, 0xff, 0x0d, 0x0a]))).toBe(
-      "A�\r\n",
-    );
+    expect(
+      decodeMerchantKnowledgeUtf8(Buffer.from([0x41, 0xff, 0x0d, 0x0a])),
+    ).toBe("A�\r\n");
   });
 });

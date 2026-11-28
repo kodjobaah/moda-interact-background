@@ -27,7 +27,12 @@ type Candidate = {
 const cleanup: Array<() => Promise<unknown>> = [];
 
 afterEach(async () => {
-  await Promise.allSettled(cleanup.splice(0).reverse().map((close) => close()));
+  await Promise.allSettled(
+    cleanup
+      .splice(0)
+      .reverse()
+      .map((close) => close()),
+  );
 });
 
 async function createBoundary(
@@ -89,53 +94,66 @@ describe.sequential("shared BullMQ telemetry", () => {
     });
   });
 
-  redisIt("propagates the parent trace without changing the payload", async () => {
-    const exporter = new InMemorySpanExporter();
-    const provider = new NodeTracerProvider({
-      spanProcessors: [new SimpleSpanProcessor(exporter)],
-    });
-    const contextManager = new AsyncHooksContextManager().enable();
-    provider.register({ contextManager });
-    cleanup.push(
-      async () => {
+  redisIt(
+    "propagates the parent trace without changing the payload",
+    async () => {
+      const exporter = new InMemorySpanExporter();
+      const provider = new NodeTracerProvider({
+        spanProcessors: [new SimpleSpanProcessor(exporter)],
+      });
+      const contextManager = new AsyncHooksContextManager().enable();
+      provider.register({ contextManager });
+      cleanup.push(async () => {
         contextManager.disable();
         await provider.shutdown();
-      },
-    );
+      });
 
-    const candidate: Candidate = {
-      shopId: "shop_1",
-      checkoutToken: "checkout_1",
-      cartToken: "cart_1",
-      abandonedCheckoutUrl: "https://shop.example/recover",
-      checkoutCreatedAt: "2026-08-31T00:00:00Z",
-    };
-    let resolveProcessed!: (value: Candidate) => void;
-    const processed = new Promise<Candidate>((resolve) => {
-      resolveProcessed = resolve;
-    });
-    const { completed, queue, queueName } = await createBoundary(async (job) => {
-      resolveProcessed(job.data);
-    });
-    const parent = provider.getTracer("background-test").startSpan("checkout-accepted");
+      const candidate: Candidate = {
+        shopId: "shop_1",
+        checkoutToken: "checkout_1",
+        cartToken: "cart_1",
+        abandonedCheckoutUrl: "https://shop.example/recover",
+        checkoutCreatedAt: "2026-08-31T00:00:00Z",
+      };
+      let resolveProcessed!: (value: Candidate) => void;
+      const processed = new Promise<Candidate>((resolve) => {
+        resolveProcessed = resolve;
+      });
+      const { completed, queue, queueName } = await createBoundary(
+        async (job) => {
+          resolveProcessed(job.data);
+        },
+      );
+      const parent = provider
+        .getTracer("background-test")
+        .startSpan("checkout-accepted");
 
-    await context.with(trace.setSpan(context.active(), parent), () =>
-      queue.add("evaluate-pending-recovery", candidate),
-    );
-    const received = await processed;
-    await completed;
-    parent.end();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await provider.forceFlush();
+      await context.with(trace.setSpan(context.active(), parent), () =>
+        queue.add("evaluate-pending-recovery", candidate),
+      );
+      const received = await processed;
+      await completed;
+      parent.end();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await provider.forceFlush();
 
-    expect(received).toEqual(candidate);
-    const spans = exporter.getFinishedSpans();
-    const producer = spans.find((span) => span.name.startsWith(`add ${queueName}`));
-    const consumer = spans.find((span) => span.name.startsWith(`process ${queueName}`));
+      expect(received).toEqual(candidate);
+      const spans = exporter.getFinishedSpans();
+      const producer = spans.find((span) =>
+        span.name.startsWith(`add ${queueName}`),
+      );
+      const consumer = spans.find((span) =>
+        span.name.startsWith(`process ${queueName}`),
+      );
 
-    expect(producer).toBeDefined();
-    expect(consumer).toBeDefined();
-    expect(producer?.spanContext().traceId).toBe(parent.spanContext().traceId);
-    expect(consumer?.spanContext().traceId).toBe(parent.spanContext().traceId);
-  });
+      expect(producer).toBeDefined();
+      expect(consumer).toBeDefined();
+      expect(producer?.spanContext().traceId).toBe(
+        parent.spanContext().traceId,
+      );
+      expect(consumer?.spanContext().traceId).toBe(
+        parent.spanContext().traceId,
+      );
+    },
+  );
 });

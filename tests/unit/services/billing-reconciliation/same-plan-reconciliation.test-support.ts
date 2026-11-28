@@ -65,10 +65,19 @@ export function existingSubscription(
   };
 }
 
-export function currentCycleTransaction(existing: SamePlanExistingSubscription) {
+export function currentCycleTransaction(
+  existing: SamePlanExistingSubscription,
+) {
   return {
     $queryRaw: vi.fn().mockResolvedValue([]),
-    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }, { eventHandle: "pack-meter" }] }) },
+    merchantPricingPlan: {
+      findUnique: vi.fn().mockResolvedValue({
+        usageEvents: [
+          { eventHandle: "recovery-meter" },
+          { eventHandle: "pack-meter" },
+        ],
+      }),
+    },
     subscription: {
       findUnique: vi.fn().mockResolvedValue(existing),
       update: vi.fn(),
@@ -107,7 +116,9 @@ export function currentCycleTransaction(existing: SamePlanExistingSubscription) 
     },
     usageEvent: { count: vi.fn().mockResolvedValue(0) },
     platformBillingPolicy: {
-      findUnique: vi.fn().mockResolvedValue({ lifetimeFreeRecoveryAllowance: 5 }),
+      findUnique: vi
+        .fn()
+        .mockResolvedValue({ lifetimeFreeRecoveryAllowance: 5 }),
     },
   };
 }

@@ -4,12 +4,22 @@ import {
   createBillingSubscriptionReconcileJobId,
   type BillingSubscriptionReconcileJob,
 } from "@modainteract/moda-interact-shared/billing";
-import { BillingPlanKind, ShopPlatform, SubscriptionProjectionStatus, type PrismaClient } from "@prisma/client";
+import {
+  BillingPlanKind,
+  ShopPlatform,
+  SubscriptionProjectionStatus,
+  type PrismaClient,
+} from "@prisma/client";
 import type { Queue } from "bullmq";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
 import { UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS } from "../billing-reconciliation/unfreeze-integrity-guard.js";
-import { billingOperationalIncidentSink, billingIncidentProjectionSelect, reportCommittedBillingFailure, type BillingIncidentSink } from "../billing-operational-incident.service.js";
+import {
+  billingOperationalIncidentSink,
+  billingIncidentProjectionSelect,
+  reportCommittedBillingFailure,
+  type BillingIncidentSink,
+} from "../billing-operational-incident.service.js";
 
 type SubscriptionQueue = Pick<Queue, "add">;
 type BillingDatabase = PrismaClient;
@@ -36,10 +46,16 @@ export class ReconciliationQueueService {
     private readonly incidentSink: BillingIncidentSink = billingOperationalIncidentSink,
   ) {}
 
-  async enqueue(job: BillingSubscriptionReconcileJob, delay = 0): Promise<void> {
+  async enqueue(
+    job: BillingSubscriptionReconcileJob,
+    delay = 0,
+  ): Promise<void> {
     if (!this.queue) return;
     await this.queue.add(BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME, job, {
-      jobId: createBillingSubscriptionReconcileJobId(job.subscriptionId, job.expectedNextReconcileAt),
+      jobId: createBillingSubscriptionReconcileJobId(
+        job.subscriptionId,
+        job.expectedNextReconcileAt,
+      ),
       delay: Math.max(0, delay),
       removeOnComplete: 100,
       removeOnFail: true,
@@ -51,59 +67,103 @@ export class ReconciliationQueueService {
       where: {
         platform: ShopPlatform.SHOPIFY,
         AND: [
-          { OR: [
-            { status: "ACTIVE" },
-            { status: "UNINSTALLED", reinstallPendingAt: { not: null } },
-          ] },
-          { OR: [
-          { subscription: { is: { pendingPlanId: { not: null }, nextReconcileAt: { not: null } } } },
-          { subscription: { is: { status: "FROZEN", nextReconcileAt: { not: null } } } },
           {
-            onboardingCompleted: true,
-            subscription: { is: {
-              status: SubscriptionProjectionStatus.SYNC_ERROR,
-              lastSyncErrorCode: { in: [...UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS] },
-              planId: { not: null },
-              nextReconcileAt: { not: null },
-            } },
+            OR: [
+              { status: "ACTIVE" },
+              { status: "UNINSTALLED", reinstallPendingAt: { not: null } },
+            ],
           },
           {
-            onboardingCompleted: true,
-            subscription: { is: {
-              status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
-              planId: { not: null },
-              billingPeriodId: null,
-              pendingPlanId: null,
-              pendingShopifyPlanHandle: null,
-              pendingEffectiveAt: null,
-              nextReconcileAt: { not: null },
-              plan: { is: { active: true, kind: BillingPlanKind.FREE, recoveryCreditPackEnabled: true } },
-            } },
+            OR: [
+              {
+                subscription: {
+                  is: {
+                    pendingPlanId: { not: null },
+                    nextReconcileAt: { not: null },
+                  },
+                },
+              },
+              {
+                subscription: {
+                  is: { status: "FROZEN", nextReconcileAt: { not: null } },
+                },
+              },
+              {
+                onboardingCompleted: true,
+                subscription: {
+                  is: {
+                    status: SubscriptionProjectionStatus.SYNC_ERROR,
+                    lastSyncErrorCode: {
+                      in: [...UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS],
+                    },
+                    planId: { not: null },
+                    nextReconcileAt: { not: null },
+                  },
+                },
+              },
+              {
+                onboardingCompleted: true,
+                subscription: {
+                  is: {
+                    status: {
+                      in: [
+                        SubscriptionProjectionStatus.ACTIVE,
+                        SubscriptionProjectionStatus.TRIALING,
+                      ],
+                    },
+                    planId: { not: null },
+                    billingPeriodId: null,
+                    pendingPlanId: null,
+                    pendingShopifyPlanHandle: null,
+                    pendingEffectiveAt: null,
+                    nextReconcileAt: { not: null },
+                    plan: {
+                      is: {
+                        active: true,
+                        kind: BillingPlanKind.FREE,
+                        recoveryCreditPackEnabled: true,
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                subscription: {
+                  is: {
+                    status: {
+                      in: [
+                        SubscriptionProjectionStatus.ACTIVE,
+                        SubscriptionProjectionStatus.TRIALING,
+                      ],
+                    },
+                    planId: { not: null },
+                    billingPeriodId: { not: null },
+                    pendingPlanId: null,
+                    pendingShopifyPlanHandle: null,
+                    pendingEffectiveAt: null,
+                    nextReconcileAt: { not: null },
+                    plan: {
+                      is: {
+                        active: true,
+                        OR: [
+                          { kind: BillingPlanKind.PAID_METERED },
+                          {
+                            kind: BillingPlanKind.FREE,
+                            recoveryCreditPackEnabled: true,
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                status: "UNINSTALLED",
+                reinstallPendingAt: { not: null },
+                subscription: { is: { nextReconcileAt: { not: null } } },
+              },
+            ],
           },
-          {
-            subscription: { is: {
-              status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
-              planId: { not: null },
-              billingPeriodId: { not: null },
-              pendingPlanId: null,
-              pendingShopifyPlanHandle: null,
-              pendingEffectiveAt: null,
-              nextReconcileAt: { not: null },
-              plan: { is: {
-                active: true,
-                OR: [
-                  { kind: BillingPlanKind.PAID_METERED },
-                  { kind: BillingPlanKind.FREE, recoveryCreditPackEnabled: true },
-                ],
-              } },
-            } },
-          },
-          {
-            status: "UNINSTALLED",
-            reinstallPendingAt: { not: null },
-            subscription: { is: { nextReconcileAt: { not: null } } },
-          },
-          ] },
         ],
       },
       select: {
@@ -112,65 +172,106 @@ export class ReconciliationQueueService {
         subscription: { select: { id: true, nextReconcileAt: true } },
       },
     });
-    this.logger.info("billing.subscription_reconciliation.reconstruction_started", {
-      eligibleShops: rows.length,
-    });
+    this.logger.info(
+      "billing.subscription_reconciliation.reconstruction_started",
+      {
+        eligibleShops: rows.length,
+      },
+    );
     let enqueued = 0;
     for (const row of rows) {
       if (!row.subscription?.nextReconcileAt) continue;
-      const job = createSubscriptionReconcilePayload(row.id, row.subscription.id, row.subscription.nextReconcileAt);
+      const job = createSubscriptionReconcilePayload(
+        row.id,
+        row.subscription.id,
+        row.subscription.nextReconcileAt,
+      );
       try {
-        await this.enqueue(job, Math.max(0, row.subscription.nextReconcileAt.getTime() - this.now().getTime()));
+        await this.enqueue(
+          job,
+          Math.max(
+            0,
+            row.subscription.nextReconcileAt.getTime() - this.now().getTime(),
+          ),
+        );
         enqueued += 1;
       } catch (error) {
-        this.logger.error("billing.subscription_reconciliation.enqueue_failed", {
-          shopId: row.id,
-          subscriptionId: row.subscription.id,
-          errorMessage: error instanceof Error ? error.message : "unknown failure",
-          error: error,
-        });
+        this.logger.error(
+          "billing.subscription_reconciliation.enqueue_failed",
+          {
+            shopId: row.id,
+            subscriptionId: row.subscription.id,
+            errorMessage:
+              error instanceof Error ? error.message : "unknown failure",
+            error: error,
+          },
+        );
       }
     }
-    this.logger.info("billing.subscription_reconciliation.reconstruction_finished", {
-      eligibleShops: rows.length,
-      enqueued,
-    });
+    this.logger.info(
+      "billing.subscription_reconciliation.reconstruction_finished",
+      {
+        eligibleShops: rows.length,
+        enqueued,
+      },
+    );
     return enqueued;
   }
 
-  async publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void> {
+  async publishNext(
+    shopId: string,
+    subscriptionId: string,
+    next: Date,
+  ): Promise<void> {
     try {
-      await this.enqueue(createSubscriptionReconcilePayload(shopId, subscriptionId, next), Math.max(0, next.getTime() - this.now().getTime()));
+      await this.enqueue(
+        createSubscriptionReconcilePayload(shopId, subscriptionId, next),
+        Math.max(0, next.getTime() - this.now().getTime()),
+      );
     } catch (error) {
       this.logger.error("billing.subscription_reconciliation.enqueue_failed", {
         shopId,
         subscriptionId,
-        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        errorMessage:
+          error instanceof Error ? error.message : "unknown failure",
         error: error,
       });
     }
   }
 
-  async publishCommittedFailure(shopId: string, subscriptionId: string): Promise<void> {
+  async publishCommittedFailure(
+    shopId: string,
+    subscriptionId: string,
+  ): Promise<void> {
     try {
-      await reportCommittedBillingFailure(this.database, this.incidentSink, shopId, subscriptionId);
+      await reportCommittedBillingFailure(
+        this.database,
+        this.incidentSink,
+        shopId,
+        subscriptionId,
+      );
     } catch (error) {
       // The billing transaction already committed. Log the original read error
       // and preserve normal worker progress; the persisted failure remains.
       this.logger.error("billing.operational_incident.committed_read_failed", {
-        shopId, subscriptionId,
+        shopId,
+        subscriptionId,
         errorMessage: error instanceof Error ? error.message : String(error),
         error,
       });
     }
   }
 
-  async publishCommittedLifecycleSchedule(shopId: string, subscriptionId: string): Promise<void> {
+  async publishCommittedLifecycleSchedule(
+    shopId: string,
+    subscriptionId: string,
+  ): Promise<void> {
     const current = await this.database.subscription.findUnique({
       where: { id: subscriptionId },
       select: { ...billingIncidentProjectionSelect, nextReconcileAt: true },
     });
     if (current) await this.incidentSink.report(shopId, current);
-    if (current?.nextReconcileAt) await this.publishNext(shopId, subscriptionId, current.nextReconcileAt);
+    if (current?.nextReconcileAt)
+      await this.publishNext(shopId, subscriptionId, current.nextReconcileAt);
   }
 }

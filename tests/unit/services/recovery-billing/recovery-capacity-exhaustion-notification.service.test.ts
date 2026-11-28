@@ -72,11 +72,13 @@ function paidPolicy() {
   });
 }
 
-function createDatabase(options: {
-  selectedGrant?: Record<string, unknown> | null;
-  includedCounter?: Record<string, unknown> | null;
-  purchasedCounter?: Record<string, unknown> | null;
-} = {}) {
+function createDatabase(
+  options: {
+    selectedGrant?: Record<string, unknown> | null;
+    includedCounter?: Record<string, unknown> | null;
+    purchasedCounter?: Record<string, unknown> | null;
+  } = {},
+) {
   const thread = { id: "thread-1" };
   const messages = new Map<string, { id: string }>();
   const messageUpsert = vi.fn(
@@ -301,7 +303,9 @@ describe("RecoveryCapacityExhaustionNotificationService", () => {
         forfeitedQuantity: 0,
       },
     });
-    const service = new RecoveryCapacityExhaustionNotificationService(database as never);
+    const service = new RecoveryCapacityExhaustionNotificationService(
+      database as never,
+    );
 
     await service.notify("shop-1", paidPolicy() as never);
     database.billingPeriodEntitlementCounter.findUnique.mockResolvedValue({
@@ -314,7 +318,11 @@ describe("RecoveryCapacityExhaustionNotificationService", () => {
     await service.notify("shop-1", paidPolicy() as never);
 
     expect(database.messages.size).toBe(2);
-    expect([...database.messages.keys()][0]).toContain("period-1|no-free-allowance|100:100:0:0");
-    expect([...database.messages.keys()][1]).toContain("period-1|no-free-allowance|80:100:0:0");
+    expect([...database.messages.keys()][0]).toContain(
+      "period-1|no-free-allowance|100:100:0:0",
+    );
+    expect([...database.messages.keys()][1]).toContain(
+      "period-1|no-free-allowance|80:100:0:0",
+    );
   });
 });

@@ -9,12 +9,8 @@ import {
   CommerceStoreCategoryTranslationRunStatus,
   Prisma,
 } from "@prisma/client";
-import {
-  validateStoreCategoryPromptTemplate,
-} from "@modainteract/moda-interact-shared/commerce";
-import {
-  MODA_SUPPORTED_LANGUAGE_TAGS,
-} from "@modainteract/moda-interact-shared/internationalization";
+import { validateStoreCategoryPromptTemplate } from "@modainteract/moda-interact-shared/commerce";
+import { MODA_SUPPORTED_LANGUAGE_TAGS } from "@modainteract/moda-interact-shared/internationalization";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../lib/db.js";
@@ -103,8 +99,20 @@ type PublicationPayload = {
 };
 
 export type StoreCategoryTranslationPublicationOutcome =
-  | { status: "published"; runId: string; categoryId: string; categoryTranslations: number; mappingTranslations: number }
-  | { status: "stale"; runId: string; categoryId: string; expectedSourceHash: string; currentSourceHash: string | null }
+  | {
+      status: "published";
+      runId: string;
+      categoryId: string;
+      categoryTranslations: number;
+      mappingTranslations: number;
+    }
+  | {
+      status: "stale";
+      runId: string;
+      categoryId: string;
+      expectedSourceHash: string;
+      currentSourceHash: string | null;
+    }
   | { status: "failed"; runId: string; categoryId: string; failureCode: string }
   | { status: "skipped"; runId: string };
 
@@ -141,7 +149,9 @@ function canonicalSnapshot(input: {
     schemaVersion: SOURCE_SCHEMA_VERSION,
     category: input.category,
     defaultTemplate: input.template,
-    mappings: [...input.mappings].sort((left, right) => left.id.localeCompare(right.id)),
+    mappings: [...input.mappings].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    ),
   };
 }
 
@@ -214,10 +224,17 @@ function buildPublicationPayload(input: {
       locale: item.targetLanguageTag,
     });
     const expectedItem = expected.get(key);
-    if (!expectedItem || expectedItem.sourceText !== item.sourceText || actual.has(key)) {
+    if (
+      !expectedItem ||
+      expectedItem.sourceText !== item.sourceText ||
+      actual.has(key)
+    ) {
       return null;
     }
-    if (item.targetLanguageTag === SOURCE_LANGUAGE_TAG && item.translatedText !== item.sourceText) {
+    if (
+      item.targetLanguageTag === SOURCE_LANGUAGE_TAG &&
+      item.translatedText !== item.sourceText
+    ) {
       return null;
     }
     actual.set(key, item);
@@ -241,8 +258,15 @@ function buildPublicationPayload(input: {
         locale,
       }),
     );
-    if (!display || !description || display.translatedText === null || description.translatedText === null) {
-      throw new Error("Validated Store Category translation items became incomplete");
+    if (
+      !display ||
+      !description ||
+      display.translatedText === null ||
+      description.translatedText === null
+    ) {
+      throw new Error(
+        "Validated Store Category translation items became incomplete",
+      );
     }
     return {
       id: randomUUID(),
@@ -264,7 +288,9 @@ function buildPublicationPayload(input: {
         }),
       );
       if (!display || display.translatedText === null) {
-        throw new Error("Validated mapping translation items became incomplete");
+        throw new Error(
+          "Validated mapping translation items became incomplete",
+        );
       }
       return {
         id: randomUUID(),
@@ -296,7 +322,10 @@ function normalizeMappings(category: CurrentCategory): CurrentMapping[] | null {
   return mappings.sort((left, right) => left.id.localeCompare(right.id));
 }
 
-function currentSnapshot(category: CurrentCategory, mappings: CurrentMapping[]) {
+function currentSnapshot(
+  category: CurrentCategory,
+  mappings: CurrentMapping[],
+) {
   const template = category.defaultTemplate;
   if (!template) return null;
   return canonicalSnapshot({
@@ -365,8 +394,12 @@ export class StoreCategoryTranslationPublicationService {
     this.database = options.database ?? prisma;
   }
 
-  async reconcile(limit: number): Promise<StoreCategoryTranslationPublicationReconciliationResult> {
-    const rows = await this.database.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+  async reconcile(
+    limit: number,
+  ): Promise<StoreCategoryTranslationPublicationReconciliationResult> {
+    const rows = await this.database.$queryRaw<
+      Array<{ id: string }>
+    >(Prisma.sql`
       SELECT "id"
       FROM "commerce"."CommerceStoreCategoryTranslationRun"
       WHERE "status" = 'READY_TO_PUBLISH'
@@ -389,19 +422,26 @@ export class StoreCategoryTranslationPublicationService {
         if (outcome.status === "failed") result.failed += 1;
       } catch (error) {
         result.retryableFailures += 1;
-        logger.error("background.store_category_translation.run_publish_retryable_failure", {
-          runId: row.id,
-          failureCode: error instanceof Error ? error.name : "publication-failed",
-          errorMessage: error instanceof Error ? error.message : String(error),
-          error: error,
-        });
+        logger.error(
+          "background.store_category_translation.run_publish_retryable_failure",
+          {
+            runId: row.id,
+            failureCode:
+              error instanceof Error ? error.name : "publication-failed",
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+            error: error,
+          },
+        );
       }
     }
 
     return result;
   }
 
-  async publish(input: { translationRunId: string }): Promise<StoreCategoryTranslationPublicationOutcome> {
+  async publish(input: {
+    translationRunId: string;
+  }): Promise<StoreCategoryTranslationPublicationOutcome> {
     const startedAt = Date.now();
     const outcome = await this.database.$transaction(
       async (transaction) => {
@@ -411,25 +451,34 @@ export class StoreCategoryTranslationPublicationService {
           WHERE "id" = ${input.translationRunId}
           FOR UPDATE
         `);
-        const run = await transaction.commerceStoreCategoryTranslationRun.findUnique({
-          where: { id: input.translationRunId },
-          select: {
-            id: true,
-            categoryId: true,
-            environment: true,
-            translationModelConfigurationId: true,
-            sourceSchemaVersion: true,
-            sourceHash: true,
-            status: true,
-            requestedByAdminId: true,
-          },
-        });
-        if (!run || run.status !== CommerceStoreCategoryTranslationRunStatus.READY_TO_PUBLISH) {
+        const run =
+          await transaction.commerceStoreCategoryTranslationRun.findUnique({
+            where: { id: input.translationRunId },
+            select: {
+              id: true,
+              categoryId: true,
+              environment: true,
+              translationModelConfigurationId: true,
+              sourceSchemaVersion: true,
+              sourceHash: true,
+              status: true,
+              requestedByAdminId: true,
+            },
+          });
+        if (
+          !run ||
+          run.status !==
+            CommerceStoreCategoryTranslationRunStatus.READY_TO_PUBLISH
+        ) {
           return { status: "skipped", runId: input.translationRunId } as const;
         }
 
         if (run.sourceSchemaVersion !== SOURCE_SCHEMA_VERSION) {
-          await deterministicFailure(transaction, run.id, UNSUPPORTED_SOURCE_SCHEMA_FAILURE_CODE);
+          await deterministicFailure(
+            transaction,
+            run.id,
+            UNSUPPORTED_SOURCE_SCHEMA_FAILURE_CODE,
+          );
           return {
             status: "failed",
             runId: run.id,
@@ -452,47 +501,49 @@ export class StoreCategoryTranslationPublicationService {
           FOR UPDATE
         `);
 
-        const category = await transaction.commercePromptTemplateCategory.findUnique({
-          where: { id: run.categoryId },
-          select: {
-            id: true,
-            editVersion: true,
-            slug: true,
-            displayName: true,
-            description: true,
-            displayOrder: true,
-            referenceTaxonomySource: true,
-            referenceTaxonomyVersion: true,
-            referenceTaxonomyCategoryId: true,
-            enabled: true,
-            defaultTemplate: {
-              select: {
-                id: true,
-                editVersion: true,
-                key: true,
-                displayName: true,
-                description: true,
-                promptText: true,
-                enabled: true,
-                categoryId: true,
+        const category =
+          (await transaction.commercePromptTemplateCategory.findUnique({
+            where: { id: run.categoryId },
+            select: {
+              id: true,
+              editVersion: true,
+              slug: true,
+              displayName: true,
+              description: true,
+              displayOrder: true,
+              referenceTaxonomySource: true,
+              referenceTaxonomyVersion: true,
+              referenceTaxonomyCategoryId: true,
+              enabled: true,
+              defaultTemplate: {
+                select: {
+                  id: true,
+                  editVersion: true,
+                  key: true,
+                  displayName: true,
+                  description: true,
+                  promptText: true,
+                  enabled: true,
+                  categoryId: true,
+                },
+              },
+              taxonomyMappings: {
+                orderBy: [{ id: "asc" }],
+                select: {
+                  id: true,
+                  editVersion: true,
+                  conditionKey: true,
+                  displayName: true,
+                  shopifyTaxonomyCategoryId: true,
+                  weight: true,
+                },
               },
             },
-            taxonomyMappings: {
-              orderBy: [{ id: "asc" }],
-              select: {
-                id: true,
-                editVersion: true,
-                conditionKey: true,
-                displayName: true,
-                shopifyTaxonomyCategoryId: true,
-                weight: true,
-              },
-            },
-          },
-        }) as CurrentCategory | null;
+          })) as CurrentCategory | null;
 
         const mappings = category ? normalizeMappings(category) : null;
-        const snapshot = category && mappings ? currentSnapshot(category, mappings) : null;
+        const snapshot =
+          category && mappings ? currentSnapshot(category, mappings) : null;
         const currentHash = snapshot ? hashSnapshot(snapshot) : null;
         if (
           !category ||
@@ -516,10 +567,16 @@ export class StoreCategoryTranslationPublicationService {
 
         const promptValidation = validateStoreCategoryPromptTemplate({
           source: category.defaultTemplate.promptText,
-          availableConditionKeys: mappings.map((mapping) => mapping.conditionKey),
+          availableConditionKeys: mappings.map(
+            (mapping) => mapping.conditionKey,
+          ),
         });
         if (!promptValidation.valid) {
-          await deterministicFailure(transaction, run.id, INVALID_CONDITIONAL_PROMPT_FAILURE_CODE);
+          await deterministicFailure(
+            transaction,
+            run.id,
+            INVALID_CONDITIONAL_PROMPT_FAILURE_CODE,
+          );
           return {
             status: "failed",
             runId: run.id,
@@ -528,24 +585,34 @@ export class StoreCategoryTranslationPublicationService {
           } as const;
         }
 
-        const items = await transaction.commerceStoreCategoryTranslationItem.findMany({
-          where: { runId: run.id },
-          orderBy: [{ targetLanguageTag: "asc" }, { sourceEntityKind: "asc" }, { sourceEntityId: "asc" }, { sourceField: "asc" }],
-          select: {
-            id: true,
-            sourceEntityKind: true,
-            sourceEntityId: true,
-            sourceField: true,
-            sourceLanguageTag: true,
-            targetLanguageTag: true,
-            sourceText: true,
-            translatedText: true,
-            status: true,
-          },
-        });
+        const items =
+          await transaction.commerceStoreCategoryTranslationItem.findMany({
+            where: { runId: run.id },
+            orderBy: [
+              { targetLanguageTag: "asc" },
+              { sourceEntityKind: "asc" },
+              { sourceEntityId: "asc" },
+              { sourceField: "asc" },
+            ],
+            select: {
+              id: true,
+              sourceEntityKind: true,
+              sourceEntityId: true,
+              sourceField: true,
+              sourceLanguageTag: true,
+              targetLanguageTag: true,
+              sourceText: true,
+              translatedText: true,
+              status: true,
+            },
+          });
         const payload = buildPublicationPayload({ category, mappings, items });
         if (!payload) {
-          await deterministicFailure(transaction, run.id, INVALID_TRANSLATION_SET_FAILURE_CODE);
+          await deterministicFailure(
+            transaction,
+            run.id,
+            INVALID_TRANSLATION_SET_FAILURE_CODE,
+          );
           return {
             status: "failed",
             runId: run.id,
@@ -558,48 +625,61 @@ export class StoreCategoryTranslationPublicationService {
           where: { categoryId: category.id },
         });
         if (mappings.length > 0) {
-          await transaction.commerceStoreCategoryTaxonomyMappingTranslation.deleteMany({
-            where: { mappingId: { in: mappings.map((mapping) => mapping.id) } },
-          });
+          await transaction.commerceStoreCategoryTaxonomyMappingTranslation.deleteMany(
+            {
+              where: {
+                mappingId: { in: mappings.map((mapping) => mapping.id) },
+              },
+            },
+          );
         }
         await transaction.commercePromptTemplateCategoryTranslation.createMany({
           data: payload.categoryTranslations,
         });
         if (payload.mappingTranslations.length > 0) {
-          await transaction.commerceStoreCategoryTaxonomyMappingTranslation.createMany({
-            data: payload.mappingTranslations,
+          await transaction.commerceStoreCategoryTaxonomyMappingTranslation.createMany(
+            {
+              data: payload.mappingTranslations,
+            },
+          );
+        }
+
+        const categoryUpdated =
+          await transaction.commercePromptTemplateCategory.updateMany({
+            where: {
+              id: category.id,
+              enabled: false,
+              editVersion: category.editVersion,
+            },
+            data: {
+              enabled: true,
+              editVersion: { increment: 1 },
+              updatedByAdminId: run.requestedByAdminId,
+            },
           });
-        }
-
-        const categoryUpdated = await transaction.commercePromptTemplateCategory.updateMany({
-          where: {
-            id: category.id,
-            enabled: false,
-            editVersion: category.editVersion,
-          },
-          data: {
-            enabled: true,
-            editVersion: { increment: 1 },
-            updatedByAdminId: run.requestedByAdminId,
-          },
-        });
         if (categoryUpdated.count !== 1) {
-          throw new Error("Store Category changed during translation publication");
+          throw new Error(
+            "Store Category changed during translation publication",
+          );
         }
 
-        const runUpdated = await transaction.commerceStoreCategoryTranslationRun.updateMany({
-          where: {
-            id: run.id,
-            status: CommerceStoreCategoryTranslationRunStatus.READY_TO_PUBLISH,
-          },
-          data: {
-            status: CommerceStoreCategoryTranslationRunStatus.SUCCEEDED,
-            failureCode: null,
-            completedAt: new Date(),
-          },
-        });
+        const runUpdated =
+          await transaction.commerceStoreCategoryTranslationRun.updateMany({
+            where: {
+              id: run.id,
+              status:
+                CommerceStoreCategoryTranslationRunStatus.READY_TO_PUBLISH,
+            },
+            data: {
+              status: CommerceStoreCategoryTranslationRunStatus.SUCCEEDED,
+              failureCode: null,
+              completedAt: new Date(),
+            },
+          });
         if (runUpdated.count !== 1) {
-          throw new Error("Store Category translation run changed during publication");
+          throw new Error(
+            "Store Category translation run changed during publication",
+          );
         }
 
         await transaction.commerceAuditEvent.create({
@@ -611,8 +691,10 @@ export class StoreCategoryTranslationPublicationService {
             environment: run.environment,
             promptTemplateCategoryId: category.id,
             promptTemplateId: category.defaultTemplate.id,
-            translationModelConfigurationId: run.translationModelConfigurationId,
-            reason: "Store Category enabled after successful translation publication.",
+            translationModelConfigurationId:
+              run.translationModelConfigurationId,
+            reason:
+              "Store Category enabled after successful translation publication.",
             metadata: {
               translationRunId: run.id,
               sourceHash: run.sourceHash,
@@ -657,12 +739,15 @@ export class StoreCategoryTranslationPublicationService {
         durationMs: Date.now() - startedAt,
       });
     } else if (outcome.status === "failed") {
-      logger.error("background.store_category_translation.run_publication_failed", {
-        runId: outcome.runId,
-        categoryId: outcome.categoryId,
-        failureCode: outcome.failureCode,
-        durationMs: Date.now() - startedAt,
-      });
+      logger.error(
+        "background.store_category_translation.run_publication_failed",
+        {
+          runId: outcome.runId,
+          categoryId: outcome.categoryId,
+          failureCode: outcome.failureCode,
+          durationMs: Date.now() - startedAt,
+        },
+      );
     }
 
     return outcome;

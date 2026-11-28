@@ -43,7 +43,8 @@ describe("OpenAI translation provider", () => {
   it("creates a tool-free Batch request and preserves untrusted source text as content", async () => {
     const client = createFakeClient();
     const provider = createOpenAITranslationProvider({
-      client: client as never, model: "gpt-4.1-mini",
+      client: client as never,
+      model: "gpt-4.1-mini",
     });
 
     const prepared = await provider.prepareBatchInput([request]);
@@ -55,7 +56,10 @@ describe("OpenAI translation provider", () => {
     const uploadedJsonl = await upload.file.text();
     const line = JSON.parse(uploadedJsonl) as {
       custom_id: string;
-      body: { tools: unknown[]; input: Array<{ role: string; content: string }> };
+      body: {
+        tools: unknown[];
+        input: Array<{ role: string; content: string }>;
+      };
     };
 
     expect(line.custom_id).toMatch(/^translation-/);
@@ -76,15 +80,41 @@ describe("OpenAI translation provider", () => {
 
   it("uploads mixed keyed and ordinary requests with output schema only on keyed lines", async () => {
     const client = createFakeClient();
-    const provider = createOpenAITranslationProvider({ client: client as never, model: "gpt-4.1-mini" });
-    await provider.prepareBatchInput([request, { ...request, translationId: "keyed-id", providerCustomId: "keyed-correlation",
-      translationFormat: "keyed-segments-v1", sourceText: '{"schemaVersion":1,"segments":[{"key":"body","text":"Synthetic"}]}' }]);
+    const provider = createOpenAITranslationProvider({
+      client: client as never,
+      model: "gpt-4.1-mini",
+    });
+    await provider.prepareBatchInput([
+      request,
+      {
+        ...request,
+        translationId: "keyed-id",
+        providerCustomId: "keyed-correlation",
+        translationFormat: "keyed-segments-v1",
+        sourceText:
+          '{"schemaVersion":1,"segments":[{"key":"body","text":"Synthetic"}]}',
+      },
+    ]);
     const upload = client.files.create.mock.calls[0]?.[0] as { file: Blob };
-    const lines = (await upload.file.text()).trim().split("\n").map((line) => JSON.parse(line));
+    const lines = (await upload.file.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
     expect(lines[0].body).not.toHaveProperty("text");
-    expect(lines[1]).toMatchObject({ custom_id: "keyed-correlation", method: "POST", url: "/v1/responses",
-      body: { model: "gpt-4.1-mini", text: { format: { type: "json_schema", strict: true } } } });
-    expect(Object.keys(lines[1].body.text.format.schema.properties.segments.items.properties)).toEqual(["key", "text"]);
+    expect(lines[1]).toMatchObject({
+      custom_id: "keyed-correlation",
+      method: "POST",
+      url: "/v1/responses",
+      body: {
+        model: "gpt-4.1-mini",
+        text: { format: { type: "json_schema", strict: true } },
+      },
+    });
+    expect(
+      Object.keys(
+        lines[1].body.text.format.schema.properties.segments.items.properties,
+      ),
+    ).toEqual(["key", "text"]);
     expect(client.batches.create).not.toHaveBeenCalled();
   });
   it("accepts generic translation requests without a support-message direction", async () => {
@@ -95,12 +125,14 @@ describe("OpenAI translation provider", () => {
       apiKey: "database-backed-key",
     });
 
-    await provider.prepareBatchInput([{
-      translationId: "store-category-item-1",
-      sourceLanguageTag: "en",
-      targetLanguageTag: "fr",
-      sourceText: "Shoes",
-    }]);
+    await provider.prepareBatchInput([
+      {
+        translationId: "store-category-item-1",
+        sourceLanguageTag: "en",
+        targetLanguageTag: "fr",
+        sourceText: "Shoes",
+      },
+    ]);
 
     const upload = client.files.create.mock.calls[0]?.[0] as { file: Blob };
     const line = JSON.parse((await upload.file.text()).trim()) as {
@@ -130,10 +162,13 @@ describe("OpenAI translation provider", () => {
       request_counts: { total: 57, completed: 41, failed: 0 },
     });
     const provider = createOpenAITranslationProvider({
-      client: client as never, model: "gpt-4.1-mini",
+      client: client as never,
+      model: "gpt-4.1-mini",
     });
 
-    await expect(provider.retrieveBatch("batch-progress")).resolves.toMatchObject({
+    await expect(
+      provider.retrieveBatch("batch-progress"),
+    ).resolves.toMatchObject({
       providerStatus: "in_progress",
       status: "nonterminal",
       requestCounts: { total: 57, completed: 41, failed: 0 },
@@ -145,14 +180,18 @@ describe("OpenAI translation provider", () => {
   });
 
   it("normalizes provider statuses", () => {
-    expect(translationProviderTestInternals.normalizeStatus("in_progress")).toBe(
-      "nonterminal",
-    );
+    expect(
+      translationProviderTestInternals.normalizeStatus("in_progress"),
+    ).toBe("nonterminal");
     expect(translationProviderTestInternals.normalizeStatus("completed")).toBe(
       "completed",
     );
-    expect(translationProviderTestInternals.normalizeStatus("failed")).toBe("failed");
-    expect(translationProviderTestInternals.normalizeStatus("expired")).toBe("expired");
+    expect(translationProviderTestInternals.normalizeStatus("failed")).toBe(
+      "failed",
+    );
+    expect(translationProviderTestInternals.normalizeStatus("expired")).toBe(
+      "expired",
+    );
     expect(translationProviderTestInternals.normalizeStatus("cancelled")).toBe(
       "cancelled",
     );
@@ -177,12 +216,14 @@ describe("OpenAI translation provider", () => {
     ]);
 
     await expect(
-      Promise.resolve(translationProviderTestInternals.parseOutputFile(
-        JSON.stringify({
-          custom_id: "translation-YWJj",
-          response: { status_code: 200, body: {} },
-        }),
-      )),
+      Promise.resolve(
+        translationProviderTestInternals.parseOutputFile(
+          JSON.stringify({
+            custom_id: "translation-YWJj",
+            response: { status_code: 200, body: {} },
+          }),
+        ),
+      ),
     ).resolves.toEqual([
       {
         providerCustomId: customId,
@@ -214,7 +255,8 @@ describe("OpenAI translation provider", () => {
       last_id: null,
     });
     const provider = createOpenAITranslationProvider({
-      client: client as never, model: "gpt-4.1-mini",
+      client: client as never,
+      model: "gpt-4.1-mini",
     });
 
     await expect(
@@ -246,12 +288,16 @@ describe("OpenAI translation provider", () => {
         last_id: null,
       });
     const provider = createOpenAITranslationProvider({
-      client: client as never, model: "gpt-4.1-mini",
+      client: client as never,
+      model: "gpt-4.1-mini",
     });
 
     await expect(
       provider.findBatchByCorrelation({ logicalBatchId: "logical-1" }),
-    ).resolves.toMatchObject({ kind: "match", batch: { providerBatchId: "batch-2" } });
+    ).resolves.toMatchObject({
+      kind: "match",
+      batch: { providerBatchId: "batch-2" },
+    });
     expect(client.batches.list).toHaveBeenLastCalledWith({
       limit: 100,
       after: "cursor-1",
@@ -284,7 +330,9 @@ describe("OpenAI translation provider", () => {
         custom_id: providerCustomId,
         response: {
           status_code: 200,
-          body: { output: [{ content: [{ type: "output_text", text: "Bonjour" }] }] },
+          body: {
+            output: [{ content: [{ type: "output_text", text: "Bonjour" }] }],
+          },
         },
       }),
     );
@@ -303,20 +351,29 @@ describe("OpenAI translation provider", () => {
     [429, "DEFINITE_RETRYABLE_NOT_CREATED"],
     [400, "DEFINITE_TERMINAL_NOT_CREATED"],
     [503, "AMBIGUOUS_CREATE"],
-  ] as const)("classifies OpenAI create status %s as %s", async (status, classification) => {
-    const client = createFakeClient();
-    client.batches.create.mockRejectedValue(
-      Object.assign(new Error(`status ${status}`), { status }),
-    );
-    const provider = createOpenAITranslationProvider({ client: client as never, model: "gpt-4.1-mini" });
+  ] as const)(
+    "classifies OpenAI create status %s as %s",
+    async (status, classification) => {
+      const client = createFakeClient();
+      client.batches.create.mockRejectedValue(
+        Object.assign(new Error(`status ${status}`), { status }),
+      );
+      const provider = createOpenAITranslationProvider({
+        client: client as never,
+        model: "gpt-4.1-mini",
+      });
 
-    await expect(provider.createBatch("logical-1", "file-input")).rejects.toMatchObject({
-      classification,
-    });
-  });
+      await expect(
+        provider.createBatch("logical-1", "file-input"),
+      ).rejects.toMatchObject({
+        classification,
+      });
+    },
+  );
 
   it("uses maxRetries zero for the production OpenAI client", () => {
-    const client = translationProviderTestInternals.createOpenAIClient("test-key");
+    const client =
+      translationProviderTestInternals.createOpenAIClient("test-key");
     expect(client.maxRetries).toBe(0);
   });
 });
@@ -326,12 +383,24 @@ describe("ARCH-043 explicitly injected credentials", () => {
     const original = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "sk-SYNTHETIC-LEGACY-KEY-DO-NOT-USE";
     try {
-      expect(() => createOpenAITranslationProvider({ provider: "openai", model: "historical-model", apiKey: "" }))
-        .toThrow("Translation provider credential is unavailable");
-      expect(() => createOpenAITranslationProvider({ provider: "openai", model: "historical-model" }))
-        .toThrow("Translation provider credential is unavailable");
-      expect(() => createOpenAITranslationProvider({ client: createFakeClient() as never }))
-        .toThrow("Translation model is required");
+      expect(() =>
+        createOpenAITranslationProvider({
+          provider: "openai",
+          model: "historical-model",
+          apiKey: "",
+        }),
+      ).toThrow("Translation provider credential is unavailable");
+      expect(() =>
+        createOpenAITranslationProvider({
+          provider: "openai",
+          model: "historical-model",
+        }),
+      ).toThrow("Translation provider credential is unavailable");
+      expect(() =>
+        createOpenAITranslationProvider({
+          client: createFakeClient() as never,
+        }),
+      ).toThrow("Translation model is required");
     } finally {
       if (original === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = original;

@@ -25,7 +25,11 @@ import { handleMerchantPricingTranslationBatchSubmit } from "./merchant-pricing-
 import { handleMerchantPricingTranslationBatchPoll } from "./merchant-pricing-translation-batch-poll.worker.js";
 import { handleMerchantPricingTranslationBatchResults } from "./merchant-pricing-translation-batch-results.worker.js";
 import { TEMPLATE_TRANSLATION_JOB_NAMES } from "../services/template-translation/jobs.js";
-import { handleTemplateTranslationSubmit, handleTemplateTranslationPoll, handleTemplateTranslationResults } from "./template-translation.worker.js";
+import {
+  handleTemplateTranslationSubmit,
+  handleTemplateTranslationPoll,
+  handleTemplateTranslationResults,
+} from "./template-translation.worker.js";
 
 const logger = createLogger({
   serviceName: "moda-merchant-communications-worker",
@@ -45,67 +49,77 @@ const bullMQTelemetry = createBullMQTelemetry({
 
 export function createMerchantCommunicationsWorker() {
   const worker = new Worker(
-  MERCHANT_COMMUNICATIONS_QUEUE_NAME,
-  async (job: Job) => observeWorkerJob(
+    MERCHANT_COMMUNICATIONS_QUEUE_NAME,
+    async (job: Job) =>
+      observeWorkerJob(
+        {
+          workerName: "merchant-communications",
+          queueName: MERCHANT_COMMUNICATIONS_QUEUE_NAME,
+          jobNames,
+        },
+        job,
+        async () => {
+          switch (job.name) {
+            case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_DISPATCH:
+              return handleTranslationDispatch(job.data);
+            case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_SUBMIT:
+              return handleTranslationBatchSubmit(job.data);
+            case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_POLL:
+              return handleTranslationBatchPoll(job.data);
+            case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_RESULTS:
+              return handleTranslationBatchResults(job.data);
+            case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_RECONCILE:
+              return handleTranslationReconcile(job.data);
+            case STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_SUBMIT:
+              return handleStoreCategoryTranslationBatchSubmit(job.data);
+            case STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_POLL:
+              return handleStoreCategoryTranslationBatchPoll(job.data);
+            case STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_RESULTS:
+              return handleStoreCategoryTranslationBatchResults(job.data);
+            case MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_SUBMIT:
+              return handleMerchantPricingTranslationBatchSubmit(job.data);
+            case MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_POLL:
+              return handleMerchantPricingTranslationBatchPoll(job.data);
+            case MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_RESULTS:
+              return handleMerchantPricingTranslationBatchResults(job.data);
+            case TEMPLATE_TRANSLATION_JOB_NAMES.SUBMIT:
+              return handleTemplateTranslationSubmit(job.data);
+            case TEMPLATE_TRANSLATION_JOB_NAMES.POLL:
+              return handleTemplateTranslationPoll(job.data);
+            case TEMPLATE_TRANSLATION_JOB_NAMES.RESULTS:
+              return handleTemplateTranslationResults(job.data);
+            default:
+              throw new Error(
+                `Unknown merchant communications job: ${job.name}`,
+              );
+          }
+        },
+      ),
     {
-      workerName: "merchant-communications",
-      queueName: MERCHANT_COMMUNICATIONS_QUEUE_NAME,
-      jobNames,
+      connection: connectionRedis,
+      telemetry: bullMQTelemetry,
     },
-    job,
-    async () => {
-      switch (job.name) {
-        case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_DISPATCH:
-          return handleTranslationDispatch(job.data);
-        case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_SUBMIT:
-          return handleTranslationBatchSubmit(job.data);
-        case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_POLL:
-          return handleTranslationBatchPoll(job.data);
-        case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_RESULTS:
-          return handleTranslationBatchResults(job.data);
-        case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_RECONCILE:
-          return handleTranslationReconcile(job.data);
-        case STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_SUBMIT:
-          return handleStoreCategoryTranslationBatchSubmit(job.data);
-        case STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_POLL:
-          return handleStoreCategoryTranslationBatchPoll(job.data);
-        case STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_RESULTS:
-          return handleStoreCategoryTranslationBatchResults(job.data);
-        case MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_SUBMIT:
-          return handleMerchantPricingTranslationBatchSubmit(job.data);
-        case MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_POLL:
-          return handleMerchantPricingTranslationBatchPoll(job.data);
-        case MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_RESULTS:
-          return handleMerchantPricingTranslationBatchResults(job.data);
-        case TEMPLATE_TRANSLATION_JOB_NAMES.SUBMIT:
-          return handleTemplateTranslationSubmit(job.data);
-        case TEMPLATE_TRANSLATION_JOB_NAMES.POLL:
-          return handleTemplateTranslationPoll(job.data);
-        case TEMPLATE_TRANSLATION_JOB_NAMES.RESULTS:
-          return handleTemplateTranslationResults(job.data);
-        default:
-          throw new Error(`Unknown merchant communications job: ${job.name}`);
-      }
-    },
-  ),
-  {
-    connection: connectionRedis,
-    telemetry: bullMQTelemetry,
-  },
-);
-  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "merchantCommunicationsQueueGlobalConcurrency");
+  );
+  bindWorkerConcurrency(
+    worker,
+    backgroundRuntimeConfigService,
+    "merchantCommunicationsQueueGlobalConcurrency",
+  );
 
   worker.on("failed", (job, error) => {
     logger.error("background.merchant_communications.job_failed", {
-      jobId: job?.id ?? null, jobName: job?.name ?? null,
-      error, errorName: error.name.slice(0, 128),
+      jobId: job?.id ?? null,
+      jobName: job?.name ?? null,
+      error,
+      errorName: error.name.slice(0, 128),
       errorMessage: error instanceof Error ? error.message : String(error),
     });
   });
 
   worker.on("error", (error) => {
     logger.error("background.merchant_communications.worker_exception", {
-      error, errorName: error.name.slice(0, 128),
+      error,
+      errorName: error.name.slice(0, 128),
       errorMessage: error instanceof Error ? error.message : String(error),
     });
   });

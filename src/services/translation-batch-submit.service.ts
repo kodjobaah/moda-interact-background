@@ -20,14 +20,18 @@ import {
   backgroundRuntimeConfigService,
   type BackgroundRuntimeConfigSnapshot,
 } from "../runtime/background-runtime-config.js";
-import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
+import {
+  currentTranslationRuntimeConfig,
+  type TranslationRuntimeConfigReader,
+} from "./translation-runtime-config.js";
 import {
   translationSubmissionFailureCode,
   type TranslationSubmitFailureClassification,
 } from "./translation-batch-runtime/failure-policy.js";
 import { submitTranslationProviderBatch } from "./translation-batch-runtime/provider-submission.js";
 
-export type SubmitFailureClassification = TranslationSubmitFailureClassification;
+export type SubmitFailureClassification =
+  TranslationSubmitFailureClassification;
 
 type BatchToSubmit = {
   id: string;
@@ -83,24 +87,32 @@ export class TranslationBatchSubmitService {
   private readonly queue: SubmissionQueue;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
-  constructor(options: {
-    database?: SubmissionDatabase;
-    provider?: TranslationProvider;
-    providerFactory?: ProviderFactory;
-    queue?: SubmissionQueue;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-  } = {}) {
+  constructor(
+    options: {
+      database?: SubmissionDatabase;
+      provider?: TranslationProvider;
+      providerFactory?: ProviderFactory;
+      queue?: SubmissionQueue;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+    } = {},
+  ) {
     this.database = options.database ?? prisma;
     this.provider = options.provider;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) =>
-      createOpenAITranslationProvider(providerOptions));
-    this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
-      connection: connectionRedis,
-    });
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.queue =
+      options.queue ??
+      new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
+        connection: connectionRedis,
+      });
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
-  async submit(input: { translationBatchId: string }): Promise<TranslationBatchSubmitResult> {
+  async submit(input: {
+    translationBatchId: string;
+  }): Promise<TranslationBatchSubmitResult> {
     const claimed = await this.claimReadyBatch(input.translationBatchId);
     if (!claimed) {
       return { status: "skipped", batchId: input.translationBatchId };
@@ -109,11 +121,13 @@ export class TranslationBatchSubmitService {
 
     let provider: TranslationProvider;
     try {
-      provider = this.provider ?? this.providerFactory({
-        provider: claimed.provider,
-        model: claimed.model,
-        apiKey: await readSupportTranslationCredential(claimed.provider),
-      });
+      provider =
+        this.provider ??
+        this.providerFactory({
+          provider: claimed.provider,
+          model: claimed.model,
+          apiKey: await readSupportTranslationCredential(claimed.provider),
+        });
     } catch (error) {
       await this.persistFailure(
         claimed,
@@ -129,9 +143,15 @@ export class TranslationBatchSubmitService {
       inputFileId: claimed.inputFileId,
       provider,
       loadRequests: () => this.loadRequests(claimed.id),
-      persistInputFileId: (inputFileId) => this.persistInputFileId(claimed.id, inputFileId),
+      persistInputFileId: (inputFileId) =>
+        this.persistInputFileId(claimed.id, inputFileId),
       persistSubmitted: ({ providerBatchId, inputFileId }) =>
-        this.persistSubmitted(claimed.id, providerBatchId, inputFileId, runtimeConfig),
+        this.persistSubmitted(
+          claimed.id,
+          providerBatchId,
+          inputFileId,
+          runtimeConfig,
+        ),
     });
 
     if (submission.kind === "failed") {
@@ -141,7 +161,8 @@ export class TranslationBatchSubmitService {
         submission.error,
         runtimeConfig,
       );
-      if (submission.classification === "AMBIGUOUS_CREATE") throw submission.error;
+      if (submission.classification === "AMBIGUOUS_CREATE")
+        throw submission.error;
       return { status: "skipped", batchId: claimed.id };
     }
 
@@ -153,7 +174,9 @@ export class TranslationBatchSubmitService {
     };
   }
 
-  private async claimReadyBatch(batchId: string): Promise<BatchToSubmit | null> {
+  private async claimReadyBatch(
+    batchId: string,
+  ): Promise<BatchToSubmit | null> {
     return this.database.$transaction(async (transaction) => {
       const rows = await transaction.$queryRaw<BatchToSubmit[]>(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
@@ -193,7 +216,10 @@ export class TranslationBatchSubmitService {
     });
   }
 
-  private async persistInputFileId(batchId: string, inputFileId: string): Promise<void> {
+  private async persistInputFileId(
+    batchId: string,
+    inputFileId: string,
+  ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
       const affectedRows = await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
@@ -243,16 +269,21 @@ export class TranslationBatchSubmitService {
     error: unknown,
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<void> {
-    const nextStatus = classification === "AMBIGUOUS_CREATE"
-      ? "SUBMISSION_UNKNOWN"
-      : classification === "DEFINITE_TERMINAL_NOT_CREATED" ||
-          batch.submitAttemptCount >= runtimeConfig.translationSubmitMaxAttempts
-        ? "FAILED"
-        : "READY";
+    const nextStatus =
+      classification === "AMBIGUOUS_CREATE"
+        ? "SUBMISSION_UNKNOWN"
+        : classification === "DEFINITE_TERMINAL_NOT_CREATED" ||
+            batch.submitAttemptCount >=
+              runtimeConfig.translationSubmitMaxAttempts
+          ? "FAILED"
+          : "READY";
     const terminal = nextStatus === "FAILED";
-    const nextSubmitAt = terminal || nextStatus !== "READY"
-      ? null
-      : new Date(Date.now() + runtimeConfig.translationSubmitRetrySeconds * 1000);
+    const nextSubmitAt =
+      terminal || nextStatus !== "READY"
+        ? null
+        : new Date(
+            Date.now() + runtimeConfig.translationSubmitRetrySeconds * 1000,
+          );
     await this.database.$transaction(async (transaction) => {
       await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
@@ -291,4 +322,5 @@ export class TranslationBatchSubmitService {
   }
 }
 
-export const translationBatchSubmitService = new TranslationBatchSubmitService();
+export const translationBatchSubmitService =
+  new TranslationBatchSubmitService();

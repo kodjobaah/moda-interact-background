@@ -57,7 +57,11 @@ function normalizeLanguageTag(value: string | null | undefined): string | null {
 
 export function isStableLanguageSignal(message: string): boolean {
   const value = message.trim();
-  if (!value || /^https?:\/\/\S+$/i.test(value) || /^[\d\s.,!?+\-()/#%]+$/.test(value)) {
+  if (
+    !value ||
+    /^https?:\/\/\S+$/i.test(value) ||
+    /^[\d\s.,!?+\-()/#%]+$/.test(value)
+  ) {
     return false;
   }
 
@@ -80,7 +84,11 @@ export class ConversationLanguageService {
     const explicitLanguageTag = normalizeLanguageTag(input.explicitLanguageTag);
 
     if (explicitLanguageTag) {
-      return this.result(explicitLanguageTag, "customer-explicit", currentLanguageTag);
+      return this.result(
+        explicitLanguageTag,
+        "customer-explicit",
+        currentLanguageTag,
+      );
     }
 
     if (currentLanguageTag) {
@@ -93,8 +101,14 @@ export class ConversationLanguageService {
 
     for (const candidate of [
       { languageTag: input.shopifyLanguageTag, source: "shopify" as const },
-      { languageTag: input.merchantLanguageTag, source: "merchant-default" as const },
-      { languageTag: input.platformLanguageTag, source: "platform-default" as const },
+      {
+        languageTag: input.merchantLanguageTag,
+        source: "merchant-default" as const,
+      },
+      {
+        languageTag: input.platformLanguageTag,
+        source: "platform-default" as const,
+      },
     ]) {
       const languageTag = normalizeLanguageTag(candidate.languageTag);
       if (languageTag) {
@@ -111,7 +125,10 @@ export class ConversationLanguageService {
     const currentLanguageTag = normalizeLanguageTag(input.currentLanguageTag);
     const detectedLanguageTag = normalizeLanguageTag(input.detectedLanguageTag);
 
-    if (!input.recoveryConversation && input.currentLanguageSource === "customer-explicit") {
+    if (
+      !input.recoveryConversation &&
+      input.currentLanguageSource === "customer-explicit"
+    ) {
       return {
         ...this.result(
           currentLanguageTag,

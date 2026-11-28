@@ -31,13 +31,26 @@ import { recoveryPolicyService } from "../recovery-policy.service.js";
 
 export interface WooRecoveryLookupPort {
   findExisting(ref: WooCheckoutRef): Promise<WooLatestRecovery | null>;
-  recordExternalActivity(ref: WooCheckoutRef, recoveryId: string, occurredAt: Date): Promise<void>;
-  closeForResumption(input: { ref: WooCheckoutRef; recovery: WooLatestRecovery; occurredAt: Date;
-    eventId: string; nextGeneration: number }): Promise<boolean>;
+  recordExternalActivity(
+    ref: WooCheckoutRef,
+    recoveryId: string,
+    occurredAt: Date,
+  ): Promise<void>;
+  closeForResumption(input: {
+    ref: WooCheckoutRef;
+    recovery: WooLatestRecovery;
+    occurredAt: Date;
+    eventId: string;
+    nextGeneration: number;
+  }): Promise<boolean>;
 }
 
 export interface WooShopEligibilityPort {
-  evaluate(shopId: string): Promise<{ allowed: true; shopDomain: string } | { allowed: false; reason: string }>;
+  evaluate(
+    shopId: string,
+  ): Promise<
+    { allowed: true; shopDomain: string } | { allowed: false; reason: string }
+  >;
 }
 
 export type WooCheckoutActivityDependencies = Readonly<{
@@ -50,7 +63,12 @@ export type WooCheckoutActivityDependencies = Readonly<{
   resolveDelayMinutes(shopId: string): Promise<number>;
   now?: () => number;
   logOutcome?: (shopId: string, outcome: WooCheckoutActivityOutcome) => void;
-  logFailure?: (fields: { shopId: string; eventHash: string; stage: string; reason: string }) => void;
+  logFailure?: (fields: {
+    shopId: string;
+    eventHash: string;
+    stage: string;
+    reason: string;
+  }) => void;
 }>;
 
 function checkoutDigest(checkout: WooCheckoutCapture["checkout"]): string {
@@ -70,8 +88,11 @@ function classifyWatermark(
   const eventSecond = Math.floor(eventMs / 1_000);
   const watermarkSecond = Math.floor(watermarkMs / 1_000);
   if (watermark.lastEventId === event.eventId) {
-    return watermark.state !== "conflicting" && watermark.lastActivityAt === event.occurredAt &&
-      watermark.checkoutDigest === digest ? "duplicate" : "conflict";
+    return watermark.state !== "conflicting" &&
+      watermark.lastActivityAt === event.occurredAt &&
+      watermark.checkoutDigest === digest
+      ? "duplicate"
+      : "conflict";
   }
   if (eventSecond < watermarkSecond) return "stale";
   if (eventSecond === watermarkSecond) {
@@ -83,7 +104,8 @@ function classifyWatermark(
 /** Events with omitted/over-limit items must not reuse an older complete basket. */
 function basketFrom(event: WooCheckoutCapture): WooBasketEvidence {
   const items = event.checkout.items;
-  if (!items || items.length > 50) return { kind: "unknown", reason: "items-omitted" };
+  if (!items || items.length > 50)
+    return { kind: "unknown", reason: "items-omitted" };
   if (items.length === 0) return { kind: "empty" };
   const [first, ...rest] = items;
   if (!first) return { kind: "unknown", reason: "incomplete-snapshot" };
@@ -93,18 +115,25 @@ function basketFrom(event: WooCheckoutCapture): WooBasketEvidence {
   };
 }
 
-function candidateWatermark(candidate: WooPendingCandidate): WooActivityWatermark {
-  if (!Number.isSafeInteger(candidate.generation) || (candidate.generation ?? 0) < 1) {
+function candidateWatermark(
+  candidate: WooPendingCandidate,
+): WooActivityWatermark {
+  if (
+    !Number.isSafeInteger(candidate.generation) ||
+    (candidate.generation ?? 0) < 1
+  ) {
     throw new Error("Invalid Woo candidate generation");
   }
   return {
     generation: candidate.generation!,
     lastEventId: candidate.lastEventId,
     lastActivityAt: candidate.lastActivityAt,
-    checkoutDigest: candidate.basket.kind === "nonempty"
-      ? checkoutDigest(candidate.basket.checkout)
-      : "0".repeat(64),
-    state: candidate.basket.kind === "nonempty" ? "nonempty" : candidate.basket.kind,
+    checkoutDigest:
+      candidate.basket.kind === "nonempty"
+        ? checkoutDigest(candidate.basket.checkout)
+        : "0".repeat(64),
+    state:
+      candidate.basket.kind === "nonempty" ? "nonempty" : candidate.basket.kind,
   };
 }
 
@@ -117,20 +146,31 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
     this.now = deps.now ?? Date.now;
   }
 
-  async handleCheckout(event: WooCheckoutCapture): Promise<WooCheckoutActivityOutcome> {
+  async handleCheckout(
+    event: WooCheckoutCapture,
+  ): Promise<WooCheckoutActivityOutcome> {
     // Only the authenticated Background capture projection supplies shopId.
     // This service never resolves a tenant from checkoutKey, contact or domain.
-    const ref: WooCheckoutRef = { shopId: event.shopId, checkoutToken: event.checkoutKey };
+    const ref: WooCheckoutRef = {
+      shopId: event.shopId,
+      checkoutToken: event.checkoutKey,
+    };
     try {
-      const result = await this.deps.coordinator.withCheckoutLock(ref, () => this.evaluate(ref, event));
+      const result = await this.deps.coordinator.withCheckoutLock(ref, () =>
+        this.evaluate(ref, event),
+      );
       this.deps.logOutcome?.(ref.shopId, result);
       return result;
     } catch (error) {
       this.deps.logFailure?.({
         shopId: ref.shopId,
-        eventHash: createHash("sha256").update(event.eventId).digest("hex").slice(0, 16),
+        eventHash: createHash("sha256")
+          .update(event.eventId)
+          .digest("hex")
+          .slice(0, 16),
         stage: "checkout_activity",
-        reason: error instanceof Error ? error.name.slice(0, 48) : "unknown_error",
+        reason:
+          error instanceof Error ? error.name.slice(0, 48) : "unknown_error",
       });
       throw error;
     }
@@ -141,7 +181,8 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
     event: WooCheckoutCapture,
   ): Promise<WooCheckoutActivityOutcome> {
     const occurredMs = Date.parse(event.occurredAt);
-    if (!Number.isFinite(occurredMs)) throw new Error("Invalid authenticated Woo event timestamp");
+    if (!Number.isFinite(occurredMs))
+      throw new Error("Invalid authenticated Woo event timestamp");
     const incomingDigest = checkoutDigest(event.checkout);
     // Keep this pre-close watermark separately. A successor-generation
     // watermark may be ignored by candidate reconciliation below, but it must
@@ -153,73 +194,142 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
     // durable event boundary; Redis is only a repairable candidate cache.
     const existing = await this.deps.recoveries.findExisting(ref);
     let generation = 1;
-    let resumed: { previousRecoveryId: string; nextGeneration: number } | null = null;
+    let resumed: { previousRecoveryId: string; nextGeneration: number } | null =
+      null;
     let exactResumptionReplay = false;
     if (existing) {
-      if (existing.status === "DETECTED" && existing.admissionEventId === event.eventId) {
-        return { kind: "repair-existing-initial", recoveryId: existing.id, generation: existing.generation };
+      if (
+        existing.status === "DETECTED" &&
+        existing.admissionEventId === event.eventId
+      ) {
+        return {
+          kind: "repair-existing-initial",
+          recoveryId: existing.id,
+          generation: existing.generation,
+        };
       }
       if (existing.resumption) {
         generation = existing.resumption.nextGeneration;
         if (existing.resumption.eventId === event.eventId) {
-          resumed = { previousRecoveryId: existing.id, nextGeneration: generation };
+          resumed = {
+            previousRecoveryId: existing.id,
+            nextGeneration: generation,
+          };
           exactResumptionReplay = true;
         }
       }
-      if (!exactResumptionReplay && ["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
+      if (
+        !exactResumptionReplay &&
+        ["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)
+      ) {
         if (boundaryWatermark) {
-          const ordering = classifyWatermark(boundaryWatermark, event, incomingDigest);
-          if (ordering === "stale") return { kind: "ignored-stale", reason: "older_than_activity_watermark" };
-          if (ordering === "duplicate") return { kind: "ignored-stale", reason: "duplicate_event" };
+          const ordering = classifyWatermark(
+            boundaryWatermark,
+            event,
+            incomingDigest,
+          );
+          if (ordering === "stale")
+            return {
+              kind: "ignored-stale",
+              reason: "older_than_activity_watermark",
+            };
+          if (ordering === "duplicate")
+            return { kind: "ignored-stale", reason: "duplicate_event" };
           if (ordering === "conflict") {
-            await this.deps.candidates.cancelPending(ref, existing.generation + 1);
-            return { kind: "deferred-ambiguous", reason: "activity_watermark_conflict" };
+            await this.deps.candidates.cancelPending(
+              ref,
+              existing.generation + 1,
+            );
+            return {
+              kind: "deferred-ambiguous",
+              reason: "activity_watermark_conflict",
+            };
           }
           if (boundaryWatermark.generation !== existing.generation) {
-            return { kind: "deferred-ambiguous", reason: "activity_watermark_generation_mismatch" };
+            return {
+              kind: "deferred-ambiguous",
+              reason: "activity_watermark_generation_mismatch",
+            };
           }
         }
       }
       if (exactResumptionReplay && boundaryWatermark) {
-        const ordering = classifyWatermark(boundaryWatermark, event, incomingDigest);
+        const ordering = classifyWatermark(
+          boundaryWatermark,
+          event,
+          incomingDigest,
+        );
         if (ordering === "stale") {
           // A later successor update is already durable in Redis. The replay is
           // acknowledged for old-generation cleanup but must not rewrite it.
-          return { kind: "resumed", previousRecoveryId: existing.id,
-            nextGeneration: generation, candidateOutcome: "rescheduled" };
+          return {
+            kind: "resumed",
+            previousRecoveryId: existing.id,
+            nextGeneration: generation,
+            candidateOutcome: "rescheduled",
+          };
         }
         if (ordering === "conflict") {
-          return { kind: "resumed", previousRecoveryId: existing.id,
-            nextGeneration: generation, candidateOutcome: "deferred-ambiguous" };
+          return {
+            kind: "resumed",
+            previousRecoveryId: existing.id,
+            nextGeneration: generation,
+            candidateOutcome: "deferred-ambiguous",
+          };
         }
       }
       if (!exactResumptionReplay) {
         const durableMs = existing.lastExternalActivityAt.getTime();
         const incomingSecond = Math.floor(occurredMs / 1_000);
         const durableSecond = Math.floor(durableMs / 1_000);
-        if (incomingSecond < durableSecond) return { kind: "ignored-stale", reason: "older_than_durable_recovery" };
+        if (incomingSecond < durableSecond)
+          return {
+            kind: "ignored-stale",
+            reason: "older_than_durable_recovery",
+          };
         if (incomingSecond === durableSecond) {
-          await this.deps.candidates.cancelPending(ref, existing.resumption?.nextGeneration ?? existing.generation + 1);
-          if (resumed) return { kind: "resumed", ...resumed, candidateOutcome: "deferred-ambiguous" };
-          return { kind: "deferred-ambiguous", reason: "same_time_recovery_boundary" };
+          await this.deps.candidates.cancelPending(
+            ref,
+            existing.resumption?.nextGeneration ?? existing.generation + 1,
+          );
+          if (resumed)
+            return {
+              kind: "resumed",
+              ...resumed,
+              candidateOutcome: "deferred-ambiguous",
+            };
+          return {
+            kind: "deferred-ambiguous",
+            reason: "same_time_recovery_boundary",
+          };
         }
         if (["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
           generation = existing.generation + 1;
           const closed = await this.deps.recoveries.closeForResumption({
-            ref, recovery: existing, occurredAt: new Date(occurredMs), eventId: event.eventId,
+            ref,
+            recovery: existing,
+            occurredAt: new Date(occurredMs),
+            eventId: event.eventId,
             nextGeneration: generation,
           });
           // A failed CAS means another writer won. Retry the captured event so
           // it is re-read against the committed durable state.
-          if (!closed) throw new Error("Woo recovery resumption compare-and-set lost");
-          resumed = { previousRecoveryId: existing.id, nextGeneration: generation };
+          if (!closed)
+            throw new Error("Woo recovery resumption compare-and-set lost");
+          resumed = {
+            previousRecoveryId: existing.id,
+            nextGeneration: generation,
+          };
         } else if (existing.status === "CANCELLED" && existing.resumption) {
           generation = existing.resumption.nextGeneration;
         } else if (existing.status === "EXPIRED") {
           generation = existing.generation + 1;
         } else {
           await this.deps.candidates.cancelPending(ref, existing.generation);
-          return { kind: "ignored-terminal", reason: existing.status.toLowerCase() };
+          return {
+            kind: "ignored-terminal",
+            reason: existing.status.toLowerCase(),
+          };
         }
       }
     }
@@ -250,7 +360,10 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
     const retentionMs = wooCandidateRetentionMs(dueAtMs, now);
     if (retentionMs === null || occurredMs > now + 5 * 60_000) {
       await this.deps.candidates.cancelPending(ref, generation);
-      return { kind: "deferred-ambiguous", reason: "timestamp_outside_safe_horizon" };
+      return {
+        kind: "deferred-ambiguous",
+        reason: "timestamp_outside_safe_horizon",
+      };
     }
 
     let watermark = boundaryWatermark;
@@ -258,40 +371,83 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
     const pending = await this.deps.candidates.getPending(ref, generation);
     if (pending) {
       const pendingAt = Date.parse(pending.lastActivityAt);
-      if (!Number.isFinite(pendingAt)) throw new Error("Invalid Woo candidate timestamp");
+      if (!Number.isFinite(pendingAt))
+        throw new Error("Invalid Woo candidate timestamp");
       if (exactResumptionReplay) {
         const pendingSecond = Math.floor(pendingAt / 1_000);
         const replaySecond = Math.floor(occurredMs / 1_000);
         if (pendingSecond > replaySecond) {
-          return { kind: "resumed", previousRecoveryId: resumed!.previousRecoveryId,
-            nextGeneration: generation, candidateOutcome: "rescheduled" };
+          return {
+            kind: "resumed",
+            previousRecoveryId: resumed!.previousRecoveryId,
+            nextGeneration: generation,
+            candidateOutcome: "rescheduled",
+          };
         }
-        if (pendingSecond === replaySecond && !(pending.lastEventId === event.eventId &&
-          pending.lastActivityAt === event.occurredAt && pending.basket.kind === "nonempty" &&
-          checkoutDigest(pending.basket.checkout) === incomingDigest)) {
-          return { kind: "resumed", previousRecoveryId: resumed!.previousRecoveryId,
-            nextGeneration: generation, candidateOutcome: "deferred-ambiguous" };
+        if (
+          pendingSecond === replaySecond &&
+          !(
+            pending.lastEventId === event.eventId &&
+            pending.lastActivityAt === event.occurredAt &&
+            pending.basket.kind === "nonempty" &&
+            checkoutDigest(pending.basket.checkout) === incomingDigest
+          )
+        ) {
+          return {
+            kind: "resumed",
+            previousRecoveryId: resumed!.previousRecoveryId,
+            nextGeneration: generation,
+            candidateOutcome: "deferred-ambiguous",
+          };
         }
-        if (pending.lastEventId === event.eventId && pending.basket.kind === "nonempty" &&
-          checkoutDigest(pending.basket.checkout) !== incomingDigest) {
-          return { kind: "resumed", previousRecoveryId: resumed!.previousRecoveryId,
-            nextGeneration: generation, candidateOutcome: "deferred-ambiguous" };
+        if (
+          pending.lastEventId === event.eventId &&
+          pending.basket.kind === "nonempty" &&
+          checkoutDigest(pending.basket.checkout) !== incomingDigest
+        ) {
+          return {
+            kind: "resumed",
+            previousRecoveryId: resumed!.previousRecoveryId,
+            nextGeneration: generation,
+            candidateOutcome: "deferred-ambiguous",
+          };
         }
       }
       // The queue update may have succeeded while the index or watermark
       // failed. A replay of that very event must repair BOTH, not just mark
       // it a duplicate and strand an unindexed maturity job.
-      if ((exactResumptionReplay || !watermark || pendingAt > Date.parse(watermark.lastActivityAt)) &&
-        pendingAt === occurredMs && pending.lastEventId === event.eventId &&
+      if (
+        (exactResumptionReplay ||
+          !watermark ||
+          pendingAt > Date.parse(watermark.lastActivityAt)) &&
+        pendingAt === occurredMs &&
+        pending.lastEventId === event.eventId &&
         pending.basket.kind === "nonempty" &&
-        checkoutDigest(pending.basket.checkout) === incomingDigest) {
+        checkoutDigest(pending.basket.checkout) === incomingDigest
+      ) {
         const outcome = await this.deps.candidates.schedulePending({
-          candidate: pending, delayMinutes, dueAtMs, retentionMs,
+          candidate: pending,
+          delayMinutes,
+          dueAtMs,
+          retentionMs,
         });
-        await this.deps.watermarks.write(ref, candidateWatermark(pending), retentionMs);
+        await this.deps.watermarks.write(
+          ref,
+          candidateWatermark(pending),
+          retentionMs,
+        );
         return resumed
-          ? { kind: "resumed", ...resumed, candidateOutcome: outcome, dueAt: new Date(dueAtMs).toISOString() }
-          : { kind: outcome, dueAt: new Date(dueAtMs).toISOString(), generation };
+          ? {
+              kind: "resumed",
+              ...resumed,
+              candidateOutcome: outcome,
+              dueAt: new Date(dueAtMs).toISOString(),
+            }
+          : {
+              kind: outcome,
+              dueAt: new Date(dueAtMs).toISOString(),
+              generation,
+            };
       }
       if (!watermark || pendingAt > Date.parse(watermark.lastActivityAt)) {
         watermark = candidateWatermark(pending);
@@ -305,44 +461,73 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
       // Different versions in the same source second must be quarantined.
       const incomingSecond = Math.floor(occurredMs / 1_000);
       const acceptedSecond = Math.floor(acceptedMs / 1_000);
-      if (incomingSecond < acceptedSecond) return { kind: "ignored-stale", reason: "older_event" };
+      if (incomingSecond < acceptedSecond)
+        return { kind: "ignored-stale", reason: "older_event" };
       if (incomingSecond === acceptedSecond) {
         if (watermark.state === "conflicting") {
-          if (resumed) return { kind: "resumed", ...resumed, candidateOutcome: "deferred-ambiguous" };
+          if (resumed)
+            return {
+              kind: "resumed",
+              ...resumed,
+              candidateOutcome: "deferred-ambiguous",
+            };
           return { kind: "deferred-ambiguous", reason: "same_time_conflict" };
         }
-        if (watermark.lastEventId === event.eventId &&
+        if (
+          watermark.lastEventId === event.eventId &&
           watermark.lastActivityAt === event.occurredAt &&
-          watermark.checkoutDigest === incomingDigest) {
-          if (resumed) return { kind: "resumed", ...resumed, candidateOutcome: "scheduled" };
+          watermark.checkoutDigest === incomingDigest
+        ) {
+          if (resumed)
+            return {
+              kind: "resumed",
+              ...resumed,
+              candidateOutcome: "scheduled",
+            };
           return { kind: "ignored-stale", reason: "duplicate_event" };
         }
         // Source timestamps do not order two distinct same-time versions.
         // Invalidate the send-eligible candidate and keep the ambiguity marker.
         await this.deps.candidates.cancelPending(ref, generation);
-        await this.deps.watermarks.write(ref, {
-          generation,
-          lastEventId: event.eventId,
-          lastActivityAt: event.occurredAt,
-          checkoutDigest: incomingDigest,
-          state: "conflicting",
-        }, retentionMs);
+        await this.deps.watermarks.write(
+          ref,
+          {
+            generation,
+            lastEventId: event.eventId,
+            lastActivityAt: event.occurredAt,
+            checkoutDigest: incomingDigest,
+            state: "conflicting",
+          },
+          retentionMs,
+        );
         return resumed
-          ? { kind: "resumed", ...resumed, candidateOutcome: "deferred-ambiguous" }
+          ? {
+              kind: "resumed",
+              ...resumed,
+              candidateOutcome: "deferred-ambiguous",
+            }
           : { kind: "deferred-ambiguous", reason: "same_time_conflict" };
       }
       if (watermark.lastEventId === event.eventId) {
         // An eventId must not represent two distinct source revisions.
         await this.deps.candidates.cancelPending(ref, generation);
-        await this.deps.watermarks.write(ref, {
-          generation,
-          lastEventId: event.eventId,
-          lastActivityAt: event.occurredAt,
-          checkoutDigest: incomingDigest,
-          state: "conflicting",
-        }, retentionMs);
+        await this.deps.watermarks.write(
+          ref,
+          {
+            generation,
+            lastEventId: event.eventId,
+            lastActivityAt: event.occurredAt,
+            checkoutDigest: incomingDigest,
+            state: "conflicting",
+          },
+          retentionMs,
+        );
         return resumed
-          ? { kind: "resumed", ...resumed, candidateOutcome: "deferred-ambiguous" }
+          ? {
+              kind: "resumed",
+              ...resumed,
+              candidateOutcome: "deferred-ambiguous",
+            }
           : { kind: "deferred-ambiguous", reason: "event_id_reused" };
       }
     }
@@ -352,15 +537,24 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
       // An empty or unknown *later* snapshot invalidates an older candidate.
       // Unknown is never proof of empty and never an admissible basket.
       await this.deps.candidates.cancelPending(ref, generation);
-      await this.deps.watermarks.write(ref, {
-        generation,
-        lastEventId: event.eventId,
-        lastActivityAt: event.occurredAt,
-        checkoutDigest: incomingDigest,
-        state: basket.kind,
-      }, retentionMs);
-      if (resumed) return { kind: "resumed", ...resumed,
-        candidateOutcome: basket.kind === "empty" ? "cancelled-empty" : "deferred-ambiguous" };
+      await this.deps.watermarks.write(
+        ref,
+        {
+          generation,
+          lastEventId: event.eventId,
+          lastActivityAt: event.occurredAt,
+          checkoutDigest: incomingDigest,
+          state: basket.kind,
+        },
+        retentionMs,
+      );
+      if (resumed)
+        return {
+          kind: "resumed",
+          ...resumed,
+          candidateOutcome:
+            basket.kind === "empty" ? "cancelled-empty" : "deferred-ambiguous",
+        };
       return basket.kind === "empty"
         ? { kind: "cancelled-empty", reason: "explicit_empty_basket" }
         : { kind: "deferred-ambiguous", reason: basket.reason };
@@ -376,19 +570,31 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
       basket,
     };
     const outcome = await this.deps.candidates.schedulePending({
-      candidate, delayMinutes, dueAtMs, retentionMs,
+      candidate,
+      delayMinutes,
+      dueAtMs,
+      retentionMs,
     });
     // Publish the watermark last: a failed queue/index write can be retried
     // without accidentally treating an unenqueued candidate as a duplicate.
-    await this.deps.watermarks.write(ref, {
-      generation,
-      lastEventId: event.eventId,
-      lastActivityAt: event.occurredAt,
-      checkoutDigest: incomingDigest,
-      state: "nonempty",
-    }, retentionMs);
+    await this.deps.watermarks.write(
+      ref,
+      {
+        generation,
+        lastEventId: event.eventId,
+        lastActivityAt: event.occurredAt,
+        checkoutDigest: incomingDigest,
+        state: "nonempty",
+      },
+      retentionMs,
+    );
     return resumed
-      ? { kind: "resumed", ...resumed, candidateOutcome: outcome, dueAt: new Date(dueAtMs).toISOString() }
+      ? {
+          kind: "resumed",
+          ...resumed,
+          candidateOutcome: outcome,
+          dueAt: new Date(dueAtMs).toISOString(),
+        }
       : { kind: outcome, dueAt: new Date(dueAtMs).toISOString(), generation };
   }
 }
@@ -412,12 +618,14 @@ export function createWooCheckoutActivityService(input: {
     shops: new WooShopEligibilityRepository(),
     resolveDelayMinutes: async (shopId) =>
       (await recoveryPolicyService.resolve(shopId)).recoveryDelayMinutes,
-    logOutcome: (shopId, outcome) => logger.info("woocommerce.checkout_activity.evaluated", {
-      shopId,
-      outcome: outcome.kind,
-      // The payload, checkout key, recipient and source URL are intentionally omitted.
-      ...("reason" in outcome ? { reason: outcome.reason } : {}),
-    }),
-    logFailure: (fields) => logger.error("woocommerce.checkout_activity.failed", fields),
+    logOutcome: (shopId, outcome) =>
+      logger.info("woocommerce.checkout_activity.evaluated", {
+        shopId,
+        outcome: outcome.kind,
+        // The payload, checkout key, recipient and source URL are intentionally omitted.
+        ...("reason" in outcome ? { reason: outcome.reason } : {}),
+      }),
+    logFailure: (fields) =>
+      logger.error("woocommerce.checkout_activity.failed", fields),
   });
 }

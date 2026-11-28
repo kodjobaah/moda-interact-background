@@ -1,17 +1,25 @@
 import type { InitialOutreachEvaluationResult } from "@modainteract/moda-interact-shared/commerce/outreach";
 /** ARCH-047 BG001: a local, read-only preparation boundary (not a send permit). */
 export type RecoveryStage = "INITIAL" | "FOLLOW_UP";
-export type VerifiedOfferPresentation = "NO_OFFER" | "CODE_OFFER" | "AUTOMATIC_OFFER";
+export type VerifiedOfferPresentation =
+  "NO_OFFER" | "CODE_OFFER" | "AUTOMATIC_OFFER";
 export type RecoveryPromotionTarget = "CHECKOUT" | "ALTERNATIVE_PRODUCT";
 export type RecoveryTemplatePurpose =
-  | "INITIAL_NO_OFFER" | "INITIAL_CODE_OFFER" | "INITIAL_AUTOMATIC_OFFER"
-  | "FOLLOW_UP_NO_OFFER" | "FOLLOW_UP_CODE_OFFER" | "FOLLOW_UP_AUTOMATIC_OFFER";
+  | "INITIAL_NO_OFFER"
+  | "INITIAL_CODE_OFFER"
+  | "INITIAL_AUTOMATIC_OFFER"
+  | "FOLLOW_UP_NO_OFFER"
+  | "FOLLOW_UP_CODE_OFFER"
+  | "FOLLOW_UP_AUTOMATIC_OFFER";
 
-export type SelectionSource = "exact" | "base" | "merchant-fallback" | "platform-fallback";
+export type SelectionSource =
+  "exact" | "base" | "merchant-fallback" | "platform-fallback";
 export type BrandMediaRole = "LOGO" | "SQUARE_LOGO" | "COVER_IMAGE";
-export type RecoveryTemplateHeaderMediaRole = BrandMediaRole | "CHECKOUT_PRODUCT";
+export type RecoveryTemplateHeaderMediaRole =
+  BrandMediaRole | "CHECKOUT_PRODUCT";
 /** For isolated tests use a fixed list; production resolves the active platform policy per preparation. */
-export type MediaApprovedHosts = readonly string[] | (() => Promise<readonly string[]>);
+export type MediaApprovedHosts =
+  readonly string[] | (() => Promise<readonly string[]>);
 
 /** A separate asset-owning architecture must implement this port. No original URLs. */
 export type ReadyBrandMedia = Readonly<{
@@ -21,8 +29,10 @@ export type ReadyBrandMedia = Readonly<{
   kind: "R2_DERIVATIVE";
   httpsUrl: string;
 }>;
-export type BrandMediaResolver = (shopId: string, role: BrandMediaRole) =>
-  Promise<ReadyBrandMedia | null>;
+export type BrandMediaResolver = (
+  shopId: string,
+  role: BrandMediaRole,
+) => Promise<ReadyBrandMedia | null>;
 
 export type TrustedCheckout = Readonly<{
   shopId: string;
@@ -70,7 +80,10 @@ export type RecoveryTemplateSelection =
 export type RecoveryTemplatePreparationInput = Readonly<{
   selection?: RecoveryTemplateSelection;
   shopId: string;
-  outreachEvaluation?: Extract<InitialOutreachEvaluationResult, { kind: "ready" }>;
+  outreachEvaluation?: Extract<
+    InitialOutreachEvaluationResult,
+    { kind: "ready" }
+  >;
   /** Must equal the currently configured sender WABA resolved again by this module. */
   senderWabaId: string;
   stage: RecoveryStage;
@@ -87,17 +100,35 @@ export type RecoveryTemplatePreparationInput = Readonly<{
   verifiedOffer?: TrustedOffer | null;
   promotionalProduct?: SourceBoundPromotionalProduct | null;
   /** Trusted current attempt and selected product identity for optional CHECKOUT_PRODUCT IMAGE. */
-  productImage?: import("../../services/recovery-product-media/recovery-product-image-resolver.js").OutreachProductImageRequest | null;
+  productImage?:
+    | import("../../services/recovery-product-media/recovery-product-image-resolver.js").OutreachProductImageRequest
+    | null;
 }>;
 
 export type TemplateUnavailableReason =
-  | "OUTSIDE_CHECKOUT" | "MESSAGE_TOO_LARGE" | "INVALID_REQUEST" | "INVALID_LANGUAGE" | "SHOP_UNAVAILABLE" | "SENDER_UNAVAILABLE"
-  | "SENDER_MISMATCH" | "NO_LANGUAGE" | "NO_APPROVED_ASSIGNMENT"
-  | "LEGACY_ASSIGNMENT" | "AMBIGUOUS_ASSIGNMENT" | "REGISTRATION_UNAVAILABLE"
-  | "PROVIDER_UNAVAILABLE" | "PROVIDER_DRIFT" | "IDENTITY_MISMATCH"
-  | "DEFINITION_UNAVAILABLE" | "LOCALE_UNAVAILABLE" | "BINDINGS_INVALID"
-  | "BINDING_FINGERPRINT_MISMATCH" | "BINDING_VALUE_UNAVAILABLE"
-  | "CHECKOUT_UNAVAILABLE" | "CHECKOUT_UNTRUSTED" | "MEDIA_NOT_READY"
+  | "OUTSIDE_CHECKOUT"
+  | "MESSAGE_TOO_LARGE"
+  | "INVALID_REQUEST"
+  | "INVALID_LANGUAGE"
+  | "SHOP_UNAVAILABLE"
+  | "SENDER_UNAVAILABLE"
+  | "SENDER_MISMATCH"
+  | "NO_LANGUAGE"
+  | "NO_APPROVED_ASSIGNMENT"
+  | "LEGACY_ASSIGNMENT"
+  | "AMBIGUOUS_ASSIGNMENT"
+  | "REGISTRATION_UNAVAILABLE"
+  | "PROVIDER_UNAVAILABLE"
+  | "PROVIDER_DRIFT"
+  | "IDENTITY_MISMATCH"
+  | "DEFINITION_UNAVAILABLE"
+  | "LOCALE_UNAVAILABLE"
+  | "BINDINGS_INVALID"
+  | "BINDING_FINGERPRINT_MISMATCH"
+  | "BINDING_VALUE_UNAVAILABLE"
+  | "CHECKOUT_UNAVAILABLE"
+  | "CHECKOUT_UNTRUSTED"
+  | "MEDIA_NOT_READY"
   | "PROMOTION_PRODUCT_URL_UNAVAILABLE";
 
 export type TemplateUnavailable = Readonly<{
@@ -107,12 +138,21 @@ export type TemplateUnavailable = Readonly<{
 }>;
 
 export type TextParameter = Readonly<{ type: "text"; text: string }>;
-export type ImageParameter = Readonly<{ type: "image"; image: Readonly<{ link: string }> }>;
+export type ImageParameter = Readonly<{
+  type: "image";
+  image: Readonly<{ link: string }>;
+}>;
 export type PreparedMetaComponent =
-  | Readonly<{ type: "header"; parameters: readonly (TextParameter | ImageParameter)[] }>
+  | Readonly<{
+      type: "header";
+      parameters: readonly (TextParameter | ImageParameter)[];
+    }>
   | Readonly<{ type: "body"; parameters: readonly TextParameter[] }>
   | Readonly<{
-      type: "button"; sub_type: "url"; index: string; parameters: readonly [TextParameter];
+      type: "button";
+      sub_type: "url";
+      index: string;
+      parameters: readonly [TextParameter];
     }>;
 
 export type PreparedRecoveryTemplate = Readonly<{
@@ -217,8 +257,14 @@ export type ShopBrandRow = Readonly<{
 }>;
 
 export interface RecoveryTemplateRepository {
-  readCatalogue(input: { shopId: string; senderWabaId: string; purpose: RecoveryTemplatePurpose }):
-    Promise<{ shop: ShopSelectionRow | null; variants: readonly AssignedVariantRow[] }>;
+  readCatalogue(input: {
+    shopId: string;
+    senderWabaId: string;
+    purpose: RecoveryTemplatePurpose;
+  }): Promise<{
+    shop: ShopSelectionRow | null;
+    variants: readonly AssignedVariantRow[];
+  }>;
   readShopBrand(shopId: string): Promise<ShopBrandRow | null>;
   /** Resolve only the sending shop's ACTIVE taxonomy-backed Moda category.
    * A non-English language needs an approved/published category translation.

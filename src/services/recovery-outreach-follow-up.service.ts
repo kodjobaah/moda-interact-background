@@ -1,16 +1,26 @@
 import { Queue } from "bullmq";
-import { RECOVERY_OUTREACH_FOLLOW_UP_JOB, RECOVERY_OUTREACH_FOLLOW_UP_QUEUE, createRecoveryOutreachFollowUpJobId, type RecoveryOutreachFollowUpJob } from "../domain/recovery-outreach-follow-up.js";
+import {
+  RECOVERY_OUTREACH_FOLLOW_UP_JOB,
+  RECOVERY_OUTREACH_FOLLOW_UP_QUEUE,
+  createRecoveryOutreachFollowUpJobId,
+  type RecoveryOutreachFollowUpJob,
+} from "../domain/recovery-outreach-follow-up.js";
 import { connectionRedis } from "../lib/redis.js";
 
 let queue: Queue<RecoveryOutreachFollowUpJob> | null = null;
 
 function getQueue() {
-  queue ??= new Queue(RECOVERY_OUTREACH_FOLLOW_UP_QUEUE, { connection: connectionRedis });
+  queue ??= new Queue(RECOVERY_OUTREACH_FOLLOW_UP_QUEUE, {
+    connection: connectionRedis,
+  });
   return queue;
 }
 
 export const recoveryOutreachFollowUpService = {
-  async schedule(input: RecoveryOutreachFollowUpJob, dueAt: Date): Promise<string> {
+  async schedule(
+    input: RecoveryOutreachFollowUpJob,
+    dueAt: Date,
+  ): Promise<string> {
     const jobId = createRecoveryOutreachFollowUpJobId(input, dueAt);
     await getQueue().add(RECOVERY_OUTREACH_FOLLOW_UP_JOB, input, {
       jobId,

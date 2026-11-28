@@ -85,11 +85,17 @@ async function closePaidIncludedCreditCounter(
     _sum: { quantity: true },
   });
   const reservedQuantity = Number(reservations._sum.quantity ?? 0);
-  const forfeitableAfterRelease = counter.grantedQuantity
-    - counter.committedQuantity
-    - counter.forfeitedQuantity;
-  if (forfeitableAfterRelease < 0 || reservedQuantity !== counter.reservedQuantity) {
-    throw new Error("Paid billing period included-credit counter is inconsistent");
+  const forfeitableAfterRelease =
+    counter.grantedQuantity -
+    counter.committedQuantity -
+    counter.forfeitedQuantity;
+  if (
+    forfeitableAfterRelease < 0 ||
+    reservedQuantity !== counter.reservedQuantity
+  ) {
+    throw new Error(
+      "Paid billing period included-credit counter is inconsistent",
+    );
   }
 
   await transaction.usageReservation.updateMany({
@@ -118,15 +124,23 @@ async function closePaidIncludedCreditCounter(
     },
   });
   if (updated.count !== 1) {
-    throw new Error("Paid billing period included-credit counter changed during close");
+    throw new Error(
+      "Paid billing period included-credit counter changed during close",
+    );
   }
 
-  const closedCounter = await transaction.billingPeriodEntitlementCounter.findUnique({
-    where: { id: counter.id },
-  });
-  if (!closedCounter
-    || closedCounter.reservedQuantity !== 0
-    || closedCounter.committedQuantity + closedCounter.forfeitedQuantity !== closedCounter.grantedQuantity) {
-    throw new Error("Paid billing period included-credit counter did not close cleanly");
+  const closedCounter =
+    await transaction.billingPeriodEntitlementCounter.findUnique({
+      where: { id: counter.id },
+    });
+  if (
+    !closedCounter ||
+    closedCounter.reservedQuantity !== 0 ||
+    closedCounter.committedQuantity + closedCounter.forfeitedQuantity !==
+      closedCounter.grantedQuantity
+  ) {
+    throw new Error(
+      "Paid billing period included-credit counter did not close cleanly",
+    );
   }
 }

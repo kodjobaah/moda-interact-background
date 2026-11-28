@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
-  processor: undefined as undefined | ((job: { id?: string; data: unknown }) => Promise<unknown>),
+  processor: undefined as
+    undefined | ((job: { id?: string; data: unknown }) => Promise<unknown>),
   listeners: new Map<string, (...args: unknown[]) => void>(),
   parseJob: vi.fn((data: unknown) => data),
   reconcile: vi.fn(),
@@ -23,7 +24,11 @@ vi.mock("bullmq", () => ({
   },
 }));
 vi.mock("@modainteract/moda-interact-shared/logging", () => ({
-  createLogger: () => ({ info: hoisted.info, warn: hoisted.warn, error: hoisted.error }),
+  createLogger: () => ({
+    info: hoisted.info,
+    warn: hoisted.warn,
+    error: hoisted.error,
+  }),
 }));
 vi.mock("@modainteract/moda-interact-shared/shopify", () => ({
   SHOPIFY_WEBHOOK_QUEUE_CONTRACTS: {
@@ -73,28 +78,36 @@ describe("Shopify discount sync worker logging", () => {
     expect(listener).toBeTypeOf("function");
     listener?.();
 
-    expect(hoisted.info).toHaveBeenCalledWith("shopify.discount_sync.worker_ready", {
-      queueName: "shopify-discount-sync",
-      concurrency: 4,
-    });
+    expect(hoisted.info).toHaveBeenCalledWith(
+      "shopify.discount_sync.worker_ready",
+      {
+        queueName: "shopify-discount-sync",
+        concurrency: 4,
+      },
+    );
   });
 
   it("logs worker error stack and cause as explicit fields", () => {
     const listener = hoisted.listeners.get("error");
-    const error = new Error("Redis connection failed", { cause: new Error("Socket closed") });
+    const error = new Error("Redis connection failed", {
+      cause: new Error("Socket closed"),
+    });
 
     expect(listener).toBeTypeOf("function");
     listener?.(error);
 
-    expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.worker_error", expect.objectContaining({
-      queueName: "shopify-discount-sync",
-      reasonCode: "SHOPIFY_DISCOUNT_WORKER_ERROR",
-      origin: "sdk_exception",
-      errorName: "Error",
-      errorMessage: "Redis connection failed",
-      errorStack: expect.stringContaining("Redis connection failed"),
-      errorCause: [expect.objectContaining({ message: "Socket closed" })],
-    }));
+    expect(hoisted.error).toHaveBeenCalledWith(
+      "shopify.discount_sync.worker_error",
+      expect.objectContaining({
+        queueName: "shopify-discount-sync",
+        reasonCode: "SHOPIFY_DISCOUNT_WORKER_ERROR",
+        origin: "sdk_exception",
+        errorName: "Error",
+        errorMessage: "Redis connection failed",
+        errorStack: expect.stringContaining("Redis connection failed"),
+        errorCause: [expect.objectContaining({ message: "Socket closed" })],
+      }),
+    );
   });
 
   it("logs receipt and successful completion", async () => {
@@ -102,25 +115,38 @@ describe("Shopify discount sync worker logging", () => {
 
     await expect(hoisted.processor?.(job)).resolves.toBeUndefined();
 
-    expect(hoisted.info).toHaveBeenNthCalledWith(1, "shopify.discount_sync.job_received", expect.objectContaining({
-      jobId: "discount-sync-job-1",
-      shopId: "shop-1",
-      reason: "DISCOUNT_WEBHOOK",
-      webhookTopic: "discounts/update",
-    }));
-    expect(hoisted.info).toHaveBeenNthCalledWith(2, "shopify.discount_sync.completed", expect.objectContaining({
-      shopId: "shop-1",
-      outcome: "current",
-    }));
+    expect(hoisted.info).toHaveBeenNthCalledWith(
+      1,
+      "shopify.discount_sync.job_received",
+      expect.objectContaining({
+        jobId: "discount-sync-job-1",
+        shopId: "shop-1",
+        reason: "DISCOUNT_WEBHOOK",
+        webhookTopic: "discounts/update",
+      }),
+    );
+    expect(hoisted.info).toHaveBeenNthCalledWith(
+      2,
+      "shopify.discount_sync.completed",
+      expect.objectContaining({
+        shopId: "shop-1",
+        outcome: "current",
+      }),
+    );
     expect(hoisted.warn).not.toHaveBeenCalled();
     expect(hoisted.error).not.toHaveBeenCalled();
   });
 
   it("logs malformed jobs with safe diagnostics and rejects without logging job data", async () => {
-    const parseError = new Error("Invalid job for customer@example.com access_token=secret-value", {
-      cause: new Error("Required shopId is missing"),
+    const parseError = new Error(
+      "Invalid job for customer@example.com access_token=secret-value",
+      {
+        cause: new Error("Required shopId is missing"),
+      },
+    );
+    hoisted.parseJob.mockImplementationOnce(() => {
+      throw parseError;
     });
-    hoisted.parseJob.mockImplementationOnce(() => { throw parseError; });
     const malformedJob = {
       id: "bad-job-id",
       data: { customer: "private customer record", token: "private-token" },
@@ -129,42 +155,68 @@ describe("Shopify discount sync worker logging", () => {
     await expect(hoisted.processor?.(malformedJob)).rejects.toBe(parseError);
 
     expect(hoisted.reconcile).not.toHaveBeenCalled();
-    expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.failed", expect.objectContaining({
-      reasonCode: "SHOPIFY_DISCOUNT_SYNC_JOB_INVALID",
-      origin: "internal",
-      errorName: "Error",
-      errorMessage: "Invalid job for [REDACTED] access_token=[REDACTED]",
-      errorStack: expect.stringContaining("Invalid job for"),
-      errorCause: [expect.objectContaining({ message: "Required shopId is missing" })],
-      redactionApplied: true,
-    }));
-    const loggedFields = hoisted.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(hoisted.error).toHaveBeenCalledWith(
+      "shopify.discount_sync.failed",
+      expect.objectContaining({
+        reasonCode: "SHOPIFY_DISCOUNT_SYNC_JOB_INVALID",
+        origin: "internal",
+        errorName: "Error",
+        errorMessage: "Invalid job for [REDACTED] access_token=[REDACTED]",
+        errorStack: expect.stringContaining("Invalid job for"),
+        errorCause: [
+          expect.objectContaining({ message: "Required shopId is missing" }),
+        ],
+        redactionApplied: true,
+      }),
+    );
+    const loggedFields = hoisted.error.mock.calls[0]?.[1] as Record<
+      string,
+      unknown
+    >;
     expect(loggedFields).not.toHaveProperty("jobId");
     expect(loggedFields).not.toHaveProperty("shopId");
-    expect(JSON.stringify(loggedFields)).not.toContain("private customer record");
+    expect(JSON.stringify(loggedFields)).not.toContain(
+      "private customer record",
+    );
     expect(JSON.stringify(loggedFields)).not.toContain("private-token");
   });
 
   it("logs invalid requestedAt and rejects for BullMQ without logging untrusted job fields", async () => {
     const invalidTimestampJob = {
       id: "bad-timestamp-job",
-      data: { ...job.data, requestedAt: "not-a-date", customer: "private customer record" },
+      data: {
+        ...job.data,
+        requestedAt: "not-a-date",
+        customer: "private customer record",
+      },
     };
 
-    await expect(hoisted.processor?.(invalidTimestampJob)).rejects.toThrow("Invalid Shopify discount sync requestedAt");
+    await expect(hoisted.processor?.(invalidTimestampJob)).rejects.toThrow(
+      "Invalid Shopify discount sync requestedAt",
+    );
 
     expect(hoisted.reconcile).not.toHaveBeenCalled();
-    expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.failed", expect.objectContaining({
-      reasonCode: "SHOPIFY_DISCOUNT_SYNC_JOB_INVALID",
-      origin: "internal",
-      errorName: "Error",
-      errorMessage: "Invalid Shopify discount sync requestedAt",
-      errorStack: expect.stringContaining("Invalid Shopify discount sync requestedAt"),
-    }));
-    const loggedFields = hoisted.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(hoisted.error).toHaveBeenCalledWith(
+      "shopify.discount_sync.failed",
+      expect.objectContaining({
+        reasonCode: "SHOPIFY_DISCOUNT_SYNC_JOB_INVALID",
+        origin: "internal",
+        errorName: "Error",
+        errorMessage: "Invalid Shopify discount sync requestedAt",
+        errorStack: expect.stringContaining(
+          "Invalid Shopify discount sync requestedAt",
+        ),
+      }),
+    );
+    const loggedFields = hoisted.error.mock.calls[0]?.[1] as Record<
+      string,
+      unknown
+    >;
     expect(loggedFields).not.toHaveProperty("jobId");
     expect(loggedFields).not.toHaveProperty("shopId");
-    expect(JSON.stringify(loggedFields)).not.toContain("private customer record");
+    expect(JSON.stringify(loggedFields)).not.toContain(
+      "private customer record",
+    );
   });
 
   it("logs unavailable catalogue outcomes as warnings", async () => {
@@ -172,27 +224,39 @@ describe("Shopify discount sync worker logging", () => {
 
     await expect(hoisted.processor?.(job)).resolves.toBeUndefined();
 
-    expect(hoisted.warn).toHaveBeenCalledWith("shopify.discount_sync.unavailable", expect.objectContaining({
-      shopId: "shop-1",
-      outcome: "unavailable",
-    }));
+    expect(hoisted.warn).toHaveBeenCalledWith(
+      "shopify.discount_sync.unavailable",
+      expect.objectContaining({
+        shopId: "shop-1",
+        outcome: "unavailable",
+      }),
+    );
   });
 
   it("logs internal failure diagnostics and rethrows for BullMQ retry", async () => {
-    const error = new Error("Discount catalogue transaction failed", { cause: new Error("Database connection refused") });
+    const error = new Error("Discount catalogue transaction failed", {
+      cause: new Error("Database connection refused"),
+    });
     hoisted.reconcile.mockRejectedValueOnce(error);
 
     await expect(hoisted.processor?.(job)).rejects.toBe(error);
 
-    expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.failed", expect.objectContaining({
-      shopId: "shop-1",
-      reasonCode: "SHOPIFY_DISCOUNT_SYNC_FAILED",
-      origin: "internal",
-      errorName: "Error",
-      errorMessage: "Discount catalogue transaction failed",
-      errorStack: expect.stringContaining("Discount catalogue transaction failed"),
-      errorCause: [expect.objectContaining({ message: "Database connection refused" })],
-    }));
+    expect(hoisted.error).toHaveBeenCalledWith(
+      "shopify.discount_sync.failed",
+      expect.objectContaining({
+        shopId: "shop-1",
+        reasonCode: "SHOPIFY_DISCOUNT_SYNC_FAILED",
+        origin: "internal",
+        errorName: "Error",
+        errorMessage: "Discount catalogue transaction failed",
+        errorStack: expect.stringContaining(
+          "Discount catalogue transaction failed",
+        ),
+        errorCause: [
+          expect.objectContaining({ message: "Database connection refused" }),
+        ],
+      }),
+    );
   });
 
   it("does not log provider errors twice after the catalogue boundary logged them", async () => {

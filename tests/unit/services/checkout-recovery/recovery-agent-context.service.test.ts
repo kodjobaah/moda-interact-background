@@ -100,7 +100,10 @@ describe("RecoveryAgentContextService", () => {
         oversized: true,
       },
     });
-    expect(harness.historyLoader).toHaveBeenCalledWith("conversation-1", startedAt);
+    expect(harness.historyLoader).toHaveBeenCalledWith(
+      "conversation-1",
+      startedAt,
+    );
     expect(harness.database.checkoutRecovery.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: "recovery-1" },
@@ -137,10 +140,12 @@ describe("RecoveryAgentContextService", () => {
   it("throws when the recovery does not exist", async () => {
     const harness = createHarness({ durableRecovery: null });
 
-    await expect(harness.service.getAgentContext({
-      checkoutRecoveryId: "missing-recovery",
-      conversationId: "conversation-1",
-    })).rejects.toThrow("Checkout recovery not found: missing-recovery");
+    await expect(
+      harness.service.getAgentContext({
+        checkoutRecoveryId: "missing-recovery",
+        conversationId: "conversation-1",
+      }),
+    ).rejects.toThrow("Checkout recovery not found: missing-recovery");
     expect(harness.historyLoader).not.toHaveBeenCalled();
   });
 
@@ -149,10 +154,12 @@ describe("RecoveryAgentContextService", () => {
       durableRecovery: { ...recovery, conversation: null },
     });
 
-    await expect(harness.service.getAgentContext({
-      checkoutRecoveryId: "recovery-1",
-      conversationId: "foreign-conversation",
-    })).rejects.toThrow(
+    await expect(
+      harness.service.getAgentContext({
+        checkoutRecoveryId: "recovery-1",
+        conversationId: "foreign-conversation",
+      }),
+    ).rejects.toThrow(
       "Conversation foreign-conversation does not belong to recovery recovery-1",
     );
     expect(harness.historyLoader).not.toHaveBeenCalled();
@@ -166,10 +173,12 @@ describe("RecoveryAgentContextService", () => {
       },
     });
 
-    await expect(harness.service.getAgentContext({
-      checkoutRecoveryId: "recovery-1",
-      conversationId: "conversation-1",
-    })).rejects.toThrow(
+    await expect(
+      harness.service.getAgentContext({
+        checkoutRecoveryId: "recovery-1",
+        conversationId: "conversation-1",
+      }),
+    ).rejects.toThrow(
       "Conversation conversation-1 does not belong to recovery recovery-1",
     );
     expect(harness.historyLoader).not.toHaveBeenCalled();
@@ -178,11 +187,12 @@ describe("RecoveryAgentContextService", () => {
   it("uses the standalone snapshot owner and overlays canonical recovery shop without adding a conversation ownership query", async () => {
     const harness = createHarness();
 
-    const context = await harness.service.getAgentContextForStandaloneConversation({
-      checkoutRecoveryId: "recovery-1",
-      conversationId: "standalone-conversation",
-      pendingTurnStartedAt: startedAt,
-    });
+    const context =
+      await harness.service.getAgentContextForStandaloneConversation({
+        checkoutRecoveryId: "recovery-1",
+        conversationId: "standalone-conversation",
+        pendingTurnStartedAt: startedAt,
+      });
 
     expect(harness.conversationService.getAgentSnapshot).toHaveBeenCalledWith(
       "standalone-conversation",
@@ -190,8 +200,9 @@ describe("RecoveryAgentContextService", () => {
     );
     expect(harness.historyLoader).not.toHaveBeenCalled();
     expect(harness.database.checkoutRecovery.findUnique).toHaveBeenCalledOnce();
-    expect(harness.database.checkoutRecovery.findUnique.mock.calls[0][0].select)
-      .not.toHaveProperty("conversation");
+    expect(
+      harness.database.checkoutRecovery.findUnique.mock.calls[0][0].select,
+    ).not.toHaveProperty("conversation");
     expect(context.shopId).toBe("canonical-shop-id");
     expect(context.shop).toBe("canonical-shop.myshopify.com");
     expect(context.conversation.shop).toBe("canonical-shop.myshopify.com");
@@ -206,22 +217,49 @@ describe("RecoveryAgentContextService", () => {
       new Error("Conversation has no shop ownership"),
     );
 
-    await expect(harness.service.getAgentContextForStandaloneConversation({
-      checkoutRecoveryId: "recovery-1",
-      conversationId: "standalone-conversation",
-    })).rejects.toThrow("Conversation has no shop ownership");
+    await expect(
+      harness.service.getAgentContextForStandaloneConversation({
+        checkoutRecoveryId: "recovery-1",
+        conversationId: "standalone-conversation",
+      }),
+    ).rejects.toThrow("Conversation has no shop ownership");
   });
 });
 
 it("keeps recovery agent metadata on the current recipient pinned to the sent initial outreach", async () => {
-  const durable = { ...recovery, conversation, customer: { ...recovery.customer, phone: null,
-    shopId: recovery.shopId, _count: { phones: 1 }, phones: [{
-      phone: "+447400123456", whatsappCanonicalPhone: "447400123456", whatsappNoContact: false,
-    }],
-  }, outreachAttempts: [{ recipient: "447400123456", sentAt: new Date(), outboundMessage: {
-    conversationId: conversation.id, providerMessageId: "outbound-1", sentAt: new Date(), direction: "OUTBOUND",
-  } }] };
+  const durable = {
+    ...recovery,
+    conversation,
+    customer: {
+      ...recovery.customer,
+      phone: null,
+      shopId: recovery.shopId,
+      _count: { phones: 1 },
+      phones: [
+        {
+          phone: "+447400123456",
+          whatsappCanonicalPhone: "447400123456",
+          whatsappNoContact: false,
+        },
+      ],
+    },
+    outreachAttempts: [
+      {
+        recipient: "447400123456",
+        sentAt: new Date(),
+        outboundMessage: {
+          conversationId: conversation.id,
+          providerMessageId: "outbound-1",
+          sentAt: new Date(),
+          direction: "OUTBOUND",
+        },
+      },
+    ],
+  };
   const harness = createHarness({ durableRecovery: durable as never });
-  const context = await harness.service.getAgentContext({ checkoutRecoveryId: recovery.id, conversationId: conversation.id });
+  const context = await harness.service.getAgentContext({
+    checkoutRecoveryId: recovery.id,
+    conversationId: conversation.id,
+  });
   expect(context.customer?.phone).toBe("+447400123456");
 });

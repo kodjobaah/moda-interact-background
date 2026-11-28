@@ -16,9 +16,12 @@ describe("translation deterministic queue-job repair", () => {
       add,
     };
 
-    await expect(ensureDeterministicTranslationQueueJob(queue as never, expected))
-      .resolves.toBe(1);
-    expect(add).toHaveBeenCalledWith(expected.name, expected.data, { jobId: expected.id });
+    await expect(
+      ensureDeterministicTranslationQueueJob(queue as never, expected),
+    ).resolves.toBe(1);
+    expect(add).toHaveBeenCalledWith(expected.name, expected.data, {
+      jobId: expected.id,
+    });
   });
 
   it.each(["waiting", "delayed", "active"])(
@@ -34,8 +37,9 @@ describe("translation deterministic queue-job repair", () => {
         add,
       };
 
-      await expect(ensureDeterministicTranslationQueueJob(queue as never, expected))
-        .resolves.toBe(0);
+      await expect(
+        ensureDeterministicTranslationQueueJob(queue as never, expected),
+      ).resolves.toBe(0);
       expect(remove).not.toHaveBeenCalled();
       expect(add).not.toHaveBeenCalled();
     },
@@ -52,9 +56,12 @@ describe("translation deterministic queue-job repair", () => {
       add,
     };
 
-    await expect(ensureDeterministicTranslationQueueJob(queue as never, expected))
-      .resolves.toBe(1);
+    await expect(
+      ensureDeterministicTranslationQueueJob(queue as never, expected),
+    ).resolves.toBe(1);
     expect(remove).toHaveBeenCalledTimes(1);
-    expect(add).toHaveBeenCalledWith(expected.name, expected.data, { jobId: expected.id });
+    expect(add).toHaveBeenCalledWith(expected.name, expected.data, {
+      jobId: expected.id,
+    });
   });
 });

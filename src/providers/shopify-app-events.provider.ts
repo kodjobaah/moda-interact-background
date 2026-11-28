@@ -23,7 +23,10 @@ export class ShopifyAppEventsError extends Error {
     message: string,
     options: { cause?: unknown } = {},
   ) {
-    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    super(
+      message,
+      options.cause === undefined ? undefined : { cause: options.cause },
+    );
     this.retryable = [
       "authentication-refreshable",
       "throttled",
@@ -92,7 +95,8 @@ export class ShopifyAppEventsClient {
       );
     }
 
-    const requestedMargin = config.safetyMarginSeconds ?? DEFAULT_SAFETY_MARGIN_SECONDS;
+    const requestedMargin =
+      config.safetyMarginSeconds ?? DEFAULT_SAFETY_MARGIN_SECONDS;
     if (!Number.isFinite(requestedMargin) || requestedMargin < 0) {
       throw new ShopifyAppEventsError(
         "configuration",
@@ -125,11 +129,7 @@ export class ShopifyAppEventsClient {
 
   private async getToken(forceRefresh = false): Promise<string> {
     const now = this.now();
-    if (
-      !forceRefresh &&
-      this.cachedToken &&
-      now < this.cachedToken.expiresAt
-    ) {
+    if (!forceRefresh && this.cachedToken && now < this.cachedToken.expiresAt) {
       return this.cachedToken.value;
     }
 
@@ -145,7 +145,9 @@ export class ShopifyAppEventsClient {
     }
   }
 
-  private async refreshAfterUnauthorized(rejectedToken: string): Promise<string> {
+  private async refreshAfterUnauthorized(
+    rejectedToken: string,
+  ): Promise<string> {
     if (this.cachedToken?.value === rejectedToken) {
       this.cachedToken = null;
     }
@@ -272,7 +274,11 @@ export class ShopifyAppEventsClient {
         "Shopify App Events server error",
       );
     }
-    if (response.status === 408 || response.status === 409 || response.status === 425) {
+    if (
+      response.status === 408 ||
+      response.status === 409 ||
+      response.status === 425
+    ) {
       return new ShopifyAppEventsError(
         "transient",
         "Shopify App Events request is temporarily unavailable",
@@ -296,7 +302,10 @@ export class ShopifyAppEventsClient {
     );
   }
 
-  private async readJson(response: Response, operation: "token"): Promise<Record<string, unknown>> {
+  private async readJson(
+    response: Response,
+    operation: "token",
+  ): Promise<Record<string, unknown>> {
     try {
       const body: unknown = await response.json();
       if (body && typeof body === "object") {
@@ -349,10 +358,15 @@ function canonicalDecimal(value: number | string): string | null {
   if (!text || !/^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(text)) return null;
   const decimal = Number(text);
   if (!Number.isFinite(decimal) || decimal === 0) return null;
-  return text.replace(/^(-?)0+(?=\d)/, "$1").replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+  return text
+    .replace(/^(-?)0+(?=\d)/, "$1")
+    .replace(/(\.\d*?)0+$/, "$1")
+    .replace(/\.$/, "");
 }
 
 function canonicalEventValue(value: number | string): number | string {
   const canonical = canonicalDecimal(value);
-  return canonical && Number.isSafeInteger(Number(canonical)) ? Number(canonical) : canonical ?? value;
+  return canonical && Number.isSafeInteger(Number(canonical))
+    ? Number(canonical)
+    : (canonical ?? value);
 }

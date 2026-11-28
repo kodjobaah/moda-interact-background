@@ -16,26 +16,34 @@ describe("recovery outreach follow-up", () => {
       offerSnapshot: null,
     };
 
-    await expect(service.getOrCreate({
-      recoveryId: "recovery-1",
-      sequence: 1,
-      policy,
-      recipient: "15551234567",
-    })).rejects.toThrow("Recovery outreach attempt persistence is unavailable");
-    await expect(service.getOrCreateFollowUp({
-      recoveryId: "recovery-1",
-      recipient: "15551234567",
-      initialAttempt: {
-        configuredOfferMode: "NONE",
-        fixedShopifyDiscountId: null,
-        offerSnapshot: null,
-      },
-    })).rejects.toThrow("Recovery outreach attempt persistence is unavailable");
+    await expect(
+      service.getOrCreate({
+        recoveryId: "recovery-1",
+        sequence: 1,
+        policy,
+        recipient: "15551234567",
+      }),
+    ).rejects.toThrow("Recovery outreach attempt persistence is unavailable");
+    await expect(
+      service.getOrCreateFollowUp({
+        recoveryId: "recovery-1",
+        recipient: "15551234567",
+        initialAttempt: {
+          configuredOfferMode: "NONE",
+          fixedShopifyDiscountId: null,
+          offerSnapshot: null,
+        },
+      }),
+    ).rejects.toThrow("Recovery outreach attempt persistence is unavailable");
   });
 
   it("uses the exact deterministic sequence-two job identity", () => {
-    expect(createRecoveryOutreachFollowUpJobId({ checkoutRecoveryId: "recovery-1", sequence: 2 }))
-      .toBe("recovery-outreach-follow-up:recovery-1:2");
+    expect(
+      createRecoveryOutreachFollowUpJobId({
+        checkoutRecoveryId: "recovery-1",
+        sequence: 2,
+      }),
+    ).toBe("recovery-outreach-follow-up:recovery-1:2");
   });
 
   it("gives delayed retry jobs stable deadline-specific identities", () => {
@@ -48,31 +56,45 @@ describe("recovery outreach follow-up", () => {
     expect(createRecoveryOutreachFollowUpJobId(input, deadline)).toBe(
       createRecoveryOutreachFollowUpJobId(input, deadline),
     );
-    expect(createRecoveryOutreachFollowUpJobId(input, new Date(deadline.getTime() + 1)))
-      .not.toBe(createRecoveryOutreachFollowUpJobId(input, deadline));
+    expect(
+      createRecoveryOutreachFollowUpJobId(
+        input,
+        new Date(deadline.getTime() + 1),
+      ),
+    ).not.toBe(createRecoveryOutreachFollowUpJobId(input, deadline));
   });
 
   it("rejects an invalid fixed policy and accepts a disabled follow-up snapshot", () => {
-    expect(safeParseEffectiveRecoveryPolicy({
-      recoveryDelayMinutes: 30,
-      recoveryOfferMode: "FIXED",
-      fixedShopifyDiscountId: null,
-      followUpEnabled: false,
-      followUpDelayMinutes: null,
-      source: "MERCHANT",
-    }).success).toBe(false);
-    expect(safeParseEffectiveRecoveryPolicy({
-      recoveryDelayMinutes: 30,
-      recoveryOfferMode: "NONE",
-      fixedShopifyDiscountId: null,
-      followUpEnabled: false,
-      followUpDelayMinutes: null,
-      source: "MERCHANT",
-    }).success).toBe(true);
+    expect(
+      safeParseEffectiveRecoveryPolicy({
+        recoveryDelayMinutes: 30,
+        recoveryOfferMode: "FIXED",
+        fixedShopifyDiscountId: null,
+        followUpEnabled: false,
+        followUpDelayMinutes: null,
+        source: "MERCHANT",
+      }).success,
+    ).toBe(false);
+    expect(
+      safeParseEffectiveRecoveryPolicy({
+        recoveryDelayMinutes: 30,
+        recoveryOfferMode: "NONE",
+        fixedShopifyDiscountId: null,
+        followUpEnabled: false,
+        followUpDelayMinutes: null,
+        source: "MERCHANT",
+      }).success,
+    ).toBe(true);
   });
 
   it("reuses the durable attempt identity and marks engagement", async () => {
-    const attempt = { id: "attempt-1", status: "WAITING_FOR_RESPONSE", sequence: 1, sentAt: new Date("2026-09-16T10:00:00Z"), customerRespondedAt: null };
+    const attempt = {
+      id: "attempt-1",
+      status: "WAITING_FOR_RESPONSE",
+      sequence: 1,
+      sentAt: new Date("2026-09-16T10:00:00Z"),
+      customerRespondedAt: null,
+    };
     const database = {
       recoveryOutreachAttempt: {
         upsert: vi.fn(async () => attempt),
@@ -80,7 +102,9 @@ describe("recovery outreach follow-up", () => {
         updateMany: vi.fn(async () => ({ count: 1 })),
         update: vi.fn(async () => attempt),
       },
-      conversation: { findUnique: vi.fn(async () => ({ checkoutRecoveryId: "recovery-1" })) },
+      conversation: {
+        findUnique: vi.fn(async () => ({ checkoutRecoveryId: "recovery-1" })),
+      },
     } as any;
     const service = new RecoveryOutreachAttemptService(database);
     const policy = {
@@ -92,61 +116,85 @@ describe("recovery outreach follow-up", () => {
       source: "MERCHANT" as const,
       offerSnapshot: null,
     };
-    await expect(service.getOrCreateFollowUp({
+    await expect(
+      service.getOrCreateFollowUp({
+        recoveryId: "recovery-1",
+        recipient: "15551234567",
+        initialAttempt: {
+          recipient: "15551234567",
+          configuredOfferMode: "FIXED",
+          fixedShopifyDiscountId: "discount-1",
+          offerSnapshot: { id: "discount-1", title: "Saved offer" },
+        },
+      }),
+    ).resolves.toEqual(attempt);
+    expect(database.recoveryOutreachAttempt.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          recipient: "15551234567",
+          configuredOfferMode: "FIXED",
+          fixedShopifyDiscountId: "discount-1",
+          offerSnapshot: { id: "discount-1", title: "Saved offer" },
+        }),
+      }),
+    );
+    await service.getOrCreate({
       recoveryId: "recovery-1",
+      sequence: 1,
+      policy,
       recipient: "15551234567",
-      initialAttempt: {
-        recipient: "15551234567",
-        configuredOfferMode: "FIXED",
-        fixedShopifyDiscountId: "discount-1",
-        offerSnapshot: { id: "discount-1", title: "Saved offer" },
-      },
-    })).resolves.toEqual(attempt);
-    expect(database.recoveryOutreachAttempt.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        recipient: "15551234567",
-        configuredOfferMode: "FIXED",
-        fixedShopifyDiscountId: "discount-1",
-        offerSnapshot: { id: "discount-1", title: "Saved offer" },
-      }),
-    }));
-    await service.getOrCreate({ recoveryId: "recovery-1", sequence: 1, policy, recipient: "15551234567" });
-    await service.getOrCreate({ recoveryId: "recovery-1", sequence: 1, policy, recipient: "15551234567" });
+    });
+    await service.getOrCreate({
+      recoveryId: "recovery-1",
+      sequence: 1,
+      policy,
+      recipient: "15551234567",
+    });
     expect(database.recoveryOutreachAttempt.upsert).toHaveBeenCalledTimes(3);
-    await service.markEngagedForConversation("conversation-1", new Date("2026-09-16T10:01:00Z"));
-    expect(database.recoveryOutreachAttempt.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        id: "attempt-1",
-        status: { in: ["WAITING_FOR_RESPONSE", "ENGAGED"] },
-        OR: [
-          { customerRespondedAt: null },
-          { customerRespondedAt: { gt: new Date("2026-09-16T10:01:00Z") } },
-        ],
+    await service.markEngagedForConversation(
+      "conversation-1",
+      new Date("2026-09-16T10:01:00Z"),
+    );
+    expect(database.recoveryOutreachAttempt.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "attempt-1",
+          status: { in: ["WAITING_FOR_RESPONSE", "ENGAGED"] },
+          OR: [
+            { customerRespondedAt: null },
+            { customerRespondedAt: { gt: new Date("2026-09-16T10:01:00Z") } },
+          ],
+        }),
       }),
-    }));
+    );
+  });
+
+  it("does not overwrite a durable attempt recipient on replay", async () => {
+    const database = {
+      recoveryOutreachAttempt: {
+        upsert: vi.fn(async () => ({
+          id: "attempt-2",
+          recipient: "15551234567",
+        })),
+      },
+    } as any;
+    const service = new RecoveryOutreachAttemptService(database);
+
+    await service.getOrCreateFollowUp({
+      recoveryId: "recovery-1",
+      recipient: "447700900123",
+      initialAttempt: {
+        configuredOfferMode: "NONE",
+        fixedShopifyDiscountId: null,
+        offerSnapshot: null,
+      },
     });
 
-    it("does not overwrite a durable attempt recipient on replay", async () => {
-      const database = {
-        recoveryOutreachAttempt: {
-          upsert: vi.fn(async () => ({ id: "attempt-2", recipient: "15551234567" })),
-        },
-      } as any;
-      const service = new RecoveryOutreachAttemptService(database);
-
-      await service.getOrCreateFollowUp({
-        recoveryId: "recovery-1",
-        recipient: "447700900123",
-        initialAttempt: {
-          configuredOfferMode: "NONE",
-          fixedShopifyDiscountId: null,
-          offerSnapshot: null,
-        },
-      });
-
-      expect(database.recoveryOutreachAttempt.upsert).toHaveBeenCalledWith(expect.objectContaining({
+    expect(database.recoveryOutreachAttempt.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
         create: expect.objectContaining({ recipient: "447700900123" }),
         update: {},
-      }));
-    });
+      }),
+    );
+  });
 });

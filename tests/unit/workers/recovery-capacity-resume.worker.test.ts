@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
-  processor: undefined as undefined | ((job: { name: string; data: { shopId: string; trigger: string; recoveryId?: string } }) => Promise<unknown>),
+  processor: undefined as
+    | undefined
+    | ((job: {
+        name: string;
+        data: { shopId: string; trigger: string; recoveryId?: string };
+      }) => Promise<unknown>),
   active: true,
   recoveries: [] as Array<{ id: string }>,
   findMany: vi.fn(async () => hoisted.recoveries),
@@ -27,7 +32,11 @@ vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
 vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
 vi.mock("../../../src/lib/db.js", () => ({
   default: {
-    shop: { findUnique: vi.fn(async () => ({ status: hoisted.active ? "ACTIVE" : "INACTIVE" })) },
+    shop: {
+      findUnique: vi.fn(async () => ({
+        status: hoisted.active ? "ACTIVE" : "INACTIVE",
+      })),
+    },
     checkoutRecovery: { findMany: hoisted.findMany },
   },
 }));
@@ -42,7 +51,11 @@ vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
 }));
 vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
   backgroundRuntimeConfigService: {
-    current: vi.fn(() => ({ version: 1, recoveryResumeQueueGlobalConcurrency: 10, recoveryResumeBatchSize: 25 })),
+    current: vi.fn(() => ({
+      version: 1,
+      recoveryResumeQueueGlobalConcurrency: 10,
+      recoveryResumeBatchSize: 25,
+    })),
     subscribe: vi.fn(() => () => undefined),
   },
 }));
@@ -55,7 +68,9 @@ createRecoveryCapacityResumeWorker();
 describe("recovery capacity resume worker", () => {
   beforeEach(() => {
     hoisted.recoveries = [];
-    hoisted.evaluate.mockReset().mockResolvedValue({ allowed: true, shopId: "shop-1" });
+    hoisted.evaluate
+      .mockReset()
+      .mockResolvedValue({ allowed: true, shopId: "shop-1" });
     hoisted.resume.mockReset().mockResolvedValue({ kind: "initiated" });
     hoisted.schedule.mockReset().mockResolvedValue("job-id");
   });
@@ -63,21 +78,30 @@ describe("recovery capacity resume worker", () => {
   it.each([
     ["NO_CONTRACT", "CONTRACT_REQUIRED"],
     ["FROZEN", "SUBSCRIPTION_FROZEN"],
-  ])("terminates a queued capacity-resume job before recovery lookup when execution is %s", async (_status, reason) => {
-    hoisted.evaluate.mockResolvedValueOnce({ allowed: false, shopId: "shop-1", reason });
-    hoisted.findMany.mockClear();
-    hoisted.resume.mockClear();
-    hoisted.schedule.mockClear();
+  ])(
+    "terminates a queued capacity-resume job before recovery lookup when execution is %s",
+    async (_status, reason) => {
+      hoisted.evaluate.mockResolvedValueOnce({
+        allowed: false,
+        shopId: "shop-1",
+        reason,
+      });
+      hoisted.findMany.mockClear();
+      hoisted.resume.mockClear();
+      hoisted.schedule.mockClear();
 
-    await expect(hoisted.processor?.({
-      name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
-      data: { shopId: "shop-1", trigger: "repair" },
-    })).resolves.toEqual({ kind: "ignored", reason });
+      await expect(
+        hoisted.processor?.({
+          name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
+          data: { shopId: "shop-1", trigger: "repair" },
+        }),
+      ).resolves.toEqual({ kind: "ignored", reason });
 
-    expect(hoisted.findMany).not.toHaveBeenCalled();
-    expect(hoisted.resume).not.toHaveBeenCalled();
-    expect(hoisted.schedule).not.toHaveBeenCalled();
-  });
+      expect(hoisted.findMany).not.toHaveBeenCalled();
+      expect(hoisted.resume).not.toHaveBeenCalled();
+      expect(hoisted.schedule).not.toHaveBeenCalled();
+    },
+  );
 
   it("queries the durable blocked FIFO without an id-range cursor", async () => {
     hoisted.recoveries = [{ id: "recovery-1" }];
@@ -105,10 +129,16 @@ describe("recovery capacity resume worker", () => {
     hoisted.findMany.mockClear();
     hoisted.resume.mockReset().mockResolvedValue({ kind: "initiated" });
 
-    await expect(hoisted.processor?.({
-      name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
-      data: { shopId: "shop-1", trigger: "recipient-suppression-expiry", recoveryId: "recovery-1" },
-    })).resolves.toEqual({ kind: "initiated" });
+    await expect(
+      hoisted.processor?.({
+        name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
+        data: {
+          shopId: "shop-1",
+          trigger: "recipient-suppression-expiry",
+          recoveryId: "recovery-1",
+        },
+      }),
+    ).resolves.toEqual({ kind: "initiated" });
 
     expect(hoisted.resume).toHaveBeenCalledExactlyOnceWith(
       "recovery-1",
@@ -118,7 +148,9 @@ describe("recovery capacity resume worker", () => {
   });
 
   it("processes a bounded FIFO batch and schedules a distinct continuation", async () => {
-    hoisted.recoveries = Array.from({ length: 25 }, (_, index) => ({ id: `recovery-${index}` }));
+    hoisted.recoveries = Array.from({ length: 25 }, (_, index) => ({
+      id: `recovery-${index}`,
+    }));
     hoisted.resume.mockClear();
     hoisted.schedule.mockClear();
     hoisted.resume.mockResolvedValue({ kind: "initiated" });
@@ -136,7 +168,9 @@ describe("recovery capacity resume worker", () => {
   });
 
   it("stops immediately when capacity is exhausted and does not continue", async () => {
-    hoisted.recoveries = Array.from({ length: 25 }, (_, index) => ({ id: `recovery-${index}` }));
+    hoisted.recoveries = Array.from({ length: 25 }, (_, index) => ({
+      id: `recovery-${index}`,
+    }));
     hoisted.resume.mockReset();
     hoisted.resume
       .mockResolvedValueOnce({ kind: "initiated" })
@@ -153,36 +187,58 @@ describe("recovery capacity resume worker", () => {
   });
 
   it("stops a capacity-resume page when lifecycle becomes denied after the initial gate", async () => {
-    hoisted.recoveries = Array.from({ length: 25 }, (_, index) => ({ id: `recovery-${index}` }));
-    hoisted.evaluate.mockReset()
+    hoisted.recoveries = Array.from({ length: 25 }, (_, index) => ({
+      id: `recovery-${index}`,
+    }));
+    hoisted.evaluate
+      .mockReset()
       .mockResolvedValueOnce({ allowed: true, shopId: "shop-1" })
-      .mockResolvedValue({ allowed: false, shopId: "shop-1", reason: "SUBSCRIPTION_FROZEN" });
-    hoisted.resume.mockReset()
+      .mockResolvedValue({
+        allowed: false,
+        shopId: "shop-1",
+        reason: "SUBSCRIPTION_FROZEN",
+      });
+    hoisted.resume
+      .mockReset()
       .mockResolvedValueOnce({ kind: "initiated" })
-      .mockResolvedValueOnce({ kind: "ignored", reason: "SUBSCRIPTION_FROZEN" });
+      .mockResolvedValueOnce({
+        kind: "ignored",
+        reason: "SUBSCRIPTION_FROZEN",
+      });
     hoisted.schedule.mockClear();
 
-    await expect(hoisted.processor?.({
-      name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
-      data: { shopId: "shop-1", trigger: "repair" },
-    })).resolves.toEqual({ kind: "ignored", reason: "SUBSCRIPTION_FROZEN" });
+    await expect(
+      hoisted.processor?.({
+        name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
+        data: { shopId: "shop-1", trigger: "repair" },
+      }),
+    ).resolves.toEqual({ kind: "ignored", reason: "SUBSCRIPTION_FROZEN" });
 
     expect(hoisted.resume).toHaveBeenCalledTimes(2);
     expect(hoisted.schedule).not.toHaveBeenCalled();
   });
 
   it("does not schedule a continuation when execution is denied after the last item", async () => {
-    hoisted.recoveries = Array.from({ length: 25 }, (_, index) => ({ id: `recovery-${index}` }));
-    hoisted.evaluate.mockReset()
+    hoisted.recoveries = Array.from({ length: 25 }, (_, index) => ({
+      id: `recovery-${index}`,
+    }));
+    hoisted.evaluate
+      .mockReset()
       .mockResolvedValueOnce({ allowed: true, shopId: "shop-1" })
-      .mockResolvedValue({ allowed: false, shopId: "shop-1", reason: "CONTRACT_REQUIRED" });
+      .mockResolvedValue({
+        allowed: false,
+        shopId: "shop-1",
+        reason: "CONTRACT_REQUIRED",
+      });
     hoisted.resume.mockReset().mockResolvedValue({ kind: "initiated" });
     hoisted.schedule.mockClear();
 
-    await expect(hoisted.processor?.({
-      name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
-      data: { shopId: "shop-1", trigger: "repair" },
-    })).resolves.toEqual({ kind: "ignored", reason: "CONTRACT_REQUIRED" });
+    await expect(
+      hoisted.processor?.({
+        name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
+        data: { shopId: "shop-1", trigger: "repair" },
+      }),
+    ).resolves.toEqual({ kind: "ignored", reason: "CONTRACT_REQUIRED" });
 
     expect(hoisted.resume).toHaveBeenCalledTimes(25);
     expect(hoisted.schedule).not.toHaveBeenCalled();

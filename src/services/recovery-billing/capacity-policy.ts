@@ -3,13 +3,23 @@ import { freeRecoveryReservationService } from "../free-recovery-reservation.ser
 import { purchasedRecoveryReservationService } from "../purchased-recovery-reservation.service.js";
 import { paidIncludedRecoveryReservationService } from "../paid-included-recovery-reservation.service.js";
 import { promotionalRecoveryReservationService } from "../promotional-recovery-reservation.service.js";
-import { EffectiveBillingPolicyError, type EffectiveBillingPolicy, EffectiveBillingPolicyResolver } from "../effective-billing-policy.service.js";
-import { PostContractRecoveryPolicyError, PostContractRecoveryPolicyResolver } from "../post-contract-recovery-policy.service.js";
+import {
+  EffectiveBillingPolicyError,
+  type EffectiveBillingPolicy,
+  EffectiveBillingPolicyResolver,
+} from "../effective-billing-policy.service.js";
+import {
+  PostContractRecoveryPolicyError,
+  PostContractRecoveryPolicyResolver,
+} from "../post-contract-recovery-policy.service.js";
 import { RecoveryCapacityAdmissionService } from "./recovery-capacity-admission.service.js";
 import type { RecoveryBillingAdmissionResult } from "./recovery-billing.types.js";
 
 const CHECKOUT_RECOVERY_FEATURE_KEY = "checkout_recovery";
-export type CapacityPolicyOutcome = { result: RecoveryBillingAdmissionResult; exhaustedPolicy?: EffectiveBillingPolicy };
+export type CapacityPolicyOutcome = {
+  result: RecoveryBillingAdmissionResult;
+  exhaustedPolicy?: EffectiveBillingPolicy;
+};
 
 /** Same capacity policy for original sends and serialized retry funding.
  * Notify after the transaction has committed, never from a reservation callback.
@@ -19,8 +29,14 @@ export async function admitRecoveryCapacityWithPolicy(
   sourceKey: string,
   ports: {
     policyResolver: Pick<EffectiveBillingPolicyResolver, "resolve">;
-    postContractPolicyResolver: Pick<PostContractRecoveryPolicyResolver, "resolve">;
-    capacityAdmission: Pick<RecoveryCapacityAdmissionService, "admit" | "admitPostContract">;
+    postContractPolicyResolver: Pick<
+      PostContractRecoveryPolicyResolver,
+      "resolve"
+    >;
+    capacityAdmission: Pick<
+      RecoveryCapacityAdmissionService,
+      "admit" | "admitPostContract"
+    >;
     retry?: boolean;
   },
 ): Promise<CapacityPolicyOutcome> {
@@ -33,12 +49,15 @@ export async function admitRecoveryCapacityWithPolicy(
         try {
           const postContractPolicy =
             await ports.postContractPolicyResolver.resolve(input.shopId);
-          if (ports.retry && postContractPolicy.automatedWhatsappPaused) return { result: { kind: "blocked", reason: "paused" } };
-          return { result: await ports.capacityAdmission.admitPostContract({
-            shopId: input.shopId,
-            sourceKey,
-            policy: postContractPolicy,
-          }) };
+          if (ports.retry && postContractPolicy.automatedWhatsappPaused)
+            return { result: { kind: "blocked", reason: "paused" } };
+          return {
+            result: await ports.capacityAdmission.admitPostContract({
+              shopId: input.shopId,
+              sourceKey,
+              policy: postContractPolicy,
+            }),
+          };
         } catch (postContractError) {
           if (
             postContractError instanceof PostContractRecoveryPolicyError &&
@@ -59,7 +78,10 @@ export async function admitRecoveryCapacityWithPolicy(
     return { result: { kind: "blocked", reason: "feature-unavailable" } };
   }
 
-  if (policy.newRecoveriesPaused || (ports.retry && policy.automatedWhatsappPaused)) {
+  if (
+    policy.newRecoveriesPaused ||
+    (ports.retry && policy.automatedWhatsappPaused)
+  ) {
     return { result: { kind: "blocked", reason: "paused" } };
   }
 
@@ -68,7 +90,9 @@ export async function admitRecoveryCapacityWithPolicy(
     policy.billingPeriod?.phase === "EXPIRED_RECONCILING" &&
     policy.platform !== "WOOCOMMERCE"
   ) {
-    return { result: { kind: "blocked", reason: "billing-period-reconciliation" } };
+    return {
+      result: { kind: "blocked", reason: "billing-period-reconciliation" },
+    };
   }
 
   const admission = await ports.capacityAdmission.admit({
@@ -93,17 +117,49 @@ export async function admitRecoveryCapacityWithPolicy(
 
 /** Existing billing source owners, bound to the caller's single transaction.
  * Never invokes a nested transaction, provider or notification. */
-export function admitRetryCapacityInTransaction(tx: Prisma.TransactionClient,
-  input: { shopId: string; recoveryId: string; outreachAttemptId: string }, sourceKey: string): Promise<CapacityPolicyOutcome> {
+export function admitRetryCapacityInTransaction(
+  tx: Prisma.TransactionClient,
+  input: { shopId: string; recoveryId: string; outreachAttemptId: string },
+  sourceKey: string,
+): Promise<CapacityPolicyOutcome> {
   return admitRecoveryCapacityWithPolicy(input, sourceKey, {
     policyResolver: new EffectiveBillingPolicyResolver(tx),
     postContractPolicyResolver: new PostContractRecoveryPolicyResolver(tx),
     capacityAdmission: new RecoveryCapacityAdmissionService(
-      { reserve: value => freeRecoveryReservationService.reserveInExistingTransaction(tx, value),
-        reservePostContract: value => freeRecoveryReservationService.reserveInExistingTransaction(tx, value, true) },
-      { reserve: value => purchasedRecoveryReservationService.reserveInExistingTransaction(tx, value) },
-      { reserve: value => paidIncludedRecoveryReservationService.reserveInExistingTransaction(tx, value) },
-      { reserve: value => promotionalRecoveryReservationService.reserveInExistingTransaction(tx, value) },
+      {
+        reserve: (value) =>
+          freeRecoveryReservationService.reserveInExistingTransaction(
+            tx,
+            value,
+          ),
+        reservePostContract: (value) =>
+          freeRecoveryReservationService.reserveInExistingTransaction(
+            tx,
+            value,
+            true,
+          ),
+      },
+      {
+        reserve: (value) =>
+          purchasedRecoveryReservationService.reserveInExistingTransaction(
+            tx,
+            value,
+          ),
+      },
+      {
+        reserve: (value) =>
+          paidIncludedRecoveryReservationService.reserveInExistingTransaction(
+            tx,
+            value,
+          ),
+      },
+      {
+        reserve: (value) =>
+          promotionalRecoveryReservationService.reserveInExistingTransaction(
+            tx,
+            value,
+          ),
+      },
     ),
     retry: true,
   });

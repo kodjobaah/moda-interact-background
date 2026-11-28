@@ -49,7 +49,10 @@ function createHarness({
       return {};
     }),
   };
-  const transaction = { checkoutRecovery, checkoutRecoveryStatusHistory: statusHistory };
+  const transaction = {
+    checkoutRecovery,
+    checkoutRecoveryStatusHistory: statusHistory,
+  };
   const database = {
     shop: {
       findUnique: vi.fn(async () => {
@@ -57,24 +60,28 @@ function createHarness({
         return shop;
       }),
     },
-    $transaction: vi.fn(async (callback: (transaction: typeof transaction) => unknown) => {
-      order.push("transaction");
-      return callback(transaction);
-    }),
+    $transaction: vi.fn(
+      async (callback: (transaction: typeof transaction) => unknown) => {
+        order.push("transaction");
+        return callback(transaction);
+      },
+    ),
   };
   const pendingRecoveryCandidateService = {
     resolveCandidate: vi.fn(async () => {
       order.push("candidate-resolve");
       return candidateResults.shift() ?? null;
     }),
-    withCheckoutLock: vi.fn(async (
-      _shopId: string,
-      _checkoutToken: string,
-      callback: () => Promise<unknown>,
-    ) => {
-      order.push("lock");
-      return callback();
-    }),
+    withCheckoutLock: vi.fn(
+      async (
+        _shopId: string,
+        _checkoutToken: string,
+        callback: () => Promise<unknown>,
+      ) => {
+        order.push("lock");
+        return callback();
+      },
+    ),
     cancelCandidate: vi.fn(async () => {
       order.push("candidate-cancel");
       return { removed: true };
@@ -104,34 +111,43 @@ describe("OrderRecoveryCorrelationService", () => {
   it("rejects customer-only correlation before shop or candidate access", async () => {
     const harness = createHarness();
 
-    await expect(harness.service.handleOrderCompleted({
-      ...event,
-      checkoutToken: null,
-      cartToken: null,
-    })).resolves.toEqual({ kind: "ignored", reason: "missing-correlation" });
+    await expect(
+      harness.service.handleOrderCompleted({
+        ...event,
+        checkoutToken: null,
+        cartToken: null,
+      }),
+    ).resolves.toEqual({ kind: "ignored", reason: "missing-correlation" });
     expect(harness.database.shop.findUnique).not.toHaveBeenCalled();
-    expect(harness.pendingRecoveryCandidateService.resolveCandidate).not.toHaveBeenCalled();
+    expect(
+      harness.pendingRecoveryCandidateService.resolveCandidate,
+    ).not.toHaveBeenCalled();
   });
 
   it("uses cart correlation only to recover checkout scope before locking and cancelling", async () => {
     const matched = buildCandidate();
     const harness = createHarness({ candidates: [matched, matched] });
 
-    await expect(harness.service.handleOrderCompleted({
-      ...event,
-      checkoutToken: null,
-    })).resolves.toEqual({ kind: "cancelled-candidate", checkoutToken: "checkout-1" });
+    await expect(
+      harness.service.handleOrderCompleted({
+        ...event,
+        checkoutToken: null,
+      }),
+    ).resolves.toEqual({
+      kind: "cancelled-candidate",
+      checkoutToken: "checkout-1",
+    });
 
-    expect(harness.pendingRecoveryCandidateService.resolveCandidate).toHaveBeenNthCalledWith(1, {
+    expect(
+      harness.pendingRecoveryCandidateService.resolveCandidate,
+    ).toHaveBeenNthCalledWith(1, {
       shopId: "shop-1",
       checkoutToken: null,
       cartToken: "cart-1",
     });
-    expect(harness.pendingRecoveryCandidateService.withCheckoutLock).toHaveBeenCalledWith(
-      "shop-1",
-      "checkout-1",
-      expect.any(Function),
-    );
+    expect(
+      harness.pendingRecoveryCandidateService.withCheckoutLock,
+    ).toHaveBeenCalledWith("shop-1", "checkout-1", expect.any(Function));
     expect(harness.order).toEqual([
       "shop-read",
       "candidate-resolve",
@@ -146,17 +162,25 @@ describe("OrderRecoveryCorrelationService", () => {
   it("does not lock a cart-only order without an indexed checkout candidate", async () => {
     const harness = createHarness();
 
-    await expect(harness.service.handleOrderCompleted({
-      ...event,
-      checkoutToken: null,
-    })).resolves.toEqual({ kind: "discarded", reason: "no-checkout-token" });
-    expect(harness.pendingRecoveryCandidateService.withCheckoutLock).not.toHaveBeenCalled();
+    await expect(
+      harness.service.handleOrderCompleted({
+        ...event,
+        checkoutToken: null,
+      }),
+    ).resolves.toEqual({ kind: "discarded", reason: "no-checkout-token" });
+    expect(
+      harness.pendingRecoveryCandidateService.withCheckoutLock,
+    ).not.toHaveBeenCalled();
     expect(harness.database.$transaction).not.toHaveBeenCalled();
   });
 
   it("tombstones before the transaction and atomically completes the latest eligible recovery", async () => {
     const harness = createHarness({
-      shop: { id: "shop-1", status: "ACTIVE", subscription: { status: "FROZEN" } },
+      shop: {
+        id: "shop-1",
+        status: "ACTIVE",
+        subscription: { status: "FROZEN" },
+      },
     });
 
     await expect(harness.service.handleOrderCompleted(event)).resolves.toEqual({
@@ -231,9 +255,13 @@ describe("OrderRecoveryCorrelationService", () => {
   it.each(["COMPLETED", "EXPIRED", "CANCELLED"])(
     "does not reopen terminal recovery %s",
     async (status) => {
-      const harness = createHarness({ recovery: { id: "recovery-1", status, generation: 2 } });
+      const harness = createHarness({
+        recovery: { id: "recovery-1", status, generation: 2 },
+      });
 
-      await expect(harness.service.handleOrderCompleted(event)).resolves.toEqual({
+      await expect(
+        harness.service.handleOrderCompleted(event),
+      ).resolves.toEqual({
         kind: "ignored",
         reason: `terminal-${status.toLowerCase()}`,
       });

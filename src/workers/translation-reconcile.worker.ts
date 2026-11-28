@@ -2,7 +2,9 @@ import { TranslationReconcileJobSchema } from "@modainteract/moda-interact-share
 
 import { translationReconciliationService } from "../services/translation-reconciliation.service.js";
 
-export async function handleTranslationReconcile(input: unknown): Promise<void> {
+export async function handleTranslationReconcile(
+  input: unknown,
+): Promise<void> {
   const job = TranslationReconcileJobSchema.parse(input);
   await translationReconciliationService.reconcile(job.reconciliationRequestId);
 }

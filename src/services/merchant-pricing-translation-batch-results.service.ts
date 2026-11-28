@@ -1,5 +1,8 @@
 import { Prisma } from "@prisma/client";
-import { CommerceEnvironmentSchema, type CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
+import {
+  CommerceEnvironmentSchema,
+  type CommerceEnvironment,
+} from "@modainteract/moda-interact-shared/commerce/model";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import {
@@ -55,10 +58,16 @@ type ItemRecord = {
 type ResultTransaction = MerchantPricingTranslationRunStateTransaction;
 
 type ResultDatabase = {
-  $transaction<T>(callback: (transaction: ResultTransaction) => Promise<T>): Promise<T>;
+  $transaction<T>(
+    callback: (transaction: ResultTransaction) => Promise<T>,
+  ): Promise<T>;
 };
 
-type ProviderFactory = (options: { provider: string; model: string; apiKey: string }) => TranslationProvider;
+type ProviderFactory = (options: {
+  provider: string;
+  model: string;
+  apiKey: string;
+}) => TranslationProvider;
 
 const logger = createLogger({
   serviceName: "moda-merchant-communications-worker",
@@ -81,25 +90,38 @@ export class MerchantPricingTranslationBatchResultsService {
   private readonly database: ResultDatabase;
   private readonly providerFactory: ProviderFactory;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
-  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
+  private readonly credentialResolverFactory: () =>
+    | TranslationProviderCredentialResolver
+    | Promise<TranslationProviderCredentialResolver>;
   private readonly runStateService: MerchantPricingTranslationRunStateService;
 
-  constructor(options: {
-    database?: ResultDatabase;
-    providerFactory?: ProviderFactory;
-    runtimeConfig?: TranslationRuntimeConfigReader;
-    credentialResolverFactory?: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
-    runStateService?: MerchantPricingTranslationRunStateService;
-  } = {}) {
+  constructor(
+    options: {
+      database?: ResultDatabase;
+      providerFactory?: ProviderFactory;
+      runtimeConfig?: TranslationRuntimeConfigReader;
+      credentialResolverFactory?: () =>
+        | TranslationProviderCredentialResolver
+        | Promise<TranslationProviderCredentialResolver>;
+      runStateService?: MerchantPricingTranslationRunStateService;
+    } = {},
+  ) {
     this.database = options.database ?? prisma;
-    this.providerFactory = options.providerFactory ?? ((providerOptions) =>
-      createOpenAITranslationProvider(providerOptions));
-    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
-    this.credentialResolverFactory = options.credentialResolverFactory ?? defaultCredentialResolver;
-    this.runStateService = options.runStateService ?? new MerchantPricingTranslationRunStateService(this.database);
+    this.providerFactory =
+      options.providerFactory ??
+      ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.runtimeConfig =
+      options.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.credentialResolverFactory =
+      options.credentialResolverFactory ?? defaultCredentialResolver;
+    this.runStateService =
+      options.runStateService ??
+      new MerchantPricingTranslationRunStateService(this.database);
   }
 
-  async apply(input: { translationBatchId: string }): Promise<MerchantPricingTranslationBatchResultsResult> {
+  async apply(input: {
+    translationBatchId: string;
+  }): Promise<MerchantPricingTranslationBatchResultsResult> {
     const startedAt = Date.now();
     const batch = await this.loadBatch(input.translationBatchId);
     if (!batch || batch.status !== "PROVIDER_COMPLETED") {
@@ -108,26 +130,38 @@ export class MerchantPricingTranslationBatchResultsService {
 
     let provider: TranslationProvider;
     try {
-      const environment = CommerceEnvironmentSchema.parse(batch.environment) as CommerceEnvironment;
-      const apiKey = await (await this.credentialResolverFactory()).resolve({
+      const environment = CommerceEnvironmentSchema.parse(
+        batch.environment,
+      ) as CommerceEnvironment;
+      const apiKey = await (
+        await this.credentialResolverFactory()
+      ).resolve({
         environment,
         provider: batch.provider,
       });
-      provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
+      provider = this.providerFactory({
+        provider: batch.provider,
+        model: batch.model,
+        apiKey,
+      });
     } catch (error) {
       const failureCode = "invalid-provider-configuration";
       await this.failBatchItems(batch.id, batch.runId, failureCode);
-      logger.error("background.merchant_pricing_translation.batch_results_failed", {
-        runId: batch.runId,
-        batchId: batch.id,
-        provider: batch.provider,
-        model: batch.model,
-        failureCode,
-        errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
-        durationMs: Date.now() - startedAt,
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error: error,
-      });
+      logger.error(
+        "background.merchant_pricing_translation.batch_results_failed",
+        {
+          runId: batch.runId,
+          batchId: batch.id,
+          provider: batch.provider,
+          model: batch.model,
+          failureCode,
+          errorName:
+            error instanceof Error ? error.name.slice(0, 128) : "unknown",
+          durationMs: Date.now() - startedAt,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
+        },
+      );
       return { status: "failed", batchId: batch.id, failureCode };
     }
 
@@ -138,12 +172,16 @@ export class MerchantPricingTranslationBatchResultsService {
         errorFileId: batch.errorFileId,
         missingResultFileMessage: `Merchant Pricing translation Batch ${batch.id} has no provider result file`,
         loadExpectedProviderCustomIds: async () =>
-          (await this.loadExpectedItems(batch.id)).map((item) => item.providerCustomId),
+          (await this.loadExpectedItems(batch.id)).map(
+            (item) => item.providerCustomId,
+          ),
         membershipMessages: {
-          countMismatch: "Merchant Pricing translation Batch output does not contain exactly one result per expected item",
+          countMismatch:
+            "Merchant Pricing translation Batch output does not contain exactly one result per expected item",
           unknownProviderCustomId: (providerCustomId) =>
             `Unknown Merchant Pricing translation provider custom ID: ${providerCustomId}`,
-          duplicateProviderCustomId: "Merchant Pricing translation Batch output contains duplicate provider custom IDs",
+          duplicateProviderCustomId:
+            "Merchant Pricing translation Batch output contains duplicate provider custom IDs",
         },
         applyResult: (result) => this.applyResult(batch.id, result),
       });
@@ -159,17 +197,21 @@ export class MerchantPricingTranslationBatchResultsService {
     } catch (error) {
       const failureCode = "provider-results-unavailable";
       await this.failBatchItems(batch.id, batch.runId, failureCode);
-      logger.warn("background.merchant_pricing_translation.batch_results_failed", {
-        runId: batch.runId,
-        batchId: batch.id,
-        provider: batch.provider,
-        model: batch.model,
-        failureCode,
-        errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
-        durationMs: Date.now() - startedAt,
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error: error,
-      });
+      logger.warn(
+        "background.merchant_pricing_translation.batch_results_failed",
+        {
+          runId: batch.runId,
+          batchId: batch.id,
+          provider: batch.provider,
+          model: batch.model,
+          failureCode,
+          errorName:
+            error instanceof Error ? error.name.slice(0, 128) : "unknown",
+          durationMs: Date.now() - startedAt,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
+        },
+      );
       return { status: "failed", batchId: batch.id, failureCode };
     }
   }
@@ -189,14 +231,19 @@ export class MerchantPricingTranslationBatchResultsService {
   }
 
   private async loadExpectedItems(batchId: string): Promise<ExpectedItem[]> {
-    return this.database.$transaction(async (transaction) => transaction.$queryRaw<ExpectedItem[]>(Prisma.sql`
+    return this.database.$transaction(async (transaction) =>
+      transaction.$queryRaw<ExpectedItem[]>(Prisma.sql`
       SELECT "providerCustomId", "translationItemId"
       FROM "billing"."MerchantPricingTranslationBatchItem"
       WHERE "batchId" = ${batchId}
-    `));
+    `),
+    );
   }
 
-  private async applyResult(batchId: string, result: TranslationProviderResult): Promise<boolean> {
+  private async applyResult(
+    batchId: string,
+    result: TranslationProviderResult,
+  ): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
       const rows = await transaction.$queryRaw<ItemRecord[]>(Prisma.sql`
         SELECT t."id" AS "translationItemId", t."sourceEntityKind"::text AS "sourceEntityKind",
@@ -209,12 +256,17 @@ export class MerchantPricingTranslationBatchResultsService {
           AND i."providerCustomId" = ${result.providerCustomId}
       `);
       const record = rows[0];
-      if (!record) throw new Error(`Provider custom ID is not a member of Batch ${batchId}`);
-      if (record.status !== "PENDING" || record.currentBatchId !== batchId) return false;
+      if (!record)
+        throw new Error(
+          `Provider custom ID is not a member of Batch ${batchId}`,
+        );
+      if (record.status !== "PENDING" || record.currentBatchId !== batchId)
+        return false;
 
-      const translatedText = result.status === "completed"
-        ? validateMerchantPricingTranslatedText(record, result.translatedText)
-        : null;
+      const translatedText =
+        result.status === "completed"
+          ? validateMerchantPricingTranslatedText(record, result.translatedText)
+          : null;
       if (translatedText) {
         const affected = await transaction.$executeRaw(Prisma.sql`
           UPDATE "billing"."MerchantPricingTranslationItem"
@@ -233,17 +285,29 @@ export class MerchantPricingTranslationBatchResultsService {
         return affected === 1;
       }
 
-      const failureCode = result.status === "completed"
-        ? "translation-output-validation-failed"
-        : result.failureCode ?? "provider-result-failed";
-      await this.applyFailureDisposition(transaction, record, batchId, failureCode);
+      const failureCode =
+        result.status === "completed"
+          ? "translation-output-validation-failed"
+          : (result.failureCode ?? "provider-result-failed");
+      await this.applyFailureDisposition(
+        transaction,
+        record,
+        batchId,
+        failureCode,
+      );
       return false;
     });
   }
 
-  private async failBatchItems(batchId: string, runId: string, failureCode: string): Promise<void> {
+  private async failBatchItems(
+    batchId: string,
+    runId: string,
+    failureCode: string,
+  ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
-      const items = await transaction.$queryRaw<Array<Pick<ItemRecord, "translationItemId" | "retryCount">>>(Prisma.sql`
+      const items = await transaction.$queryRaw<
+        Array<Pick<ItemRecord, "translationItemId" | "retryCount">>
+      >(Prisma.sql`
         SELECT t."id" AS "translationItemId", t."retryCount"
         FROM "billing"."MerchantPricingTranslationBatchItem" i
         INNER JOIN "billing"."MerchantPricingTranslationItem" t ON t."id" = i."translationItemId"
@@ -252,7 +316,12 @@ export class MerchantPricingTranslationBatchResultsService {
           AND t."currentBatchId" = ${batchId}
       `);
       for (const item of items) {
-        await this.applyFailureDisposition(transaction, item, batchId, failureCode);
+        await this.applyFailureDisposition(
+          transaction,
+          item,
+          batchId,
+          failureCode,
+        );
       }
       await transaction.$executeRaw(Prisma.sql`
         UPDATE "billing"."MerchantPricingTranslationBatch"
@@ -293,9 +362,14 @@ export class MerchantPricingTranslationBatchResultsService {
     return affected === 1;
   }
 
-  private async completeBatchAndAdvanceRun(batchId: string, runId: string): Promise<void> {
+  private async completeBatchAndAdvanceRun(
+    batchId: string,
+    runId: string,
+  ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
-      const pending = await transaction.$queryRaw<Array<{ count: bigint }>>(Prisma.sql`
+      const pending = await transaction.$queryRaw<
+        Array<{ count: bigint }>
+      >(Prisma.sql`
         SELECT COUNT(*)::bigint AS "count"
         FROM "billing"."MerchantPricingTranslationBatchItem" i
         INNER JOIN "billing"."MerchantPricingTranslationItem" t ON t."id" = i."translationItemId"
@@ -304,7 +378,9 @@ export class MerchantPricingTranslationBatchResultsService {
           AND t."currentBatchId" = ${batchId}
       `);
       if (Number(pending[0]?.count ?? 0) !== 0) {
-        throw new Error(`Merchant Pricing translation Batch ${batchId} still has unapplied items`);
+        throw new Error(
+          `Merchant Pricing translation Batch ${batchId} still has unapplied items`,
+        );
       }
 
       await transaction.$executeRaw(Prisma.sql`

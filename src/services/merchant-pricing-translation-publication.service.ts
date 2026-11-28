@@ -3,9 +3,7 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
-import {
-  finalizeMerchantPricingTranslationRun,
-} from "./merchant-pricing-translation/publication-persistence.js";
+import { finalizeMerchantPricingTranslationRun } from "./merchant-pricing-translation/publication-persistence.js";
 import type {
   MerchantPricingPublicationTransaction,
   MerchantPricingTranslationPublicationOutcome,
@@ -19,7 +17,9 @@ const logger = createLogger({
 type PublicationDatabase = {
   $queryRaw<T>(query: Prisma.Sql): Promise<T>;
   $transaction<T>(
-    callback: (transaction: MerchantPricingPublicationTransaction) => Promise<T>,
+    callback: (
+      transaction: MerchantPricingPublicationTransaction,
+    ) => Promise<T>,
     options?: {
       isolationLevel?: Prisma.TransactionIsolationLevel;
       maxWait?: number;
@@ -40,13 +40,16 @@ export class MerchantPricingTranslationPublicationService {
   private readonly database: PublicationDatabase;
 
   constructor(options: { database?: PublicationDatabase } = {}) {
-    this.database = options.database ?? (prisma as unknown as PublicationDatabase);
+    this.database =
+      options.database ?? (prisma as unknown as PublicationDatabase);
   }
 
   async reconcile(
     limit: number,
   ): Promise<MerchantPricingTranslationPublicationReconciliationResult> {
-    const rows = await this.database.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    const rows = await this.database.$queryRaw<
+      Array<{ id: string }>
+    >(Prisma.sql`
       SELECT run."id"
       FROM "billing"."MerchantPricingTranslationRun" run
       INNER JOIN "billing"."MerchantPricingPlan" plan
@@ -74,12 +77,17 @@ export class MerchantPricingTranslationPublicationService {
         if (outcome.status === "failed") result.failed += 1;
       } catch (error) {
         result.retryableFailures += 1;
-        logger.error("background.merchant_pricing_translation.finalization_retryable_failure", {
-          runId: row.id,
-          failureCode: error instanceof Error ? error.name : "finalization-failed",
-          errorMessage: error instanceof Error ? error.message : String(error),
-          error: error,
-        });
+        logger.error(
+          "background.merchant_pricing_translation.finalization_retryable_failure",
+          {
+            runId: row.id,
+            failureCode:
+              error instanceof Error ? error.name : "finalization-failed",
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+            error: error,
+          },
+        );
       }
     }
 
@@ -92,7 +100,10 @@ export class MerchantPricingTranslationPublicationService {
     const startedAt = Date.now();
     const outcome = await this.database.$transaction(
       (transaction) =>
-        finalizeMerchantPricingTranslationRun(transaction, input.translationRunId),
+        finalizeMerchantPricingTranslationRun(
+          transaction,
+          input.translationRunId,
+        ),
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
         maxWait: 10_000,
@@ -118,12 +129,15 @@ export class MerchantPricingTranslationPublicationService {
       return;
     }
     if (outcome.status === "failure-recorded") {
-      logger.error("background.merchant_pricing_translation.draft_failure_recorded", {
-        runId: outcome.runId,
-        planId: outcome.planId,
-        failureCode: outcome.failureCode,
-        durationMs,
-      });
+      logger.error(
+        "background.merchant_pricing_translation.draft_failure_recorded",
+        {
+          runId: outcome.runId,
+          planId: outcome.planId,
+          failureCode: outcome.failureCode,
+          durationMs,
+        },
+      );
       return;
     }
     if (outcome.status === "stale") {
@@ -136,12 +150,15 @@ export class MerchantPricingTranslationPublicationService {
       return;
     }
     if (outcome.status === "failed") {
-      logger.error("background.merchant_pricing_translation.draft_finalization_failed", {
-        runId: outcome.runId,
-        planId: outcome.planId,
-        failureCode: outcome.failureCode,
-        durationMs,
-      });
+      logger.error(
+        "background.merchant_pricing_translation.draft_finalization_failed",
+        {
+          runId: outcome.runId,
+          planId: outcome.planId,
+          failureCode: outcome.failureCode,
+          durationMs,
+        },
+      );
     }
   }
 }

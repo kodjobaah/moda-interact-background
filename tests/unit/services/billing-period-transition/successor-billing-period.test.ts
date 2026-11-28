@@ -25,10 +25,12 @@ const baseInput = {
   },
 };
 
-function harness(options: {
-  successor?: Record<string, unknown> | null;
-  counter?: Record<string, unknown> | null;
-} = {}) {
+function harness(
+  options: {
+    successor?: Record<string, unknown> | null;
+    counter?: Record<string, unknown> | null;
+  } = {},
+) {
   const successor = options.successor === undefined ? null : options.successor;
   const transaction = {
     billingPeriod: {
@@ -64,8 +66,15 @@ describe("successor billing period", () => {
   it("creates an exact Paid successor and included-credit counter", async () => {
     const transaction = harness();
 
-    const existing = await findCompatibleSuccessorBillingPeriod(transaction as never, baseInput);
-    const period = await ensureSuccessorBillingPeriod(transaction as never, baseInput, existing);
+    const existing = await findCompatibleSuccessorBillingPeriod(
+      transaction as never,
+      baseInput,
+    );
+    const period = await ensureSuccessorBillingPeriod(
+      transaction as never,
+      baseInput,
+      existing,
+    );
 
     expect(period).toEqual({ id: "period-new" });
     expect(transaction.billingPeriod.create).toHaveBeenCalledWith({
@@ -82,17 +91,23 @@ describe("successor billing period", () => {
         status: "OPEN",
       },
     });
-    expect(transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
-    expect(transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: {},
-      create: expect.objectContaining({
-        billingPeriodId: "period-new",
-        grantedQuantity: 100,
-        committedQuantity: 0,
-        reservedQuantity: 0,
-        forfeitedQuantity: 0,
+    expect(
+      transaction.billingPeriodEntitlementCounter.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(
+      transaction.billingPeriodEntitlementCounter.upsert,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: {},
+        create: expect.objectContaining({
+          billingPeriodId: "period-new",
+          grantedQuantity: 100,
+          committedQuantity: 0,
+          reservedQuantity: 0,
+          forfeitedQuantity: 0,
+        }),
       }),
-    }));
+    );
   });
 
   it("reuses a compatible successor without resetting included usage", async () => {
@@ -103,14 +118,26 @@ describe("successor billing period", () => {
       reservedQuantity: 3,
       forfeitedQuantity: 2,
     };
-    const transaction = harness({ successor: compatibleSuccessor(), counter: existingCounter });
+    const transaction = harness({
+      successor: compatibleSuccessor(),
+      counter: existingCounter,
+    });
 
-    const existing = await findCompatibleSuccessorBillingPeriod(transaction as never, baseInput);
-    const period = await ensureSuccessorBillingPeriod(transaction as never, baseInput, existing);
+    const existing = await findCompatibleSuccessorBillingPeriod(
+      transaction as never,
+      baseInput,
+    );
+    const period = await ensureSuccessorBillingPeriod(
+      transaction as never,
+      baseInput,
+      existing,
+    );
 
     expect(period).toEqual({ id: "period-new" });
     expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
-    expect(transaction.billingPeriodEntitlementCounter.findUnique).toHaveBeenCalledWith({
+    expect(
+      transaction.billingPeriodEntitlementCounter.findUnique,
+    ).toHaveBeenCalledWith({
       where: {
         billingPeriodId_counter: {
           billingPeriodId: "period-new",
@@ -118,7 +145,9 @@ describe("successor billing period", () => {
         },
       },
     });
-    expect(transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {} }));
+    expect(
+      transaction.billingPeriodEntitlementCounter.upsert,
+    ).toHaveBeenCalledWith(expect.objectContaining({ update: {} }));
     expect(existingCounter).toEqual({
       id: "counter-new",
       grantedQuantity: 100,
@@ -129,10 +158,13 @@ describe("successor billing period", () => {
   });
 
   it("rejects a closed successor with the caller-specific error", async () => {
-    const transaction = harness({ successor: compatibleSuccessor({ status: "CLOSED" }) });
+    const transaction = harness({
+      successor: compatibleSuccessor({ status: "CLOSED" }),
+    });
 
-    await expect(findCompatibleSuccessorBillingPeriod(transaction as never, baseInput))
-      .rejects.toThrow("closed successor");
+    await expect(
+      findCompatibleSuccessorBillingPeriod(transaction as never, baseInput),
+    ).rejects.toThrow("closed successor");
   });
 
   it.each([
@@ -145,12 +177,18 @@ describe("successor billing period", () => {
     ["grant", { includedRecoveryCreditsGranted: 90 }],
     ["start", { periodStart: new Date("2026-10-02T00:00:00.000Z") }],
     ["end", { periodEnd: new Date("2026-11-02T00:00:00.000Z") }],
-  ])("rejects an incompatible successor %s identity", async (_label, overrides) => {
-    const transaction = harness({ successor: compatibleSuccessor(overrides) });
+  ])(
+    "rejects an incompatible successor %s identity",
+    async (_label, overrides) => {
+      const transaction = harness({
+        successor: compatibleSuccessor(overrides),
+      });
 
-    await expect(findCompatibleSuccessorBillingPeriod(transaction as never, baseInput))
-      .rejects.toThrow("incompatible successor");
-  });
+      await expect(
+        findCompatibleSuccessorBillingPeriod(transaction as never, baseInput),
+      ).rejects.toThrow("incompatible successor");
+    },
+  );
 
   it("rejects an incompatible existing included-credit grant", async () => {
     const transaction = harness({
@@ -158,10 +196,16 @@ describe("successor billing period", () => {
       counter: { id: "counter-new", grantedQuantity: 99 },
     });
 
-    const existing = await findCompatibleSuccessorBillingPeriod(transaction as never, baseInput);
-    await expect(ensureSuccessorBillingPeriod(transaction as never, baseInput, existing))
-      .rejects.toThrow("incompatible counter");
-    expect(transaction.billingPeriodEntitlementCounter.upsert).not.toHaveBeenCalled();
+    const existing = await findCompatibleSuccessorBillingPeriod(
+      transaction as never,
+      baseInput,
+    );
+    await expect(
+      ensureSuccessorBillingPeriod(transaction as never, baseInput, existing),
+    ).rejects.toThrow("incompatible counter");
+    expect(
+      transaction.billingPeriodEntitlementCounter.upsert,
+    ).not.toHaveBeenCalled();
   });
 
   it("creates a Free successor without an included-credit counter", async () => {
@@ -175,10 +219,17 @@ describe("successor billing period", () => {
       includedRecoveryCreditsGranted: null,
     };
 
-    const existing = await findCompatibleSuccessorBillingPeriod(transaction as never, input);
+    const existing = await findCompatibleSuccessorBillingPeriod(
+      transaction as never,
+      input,
+    );
     await ensureSuccessorBillingPeriod(transaction as never, input, existing);
 
-    expect(transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
-    expect(transaction.billingPeriodEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expect(
+      transaction.billingPeriodEntitlementCounter.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(
+      transaction.billingPeriodEntitlementCounter.upsert,
+    ).not.toHaveBeenCalled();
   });
 });

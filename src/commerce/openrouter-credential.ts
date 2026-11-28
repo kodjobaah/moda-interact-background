@@ -28,25 +28,40 @@ export function createOpenRouterCredentialResolver(input: {
     async resolve({ environment, signal }): Promise<string> {
       const assertCurrent = () => {
         if (signal.aborted)
-          throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_SIGNAL_ABORTED");
+          throw new OpenRouterCredentialResolutionFailure(
+            "CREDENTIAL_SIGNAL_ABORTED",
+          );
       };
       assertCurrent();
 
-      const row = await input.db.commerceOpenRouterCredential.findUnique({
-        where: { environment },
-      }).catch((error: unknown) => {
-        assertCurrent();
-        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_LOOKUP_FAILED", error);
-      });
+      const row = await input.db.commerceOpenRouterCredential
+        .findUnique({
+          where: { environment },
+        })
+        .catch((error: unknown) => {
+          assertCurrent();
+          throw new OpenRouterCredentialResolutionFailure(
+            "CREDENTIAL_LOOKUP_FAILED",
+            error,
+          );
+        });
       assertCurrent();
       if (!row)
-        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_NOT_CONFIGURED");
+        throw new OpenRouterCredentialResolutionFailure(
+          "CREDENTIAL_NOT_CONFIGURED",
+        );
       if (row.environment !== environment)
-        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_ENVIRONMENT_MISMATCH");
+        throw new OpenRouterCredentialResolutionFailure(
+          "CREDENTIAL_ENVIRONMENT_MISMATCH",
+        );
       if (!hasValidPersistedCredentialMetadata(row))
-        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_ENVELOPE_INVALID");
+        throw new OpenRouterCredentialResolutionFailure(
+          "CREDENTIAL_ENVELOPE_INVALID",
+        );
       if (!input.keyring.hasKey(row.keyId))
-        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_KEY_MISSING");
+        throw new OpenRouterCredentialResolutionFailure(
+          "CREDENTIAL_KEY_MISSING",
+        );
 
       let credential: string;
       try {
@@ -63,10 +78,14 @@ export function createOpenRouterCredentialResolver(input: {
             keyId: row.keyId,
           }),
         });
-        if (!isValidProviderCredentialText(credential)) throw new Error("Invalid provider credential");
+        if (!isValidProviderCredentialText(credential))
+          throw new Error("Invalid provider credential");
       } catch (error) {
         assertCurrent();
-        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_DECRYPTION_FAILED", error);
+        throw new OpenRouterCredentialResolutionFailure(
+          "CREDENTIAL_DECRYPTION_FAILED",
+          error,
+        );
       }
       assertCurrent();
       return credential;

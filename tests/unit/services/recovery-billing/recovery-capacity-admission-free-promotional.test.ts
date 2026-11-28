@@ -17,7 +17,9 @@ describe("RecoveryCapacityAdmissionService Free and promotional routing", () => 
       },
     });
 
-    await expect(harness.service.admit(normalInput(freePolicy()))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(freePolicy())),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "promotional" },
     });
@@ -39,7 +41,9 @@ describe("RecoveryCapacityAdmissionService Free and promotional routing", () => 
       },
     });
 
-    await expect(harness.service.admit(normalInput(freePolicy()))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(freePolicy())),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "purchased" },
     });
@@ -56,7 +60,9 @@ describe("RecoveryCapacityAdmissionService Free and promotional routing", () => 
       },
     });
 
-    await expect(harness.service.admit(normalInput(freePolicy()))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(freePolicy())),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "lifetime-free" },
     });
@@ -67,14 +73,19 @@ describe("RecoveryCapacityAdmissionService Free and promotional routing", () => 
   it("observes newly restored purchased capacity on a later admission", async () => {
     const harness = capacityHarness();
     harness.purchased.reserve
-      .mockResolvedValueOnce({ kind: "credits-exhausted" as const, available: 0 })
+      .mockResolvedValueOnce({
+        kind: "credits-exhausted" as const,
+        available: 0,
+      })
       .mockResolvedValueOnce({
         kind: "reserved" as const,
         reservation: {},
         counter: "PURCHASED_RECOVERY_CREDITS" as const,
       });
 
-    await expect(harness.service.admit(normalInput(freePolicy()))).resolves.toEqual({
+    await expect(
+      harness.service.admit(normalInput(freePolicy())),
+    ).resolves.toEqual({
       kind: "blocked",
       reason: "capacity-exhausted",
     });
@@ -85,7 +96,10 @@ describe("RecoveryCapacityAdmissionService Free and promotional routing", () => 
           sourceKey: "recovery:shop-1:recovery-2",
         }),
       ),
-    ).resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    ).resolves.toMatchObject({
+      kind: "admitted",
+      admission: { kind: "purchased" },
+    });
   });
 
   it("keeps spending existing purchased credits even when pack purchasing is disabled", async () => {
@@ -104,7 +118,9 @@ describe("RecoveryCapacityAdmissionService Free and promotional routing", () => 
       },
     });
 
-    await expect(harness.service.admit(normalInput(policy))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(policy)),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "purchased" },
     });
@@ -113,7 +129,9 @@ describe("RecoveryCapacityAdmissionService Free and promotional routing", () => 
   it("returns capacity-exhausted only after Free purchased and lifetime capacity are exhausted", async () => {
     const harness = capacityHarness();
 
-    await expect(harness.service.admit(normalInput(freePolicy()))).resolves.toEqual({
+    await expect(
+      harness.service.admit(normalInput(freePolicy())),
+    ).resolves.toEqual({
       kind: "blocked",
       reason: "capacity-exhausted",
     });
@@ -132,7 +150,9 @@ describe("RecoveryCapacityAdmissionService Free and promotional routing", () => 
         },
       });
 
-      await expect(harness.service.admit(normalInput(paidPolicy()))).resolves.toEqual({
+      await expect(
+        harness.service.admit(normalInput(paidPolicy())),
+      ).resolves.toEqual({
         kind: "blocked",
         reason: "reservation-in-flight",
       });
@@ -156,7 +176,9 @@ describe("RecoveryCapacityAdmissionService Free and promotional routing", () => 
       },
     });
 
-    await expect(harness.service.admit(normalInput(paidPolicy()))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(paidPolicy())),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "lifetime-free" },
     });

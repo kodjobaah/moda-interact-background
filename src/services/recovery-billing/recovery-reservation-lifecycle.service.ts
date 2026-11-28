@@ -62,7 +62,10 @@ export class RecoveryReservationLifecycleService {
           sourceKey: admission.sourceKey,
           planId: admission.policy.planId,
         });
-      } else if (admission.kind === "free" || admission.kind === "lifetime-free") {
+      } else if (
+        admission.kind === "free" ||
+        admission.kind === "lifetime-free"
+      ) {
         outcome = await this.freeReservationService.commit({
           shopId: admission.policy.shopId,
           sourceKey: admission.sourceKey,
@@ -84,7 +87,7 @@ export class RecoveryReservationLifecycleService {
       this.serviceLogger.error("recovery.credit_commit.failed", {
         operation: "commitSuccessfulInitiation",
         ...expected,
-        ...(readOutcomeContext(outcome)),
+        ...readOutcomeContext(outcome),
         error,
       });
       throw error;
@@ -143,7 +146,9 @@ export class RecoveryReservationLifecycleService {
       if (disposition === "definitive") {
         await this.promotionalReservationService.release(reservationInput);
       } else {
-        await this.promotionalReservationService.markAmbiguous(reservationInput);
+        await this.promotionalReservationService.markAmbiguous(
+          reservationInput,
+        );
       }
       return;
     }
@@ -166,7 +171,9 @@ export class RecoveryReservationLifecycleService {
       if (disposition === "definitive") {
         await this.paidIncludedReservationService.release(reservationInput);
       } else {
-        await this.paidIncludedReservationService.markAmbiguous(reservationInput);
+        await this.paidIncludedReservationService.markAmbiguous(
+          reservationInput,
+        );
       }
       return;
     }
@@ -211,14 +218,14 @@ function requireCommittedOutcome(
     sourceKind: RecoveryBillingAdmission["kind"];
   },
 ): void {
-  const record = typeof outcome === "object" && outcome !== null
-    ? outcome as { kind?: unknown; reservation?: Record<string, unknown> }
-    : undefined;
+  const record =
+    typeof outcome === "object" && outcome !== null
+      ? (outcome as { kind?: unknown; reservation?: Record<string, unknown> })
+      : undefined;
   const reservation = record?.reservation;
   const outcomeKind = typeof record?.kind === "string" ? record.kind : null;
-  const reservationStatus = typeof reservation?.status === "string"
-    ? reservation.status
-    : null;
+  const reservationStatus =
+    typeof reservation?.status === "string" ? reservation.status : null;
   const valid =
     (outcomeKind === "committed" || outcomeKind === "already-committed") &&
     reservationStatus === "COMMITTED" &&
@@ -239,9 +246,14 @@ function requireCommittedOutcome(
 
 function readOutcomeContext(outcome: unknown): Record<string, unknown> {
   if (typeof outcome !== "object" || outcome === null) return {};
-  const record = outcome as { kind?: unknown; reservation?: { status?: unknown } };
+  const record = outcome as {
+    kind?: unknown;
+    reservation?: { status?: unknown };
+  };
   return {
-    ...(typeof record.kind === "string" ? { observedOutcome: record.kind } : {}),
+    ...(typeof record.kind === "string"
+      ? { observedOutcome: record.kind }
+      : {}),
     ...(typeof record.reservation?.status === "string"
       ? { observedStatus: record.reservation.status }
       : {}),

@@ -16,7 +16,9 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
       },
     });
 
-    await expect(harness.service.admit(normalInput(paidPolicy()))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(paidPolicy())),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "promotional" },
     });
@@ -31,7 +33,9 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
   it("falls from unavailable promotional capacity to Paid included capacity", async () => {
     const harness = capacityHarness();
 
-    await expect(harness.service.admit(normalInput(paidPolicy()))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(paidPolicy())),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "paid" },
     });
@@ -61,10 +65,13 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
   });
 
   it("preserves explicit continuation funding identity without a fake outreach attempt", async () => {
-    const harness=capacityHarness();
-    const sourceKey="recovery:shop-1:recovery-continuation:block-7";
-    await harness.service.admit(normalInput(paidPolicy(),{sourceKey}));
-    expect(harness.paid.reserve).toHaveBeenCalledExactlyOnceWith({shopId:"shop-1",sourceKey});
+    const harness = capacityHarness();
+    const sourceKey = "recovery:shop-1:recovery-continuation:block-7";
+    await harness.service.admit(normalInput(paidPolicy(), { sourceKey }));
+    expect(harness.paid.reserve).toHaveBeenCalledExactlyOnceWith({
+      shopId: "shop-1",
+      sourceKey,
+    });
   });
 
   it("does not infer Paid included exhaustion from recovery-pack policy", async () => {
@@ -79,7 +86,9 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
       },
     });
 
-    await expect(harness.service.admit(normalInput(policy))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(policy)),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "paid" },
     });
@@ -89,7 +98,11 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
 
   it("uses purchased capacity after Paid included capacity is exhausted", async () => {
     const harness = capacityHarness({
-      paidReserve: { kind: "allowance-exhausted" as const, remaining: 0, policy: paidPolicy() },
+      paidReserve: {
+        kind: "allowance-exhausted" as const,
+        remaining: 0,
+        policy: paidPolicy(),
+      },
       purchasedReserve: {
         kind: "reserved" as const,
         reservation: {},
@@ -97,7 +110,9 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
       },
     });
 
-    await expect(harness.service.admit(normalInput(paidPolicy()))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(paidPolicy())),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "purchased" },
     });
@@ -107,7 +122,11 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
 
   it("uses lifetime Free after Paid included and purchased capacity are exhausted", async () => {
     const harness = capacityHarness({
-      paidReserve: { kind: "allowance-exhausted" as const, remaining: 0, policy: paidPolicy() },
+      paidReserve: {
+        kind: "allowance-exhausted" as const,
+        remaining: 0,
+        policy: paidPolicy(),
+      },
       freeReserve: {
         kind: "reserved" as const,
         reservation: {},
@@ -115,7 +134,9 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
       },
     });
 
-    await expect(harness.service.admit(normalInput(paidPolicy()))).resolves.toMatchObject({
+    await expect(
+      harness.service.admit(normalInput(paidPolicy())),
+    ).resolves.toMatchObject({
       kind: "admitted",
       admission: { kind: "lifetime-free" },
     });
@@ -125,10 +146,16 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
 
   it("returns capacity-exhausted when every ACTIVE Paid source is exhausted", async () => {
     const harness = capacityHarness({
-      paidReserve: { kind: "allowance-exhausted" as const, remaining: 0, policy: paidPolicy() },
+      paidReserve: {
+        kind: "allowance-exhausted" as const,
+        remaining: 0,
+        policy: paidPolicy(),
+      },
     });
 
-    await expect(harness.service.admit(normalInput(paidPolicy()))).resolves.toEqual({
+    await expect(
+      harness.service.admit(normalInput(paidPolicy())),
+    ).resolves.toEqual({
       kind: "blocked",
       reason: "capacity-exhausted",
     });
@@ -148,7 +175,9 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
         },
       });
 
-      await expect(harness.service.admit(normalInput(paidPolicy()))).resolves.toEqual({
+      await expect(
+        harness.service.admit(normalInput(paidPolicy())),
+      ).resolves.toEqual({
         kind: "blocked",
         reason: "reservation-in-flight",
       });
@@ -168,7 +197,10 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
 
     await expect(
       harness.service.admit(normalInput(paidPolicy("DRAINING"))),
-    ).resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    ).resolves.toMatchObject({
+      kind: "admitted",
+      admission: { kind: "purchased" },
+    });
     expect(harness.paid.reserve).not.toHaveBeenCalled();
   });
 
@@ -184,23 +216,37 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
   });
 
   it.each([
-    ["Woo FROZEN", paidPolicy("ACTIVE", { platform: "WOOCOMMERCE", subscriptionStatus: "FROZEN" })],
-    ["expired Woo period", paidPolicy("EXPIRED_RECONCILING", { platform: "WOOCOMMERCE" })],
-  ] as const)("routes %s around paid included to durable fallback", async (_label, policy) => {
-    const harness = capacityHarness({
-      promotionalReserve: {
-        kind: "reserved" as const,
-        reservation: {},
-        sourceKey: "recovery:shop-1:recovery-1",
-      },
-    });
+    [
+      "Woo FROZEN",
+      paidPolicy("ACTIVE", {
+        platform: "WOOCOMMERCE",
+        subscriptionStatus: "FROZEN",
+      }),
+    ],
+    [
+      "expired Woo period",
+      paidPolicy("EXPIRED_RECONCILING", { platform: "WOOCOMMERCE" }),
+    ],
+  ] as const)(
+    "routes %s around paid included to durable fallback",
+    async (_label, policy) => {
+      const harness = capacityHarness({
+        promotionalReserve: {
+          kind: "reserved" as const,
+          reservation: {},
+          sourceKey: "recovery:shop-1:recovery-1",
+        },
+      });
 
-    await expect(harness.service.admit(normalInput(policy))).resolves.toMatchObject({
-      kind: "admitted",
-      admission: { kind: "promotional" },
-    });
-    expect(harness.paid.reserve).not.toHaveBeenCalled();
-  });
+      await expect(
+        harness.service.admit(normalInput(policy)),
+      ).resolves.toMatchObject({
+        kind: "admitted",
+        admission: { kind: "promotional" },
+      });
+      expect(harness.paid.reserve).not.toHaveBeenCalled();
+    },
+  );
 
   it("uses purchased then lifetime Free when Woo FROZEN promotion is unavailable", async () => {
     const harness = capacityHarness({
@@ -211,10 +257,19 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
       },
     });
 
-    await expect(harness.service.admit(normalInput(paidPolicy("ACTIVE", {
-      platform: "WOOCOMMERCE",
-      subscriptionStatus: "FROZEN",
-    })))).resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    await expect(
+      harness.service.admit(
+        normalInput(
+          paidPolicy("ACTIVE", {
+            platform: "WOOCOMMERCE",
+            subscriptionStatus: "FROZEN",
+          }),
+        ),
+      ),
+    ).resolves.toMatchObject({
+      kind: "admitted",
+      admission: { kind: "purchased" },
+    });
     expect(harness.paid.reserve).not.toHaveBeenCalled();
     expect(harness.free.reserve).not.toHaveBeenCalled();
   });
@@ -228,10 +283,19 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
       },
     });
 
-    await expect(harness.service.admit(normalInput(paidPolicy("ACTIVE", {
-      platform: "WOOCOMMERCE",
-      subscriptionStatus: "FROZEN",
-    })))).resolves.toMatchObject({ kind: "admitted", admission: { kind: "lifetime-free" } });
+    await expect(
+      harness.service.admit(
+        normalInput(
+          paidPolicy("ACTIVE", {
+            platform: "WOOCOMMERCE",
+            subscriptionStatus: "FROZEN",
+          }),
+        ),
+      ),
+    ).resolves.toMatchObject({
+      kind: "admitted",
+      admission: { kind: "lifetime-free" },
+    });
     expect(harness.paid.reserve).not.toHaveBeenCalled();
     expect(harness.purchased.reserve).toHaveBeenCalledOnce();
   });
@@ -239,10 +303,16 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
   it("reports capacity exhaustion rather than billing-period-closing for Woo FROZEN", async () => {
     const harness = capacityHarness();
 
-    await expect(harness.service.admit(normalInput(paidPolicy("DRAINING", {
-      platform: "WOOCOMMERCE",
-      subscriptionStatus: "FROZEN",
-    })))).resolves.toEqual({ kind: "blocked", reason: "capacity-exhausted" });
+    await expect(
+      harness.service.admit(
+        normalInput(
+          paidPolicy("DRAINING", {
+            platform: "WOOCOMMERCE",
+            subscriptionStatus: "FROZEN",
+          }),
+        ),
+      ),
+    ).resolves.toEqual({ kind: "blocked", reason: "capacity-exhausted" });
     expect(harness.paid.reserve).not.toHaveBeenCalled();
   });
 });

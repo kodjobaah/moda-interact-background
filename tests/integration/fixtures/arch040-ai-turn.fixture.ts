@@ -11,7 +11,11 @@ const USER_MESSAGE = "Please help me recover my basket";
 const SYSTEM_MESSAGE = "System-test scenario ARCH-040-BACKGROUND-002";
 
 type Fixture = Awaited<ReturnType<typeof humanDispatchFixture>>;
-type ModelAnswer = { replyText: string; detectedLanguageTag: string | null; detectedLanguageConfidence: number | null };
+type ModelAnswer = {
+  replyText: string;
+  detectedLanguageTag: string | null;
+  detectedLanguageConfidence: number | null;
+};
 
 /** Invoke the pinned pinned Aimock HTTP endpoint with the same strict
  * finalResponse tool-call protocol used by the CommerceAgent system tests.
@@ -23,26 +27,48 @@ async function queryAimock(baseUrl: string): Promise<ModelAnswer> {
   }
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
-    headers: { authorization: "Bearer arch040-disposable-test", "content-type": "application/json" },
+    headers: {
+      authorization: "Bearer arch040-disposable-test",
+      "content-type": "application/json",
+    },
     body: JSON.stringify({
       model: "openrouter/system-test",
       messages: [
         { role: "system", content: SYSTEM_MESSAGE },
         { role: "user", content: USER_MESSAGE },
       ],
-      tools: [{
-        type: "function", function: { name: "finalResponse", description: "Return a final answer",
-          parameters: { type: "object", properties: { replyText: { type: "string" } }, required: ["replyText"] },
-      } }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "finalResponse",
+            description: "Return a final answer",
+            parameters: {
+              type: "object",
+              properties: { replyText: { type: "string" } },
+              required: ["replyText"],
+            },
+          },
+        },
+      ],
     }),
   });
-  if (!response.ok) throw new Error(`ARCH-040 Aimock returned HTTP ${response.status}`);
-  const body = await response.json() as {
-    choices?: Array<{ message?: { tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> } }>;
+  if (!response.ok)
+    throw new Error(`ARCH-040 Aimock returned HTTP ${response.status}`);
+  const body = (await response.json()) as {
+    choices?: Array<{
+      message?: {
+        tool_calls?: Array<{
+          function?: { name?: string; arguments?: string };
+        }>;
+      };
+    }>;
   };
   const tool = body.choices?.[0]?.message?.tool_calls?.[0]?.function;
   if (tool?.name !== "finalResponse" || !tool.arguments) {
-    throw new Error("ARCH-040 Aimock did not produce a finalResponse tool call");
+    throw new Error(
+      "ARCH-040 Aimock did not produce a finalResponse tool call",
+    );
   }
   const answer = JSON.parse(tool.arguments) as Partial<ModelAnswer>;
   if (!answer.replyText || typeof answer.replyText !== "string") {
@@ -61,7 +87,11 @@ async function queryAimock(baseUrl: string): Promise<ModelAnswer> {
  * billing-plan/credit ledger certification belongs to system-test.
  */
 export async function runAiTurnThroughBackgroundMocks(
-  f: Fixture, options: { takeoverThenResume: boolean; moderation?: ModerationAssessmentService },
+  f: Fixture,
+  options: {
+    takeoverThenResume: boolean;
+    moderation?: ModerationAssessmentService;
+  },
 ) {
   const aimock = await f.startAimock();
   const url = aimock.snapshot().openRouterBaseUrl;
@@ -72,79 +102,170 @@ export async function runAiTurnThroughBackgroundMocks(
   await f.changeOwner("HUMAN", "AI", 1);
   const pendingAt = new Date(Date.now() - 60_000);
   const allowance = await f.addFundedInitialAllowance();
-  await f.db.conversationMessage.create({ data: {
-    conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
-    providerMessageId: `arch040-ai-inbound-${randomUUID()}`,
-    status: "DELIVERED", content: USER_MESSAGE, createdAt: pendingAt,
-  } });
-  await f.db.conversation.update({ where: { id: f.conversationId }, data: {
-    inboundVersion: 1, lastProcessedVersion: 0,
-    lastInboundAt: pendingAt, pendingTurnStartedAt: pendingAt,
-    pendingAiNotBeforeAt: pendingAt, pendingAiDelayMinutes: 0, pendingAiControlRevision: 2,
-    processingInboundVersion: null, processingStartedAt: null,
-  } });
-  const prepared = await f.db.conversationMessage.create({ data: {
-    conversationId: f.conversationId, senderType: "AGENT", direction: "OUTBOUND",
-    status: "PENDING", content: "Pending model reply", allowanceBlockId: allowance.id,
-  } });
+  await f.db.conversationMessage.create({
+    data: {
+      conversationId: f.conversationId,
+      direction: "INBOUND",
+      senderType: "CUSTOMER",
+      providerMessageId: `arch040-ai-inbound-${randomUUID()}`,
+      status: "DELIVERED",
+      content: USER_MESSAGE,
+      createdAt: pendingAt,
+    },
+  });
+  await f.db.conversation.update({
+    where: { id: f.conversationId },
+    data: {
+      inboundVersion: 1,
+      lastProcessedVersion: 0,
+      lastInboundAt: pendingAt,
+      pendingTurnStartedAt: pendingAt,
+      pendingAiNotBeforeAt: pendingAt,
+      pendingAiDelayMinutes: 0,
+      pendingAiControlRevision: 2,
+      processingInboundVersion: null,
+      processingStartedAt: null,
+    },
+  });
+  const prepared = await f.db.conversationMessage.create({
+    data: {
+      conversationId: f.conversationId,
+      senderType: "AGENT",
+      direction: "OUTBOUND",
+      status: "PENDING",
+      content: "Pending model reply",
+      allowanceBlockId: allowance.id,
+    },
+  });
   const sender = new OutboundMessageDeliveryService(
     f.db,
-    f.provider as unknown as ConstructorParameters<typeof OutboundMessageDeliveryService>[1],
-    f.execution as unknown as ConstructorParameters<typeof OutboundMessageDeliveryService>[2],
+    f.provider as unknown as ConstructorParameters<
+      typeof OutboundMessageDeliveryService
+    >[1],
+    f.execution as unknown as ConstructorParameters<
+      typeof OutboundMessageDeliveryService
+    >[2],
     new AiTurnOwnershipService(f.db),
     new OutboundSendFenceService(f.db, f.durableEligibility),
     options.moderation ?? allowModerationFixture(),
   );
   const conversation = {
-    getTurnState: async (id: string) => f.db.conversation.findUniqueOrThrow({
-      where: { id }, select: {
-        inboundVersion: true, lastProcessedVersion: true, lastInboundAt: true,
-        pendingTurnStartedAt: true, processingInboundVersion: true, processingStartedAt: true,
-        pendingAiNotBeforeAt: true, pendingAiControlRevision: true, pendingAiDelayMinutes: true,
-        controlMode: true, controlRevision: true,
-      },
-    }),
-    claimTurn: async (id: string, version: number, now: Date, expectedControlRevision?: number) =>
-      (await f.db.conversation.updateMany({
-        where: { id, inboundVersion: version, lastProcessedVersion: { lt: version },
-          pendingTurnStartedAt: { not: null }, processingInboundVersion: null,
-          ...(expectedControlRevision === undefined ? {} : {
-            controlMode: "AI", controlRevision: expectedControlRevision,
-            pendingAiControlRevision: expectedControlRevision,
-          }) },
-        data: { processingInboundVersion: version, processingStartedAt: now },
-      })).count === 1,
-    completeTurn: async (id: string, version: number, expectedControlRevision?: number) =>
-      (await f.db.conversation.updateMany({
-        where: { id, inboundVersion: version, processingInboundVersion: version,
-          ...(expectedControlRevision === undefined ? {} : {
-            controlMode: "AI", controlRevision: expectedControlRevision,
-            pendingAiControlRevision: expectedControlRevision,
-          }) },
-        data: { lastProcessedVersion: version, pendingTurnStartedAt: null,
-          pendingAiNotBeforeAt: null, pendingAiControlRevision: null, pendingAiDelayMinutes: null,
-          processingInboundVersion: null, processingStartedAt: null },
-      })).count === 1,
-      suppressStaleTurn: async (id: string, version: number, expectedControlRevision: number) =>
-        (await f.db.conversation.updateMany({
-          where: { id, inboundVersion: version, lastProcessedVersion: { lt: version },
-            pendingTurnStartedAt: { not: null }, OR: [
+    getTurnState: async (id: string) =>
+      f.db.conversation.findUniqueOrThrow({
+        where: { id },
+        select: {
+          inboundVersion: true,
+          lastProcessedVersion: true,
+          lastInboundAt: true,
+          pendingTurnStartedAt: true,
+          processingInboundVersion: true,
+          processingStartedAt: true,
+          pendingAiNotBeforeAt: true,
+          pendingAiControlRevision: true,
+          pendingAiDelayMinutes: true,
+          controlMode: true,
+          controlRevision: true,
+        },
+      }),
+    claimTurn: async (
+      id: string,
+      version: number,
+      now: Date,
+      expectedControlRevision?: number,
+    ) =>
+      (
+        await f.db.conversation.updateMany({
+          where: {
+            id,
+            inboundVersion: version,
+            lastProcessedVersion: { lt: version },
+            pendingTurnStartedAt: { not: null },
+            processingInboundVersion: null,
+            ...(expectedControlRevision === undefined
+              ? {}
+              : {
+                  controlMode: "AI",
+                  controlRevision: expectedControlRevision,
+                  pendingAiControlRevision: expectedControlRevision,
+                }),
+          },
+          data: { processingInboundVersion: version, processingStartedAt: now },
+        })
+      ).count === 1,
+    completeTurn: async (
+      id: string,
+      version: number,
+      expectedControlRevision?: number,
+    ) =>
+      (
+        await f.db.conversation.updateMany({
+          where: {
+            id,
+            inboundVersion: version,
+            processingInboundVersion: version,
+            ...(expectedControlRevision === undefined
+              ? {}
+              : {
+                  controlMode: "AI",
+                  controlRevision: expectedControlRevision,
+                  pendingAiControlRevision: expectedControlRevision,
+                }),
+          },
+          data: {
+            lastProcessedVersion: version,
+            pendingTurnStartedAt: null,
+            pendingAiNotBeforeAt: null,
+            pendingAiControlRevision: null,
+            pendingAiDelayMinutes: null,
+            processingInboundVersion: null,
+            processingStartedAt: null,
+          },
+        })
+      ).count === 1,
+    suppressStaleTurn: async (
+      id: string,
+      version: number,
+      expectedControlRevision: number,
+    ) =>
+      (
+        await f.db.conversation.updateMany({
+          where: {
+            id,
+            inboundVersion: version,
+            lastProcessedVersion: { lt: version },
+            pendingTurnStartedAt: { not: null },
+            OR: [
               { controlMode: { not: "AI" } },
               { controlRevision: { not: expectedControlRevision } },
               { pendingAiControlRevision: { not: expectedControlRevision } },
-            ] },
-          data: { lastProcessedVersion: version, pendingTurnStartedAt: null,
-            pendingAiNotBeforeAt: null, pendingAiControlRevision: null, pendingAiDelayMinutes: null,
-            processingInboundVersion: null, processingStartedAt: null },
-        })).count === 1,
+            ],
+          },
+          data: {
+            lastProcessedVersion: version,
+            pendingTurnStartedAt: null,
+            pendingAiNotBeforeAt: null,
+            pendingAiControlRevision: null,
+            pendingAiDelayMinutes: null,
+            processingInboundVersion: null,
+            processingStartedAt: null,
+          },
+        })
+      ).count === 1,
     releaseTurn: async (id: string, version: number) => {
-      await f.db.conversation.updateMany({ where: { id, processingInboundVersion: version },
-        data: { processingInboundVersion: null, processingStartedAt: null } });
+      await f.db.conversation.updateMany({
+        where: { id, processingInboundVersion: version },
+        data: { processingInboundVersion: null, processingStartedAt: null },
+      });
     },
     hasChanged: async (id: string, version: number) => {
-      const row = await f.db.conversation.findUniqueOrThrow({ where: { id },
-        select: { inboundVersion: true, processingInboundVersion: true } });
-      return row.inboundVersion !== version || row.processingInboundVersion !== version;
+      const row = await f.db.conversation.findUniqueOrThrow({
+        where: { id },
+        select: { inboundVersion: true, processingInboundVersion: true },
+      });
+      return (
+        row.inboundVersion !== version ||
+        row.processingInboundVersion !== version
+      );
     },
     applyDetectedLanguage: async () => true,
   };
@@ -153,21 +274,37 @@ export async function runAiTurnThroughBackgroundMocks(
     conversation,
     ownership: new AiTurnOwnershipService(f.db),
     admission: {
-      reserve: async () => ({ kind: "admitted" as const, shopId: f.shopId,
-        conversationId: f.conversationId, messageId: prepared.id, terminal: false,
-        executionScope: "recovery" as const }),
+      reserve: async () => ({
+        kind: "admitted" as const,
+        shopId: f.shopId,
+        conversationId: f.conversationId,
+        messageId: prepared.id,
+        terminal: false,
+        executionScope: "recovery" as const,
+      }),
       sendPreparedText: (input) => sender.sendPreparedText(input),
       failPrepared: (messageId) => sender.failPrepared(messageId),
     },
-    abuseAdmission: { admitSettledTurn: async () => ({ kind: "allowed" as const }) },
+    abuseAdmission: {
+      admitSettledTurn: async () => ({ kind: "allowed" as const }),
+    },
     loadTurn: async () => ({
-      shopId: f.shopId, to: f.recipient, customerPhone: f.recipient,
-      conversationType: "RECOVERY" as const, checkoutRecoveryId: f.recoveryId,
-      hasReplyContext: true, context: {}, languageMessage: USER_MESSAGE,
+      shopId: f.shopId,
+      to: f.recipient,
+      customerPhone: f.recipient,
+      conversationType: "RECOVERY" as const,
+      checkoutRecoveryId: f.recoveryId,
+      hasReplyContext: true,
+      context: {},
+      languageMessage: USER_MESSAGE,
     }),
-    aiWrapper: { renderConversationResponse: async (input) => ({
-      kind: "no-wrapper" as const, body: input.responseBody, reason: "NOT_CONFIGURED" as const,
-    }) },
+    aiWrapper: {
+      renderConversationResponse: async (input) => ({
+        kind: "no-wrapper" as const,
+        body: input.responseBody,
+        reason: "NOT_CONFIGURED" as const,
+      }),
+    },
     runAgent: async () => {
       const answer = await queryAimock(url);
       if (options.takeoverThenResume) {
@@ -177,10 +314,21 @@ export async function runAiTurnThroughBackgroundMocks(
       return answer;
     },
     getResult: (answer) => answer,
-    runtimeConfig: { current: () => ({
-      conversationQuietWindowMs: 0, conversationMaxSettleWindowMs: 0,
-    }) } as unknown as ConstructorParameters<typeof ConversationTurnProcessor>[0]["runtimeConfig"],
+    runtimeConfig: {
+      current: () => ({
+        conversationQuietWindowMs: 0,
+        conversationMaxSettleWindowMs: 0,
+      }),
+    } as unknown as ConstructorParameters<
+      typeof ConversationTurnProcessor
+    >[0]["runtimeConfig"],
   });
-  await processor.process({ conversationId: f.conversationId, observedVersion: 1 });
-  return { messageId: prepared.id, aimockJournal: await aimock.journalSummary() };
+  await processor.process({
+    conversationId: f.conversationId,
+    observedVersion: 1,
+  });
+  return {
+    messageId: prepared.id,
+    aimockJournal: await aimock.journalSummary(),
+  };
 }

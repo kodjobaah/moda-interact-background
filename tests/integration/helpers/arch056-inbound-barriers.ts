@@ -23,7 +23,10 @@ export async function withArch056Timeout<T>(
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+        timeout = setTimeout(
+          () => reject(new Error(`${label} timed out`)),
+          timeoutMs,
+        );
       }),
     ]);
   } finally {
@@ -39,7 +42,9 @@ export async function waitForArch056LockWait(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const rows = await prisma.$queryRaw<Array<{ wait_event_type: string | null }>>`
+    const rows = await prisma.$queryRaw<
+      Array<{ wait_event_type: string | null }>
+    >`
       SELECT "wait_event_type"
       FROM pg_stat_activity
       WHERE pid = ${backendPid}`;
@@ -121,10 +126,13 @@ export function patchArch056Transaction(
   client.$transaction = ((callback: any, options?: any) => {
     const transactionIndex = index++;
     return original(
-      (tx: any) => callback(interceptArch056Transaction(
-        tx,
-        hooksForTransaction(transactionIndex),
-      )),
+      (tx: any) =>
+        callback(
+          interceptArch056Transaction(
+            tx,
+            hooksForTransaction(transactionIndex),
+          ),
+        ),
       { ...options, timeout: options?.timeout ?? 30_000 },
     );
   }) as PrismaClient["$transaction"];

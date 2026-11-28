@@ -62,21 +62,29 @@ vi.mock("../../../src/lib/db.js", () => ({
     $transaction: hoisted.transaction,
   },
 }));
-vi.mock("../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
-  recoveryShopifyCustomerService: { resolve: vi.fn(async () => ({ id: "customer-1", shopId: "shop-1" })) },
-}));
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-shopify-customer.service.js",
+  () => ({
+    recoveryShopifyCustomerService: {
+      resolve: vi.fn(async () => ({ id: "customer-1", shopId: "shop-1" })),
+    },
+  }),
+);
 vi.mock("../../../src/services/customer.phone.service.js", () => ({
   customerPhoneService: {
     getCurrentPhone: vi.fn(async () => ({ phone: "+15551234567" })),
     getCurrentPhoneForShop: vi.fn(async () => ({ phone: "+15551234567" })),
   },
 }));
-vi.mock("../../../src/services/checkout-recovery/recovery-recipient-resolver.service.js", () => ({
-  recoveryRecipientResolverService: {
-    resolve: vi.fn(async () => "15551234567"),
-    resolveForCustomerInShop: vi.fn(async () => "15551234567"),
-  },
-}));
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-recipient-resolver.service.js",
+  () => ({
+    recoveryRecipientResolverService: {
+      resolve: vi.fn(async () => "15551234567"),
+      resolveForCustomerInShop: vi.fn(async () => "15551234567"),
+    },
+  }),
+);
 vi.mock("../../../src/services/conversation.service.js", () => ({
   conversationService: {},
 }));
@@ -89,46 +97,66 @@ vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
     sendTemplate: hoisted.outboundSendTemplate,
   },
 }));
-vi.mock("../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
-  automatedRecoveryTemplateService: { prepare: vi.fn(async (input: unknown) => {
-    const selected = await hoisted.approvedTemplateSelect(input);
-    return selected.outcome === "selected" ? {
-      kind: "prepared", prepared: {
-        purpose: "INITIAL_NO_OFFER", canonicalLanguageTag: selected.canonicalLanguageTag,
-        providerTemplateName: selected.providerTemplateName,
-        providerLanguageCode: selected.providerLanguageCode,
-      }, send: {
-        templateName: selected.providerTemplateName, languageCode: selected.providerLanguageCode,
-      },
-    } : { kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" };
-  }) },
-}));
+vi.mock(
+  "../../../src/services/recovery-template-integration/automated-recovery-template.service.js",
+  () => ({
+    automatedRecoveryTemplateService: {
+      prepare: vi.fn(async (input: unknown) => {
+        const selected = await hoisted.approvedTemplateSelect(input);
+        return selected.outcome === "selected"
+          ? {
+              kind: "prepared",
+              prepared: {
+                purpose: "INITIAL_NO_OFFER",
+                canonicalLanguageTag: selected.canonicalLanguageTag,
+                providerTemplateName: selected.providerTemplateName,
+                providerLanguageCode: selected.providerLanguageCode,
+              },
+              send: {
+                templateName: selected.providerTemplateName,
+                languageCode: selected.providerLanguageCode,
+              },
+            }
+          : { kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" };
+      }),
+    },
+  }),
+);
 vi.mock("../../../src/services/recovery-outreach-attempt.service.js", () => ({
   recoveryOutreachAttemptService: { getOrCreate: hoisted.attemptGetOrCreate },
 }));
 vi.mock("../../../src/services/recovery-policy.service.js", () => ({
   recoveryPolicyService: { resolve: hoisted.policyResolve },
 }));
-vi.mock("../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js", () => ({
-  recoveryRecipientSuppressionAdmissionService: {
-    evaluate: hoisted.suppressionEvaluate,
-    deferDetectedRecovery: vi.fn(),
-    clearDetectedSuppression: vi.fn(),
-  },
-}));
-vi.mock("../../../src/services/checkout-recovery/recovery-consent-admission.service.js", () => ({
-  recoveryConsentAdmissionService: {
-    evaluateFirst: vi.fn(async () => true),
-    evaluateReentry: vi.fn(async () => true),
-    notifyMissingRecipient: vi.fn(async () => undefined),
-  },
-}));
-vi.mock("../../../src/services/checkout-recovery/recovery-snapshot-builder.service.js", () => ({
-  recoverySnapshotBuilderService: {
-    build: hoisted.snapshotBuild,
-    serializeLineItems: hoisted.serializeLineItems,
-  },
-}));
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js",
+  () => ({
+    recoveryRecipientSuppressionAdmissionService: {
+      evaluate: hoisted.suppressionEvaluate,
+      deferDetectedRecovery: vi.fn(),
+      clearDetectedSuppression: vi.fn(),
+    },
+  }),
+);
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-consent-admission.service.js",
+  () => ({
+    recoveryConsentAdmissionService: {
+      evaluateFirst: vi.fn(async () => true),
+      evaluateReentry: vi.fn(async () => true),
+      notifyMissingRecipient: vi.fn(async () => undefined),
+    },
+  }),
+);
+vi.mock(
+  "../../../src/services/checkout-recovery/recovery-snapshot-builder.service.js",
+  () => ({
+    recoverySnapshotBuilderService: {
+      build: hoisted.snapshotBuild,
+      serializeLineItems: hoisted.serializeLineItems,
+    },
+  }),
+);
 vi.mock("../../../src/services/recovery-capacity-resume.service.js", () => ({
   recoveryCapacityResumeService: { schedule: hoisted.resumeSchedule },
 }));
@@ -167,9 +195,7 @@ const freshCheckout = {
   internationalContext: null,
 };
 
-function foundCheckout(
-  overrides: Partial<typeof freshCheckout> = {},
-) {
+function foundCheckout(overrides: Partial<typeof freshCheckout> = {}) {
   return {
     kind: "found" as const,
     checkout: { ...freshCheckout, ...overrides },
@@ -180,15 +206,21 @@ beforeEach(() => {
   vi.clearAllMocks();
   hoisted.findUnique.mockReset().mockResolvedValue(hoisted.recovery);
   hoisted.attemptGetOrCreate.mockReset().mockResolvedValue({ id: "attempt-1" });
-  hoisted.suppressionEvaluate.mockReset().mockResolvedValue({ kind: "allowed" });
-  hoisted.policyResolve.mockReset().mockResolvedValue({ recoveryDelayMinutes: 30 });
+  hoisted.suppressionEvaluate
+    .mockReset()
+    .mockResolvedValue({ kind: "allowed" });
+  hoisted.policyResolve
+    .mockReset()
+    .mockResolvedValue({ recoveryDelayMinutes: 30 });
   hoisted.approvedTemplateSelect.mockReset().mockResolvedValue({
     outcome: "selected",
     providerTemplateName: "recovery",
     canonicalLanguageTag: "en",
     providerLanguageCode: "en",
   });
-  hoisted.outboundGetProviderAccountId.mockReset().mockReturnValue("provider-1");
+  hoisted.outboundGetProviderAccountId
+    .mockReset()
+    .mockReturnValue("provider-1");
   hoisted.outboundSendTemplate.mockReset();
   hoisted.resumeSchedule.mockReset().mockResolvedValue("resume-job");
   hoisted.snapshotBuild.mockReset().mockResolvedValue({
@@ -229,25 +261,36 @@ describe("CheckoutRecoveryService capacity resume", () => {
     hoisted.recovery.generation = 1;
     hoisted.findUnique.mockImplementation(async () => hoisted.recovery);
     hoisted.lookup.mockResolvedValueOnce(foundCheckout());
-    hoisted.updateMany.mockImplementationOnce(async ({ data }: { data: Record<string, unknown> }) => {
-      Object.assign(hoisted.recovery, data);
-      return { count: 1 };
-    });
-    hoisted.withCheckoutLock.mockImplementation(async (_shopId, _checkoutToken, callback) => callback());
-    hoisted.transaction.mockImplementation(async (callback) => callback({
-      checkoutRecovery: { updateMany: hoisted.txUpdateMany },
-      checkoutRecoveryStatusHistory: { create: hoisted.historyCreate },
-    } as never));
+    hoisted.updateMany.mockImplementationOnce(
+      async ({ data }: { data: Record<string, unknown> }) => {
+        Object.assign(hoisted.recovery, data);
+        return { count: 1 };
+      },
+    );
+    hoisted.withCheckoutLock.mockImplementation(
+      async (_shopId, _checkoutToken, callback) => callback(),
+    );
+    hoisted.transaction.mockImplementation(async (callback) =>
+      callback({
+        checkoutRecovery: { updateMany: hoisted.txUpdateMany },
+        checkoutRecoveryStatusHistory: { create: hoisted.historyCreate },
+      } as never),
+    );
     hoisted.txUpdateMany.mockResolvedValue({ count: 1 });
     const billing = {
-      admit: vi.fn(async () => ({ kind: "blocked" as const, reason: "test-blocked" })),
+      admit: vi.fn(async () => ({
+        kind: "blocked" as const,
+        reason: "test-blocked",
+      })),
       revalidateBeforeProvider: vi.fn(),
       releaseBeforeProvider: vi.fn(),
       handleProviderFailure: vi.fn(),
       commitSuccessfulInitiation: vi.fn(),
     } as never;
     const service = new CheckoutRecoveryService(billing);
-    vi.spyOn(service, "upsertRecovery").mockResolvedValue(hoisted.recovery as never);
+    vi.spyOn(service, "upsertRecovery").mockResolvedValue(
+      hoisted.recovery as never,
+    );
     hoisted.suppressionEvaluate.mockImplementationOnce(async () => {
       await service.recordExternalActivity("recovery-1", newerActivity);
       return { kind: "allowed" };
@@ -400,9 +443,7 @@ describe("CheckoutRecoveryService capacity resume", () => {
         .mockResolvedValueOnce(hoisted.recovery)
         .mockResolvedValueOnce(currentBlockedRecovery);
       hoisted.lookup.mockResolvedValueOnce(
-        kind === "provider-error"
-          ? { kind, message: "temporary" }
-          : { kind },
+        kind === "provider-error" ? { kind, message: "temporary" } : { kind },
       );
 
       const service = new CheckoutRecoveryService();
@@ -645,5 +686,4 @@ describe("CheckoutRecoveryService capacity resume", () => {
       },
     });
   });
-
 });

@@ -56,49 +56,65 @@ export function postContractPolicy(overrides: Record<string, unknown> = {}) {
   } as never;
 }
 
-export function capacityHarness(overrides: {
-  freeReserve?: unknown;
-  freeReservePostContract?: unknown;
-  purchasedReserve?: unknown;
-  paidReserve?: unknown;
-  promotionalReserve?: unknown;
-} = {}) {
+export function capacityHarness(
+  overrides: {
+    freeReserve?: unknown;
+    freeReservePostContract?: unknown;
+    purchasedReserve?: unknown;
+    paidReserve?: unknown;
+    promotionalReserve?: unknown;
+  } = {},
+) {
   const free = {
-    reserve: vi.fn(async () =>
-      overrides.freeReserve ?? {
-        kind: "allowance-exhausted" as const,
-        remaining: 0,
-      },
+    reserve: vi.fn(
+      async () =>
+        overrides.freeReserve ?? {
+          kind: "allowance-exhausted" as const,
+          remaining: 0,
+        },
     ),
-    reservePostContract: vi.fn(async () =>
-      overrides.freeReservePostContract ?? {
-        kind: "allowance-exhausted" as const,
-        remaining: 0,
-      },
+    reservePostContract: vi.fn(
+      async () =>
+        overrides.freeReservePostContract ?? {
+          kind: "allowance-exhausted" as const,
+          remaining: 0,
+        },
     ),
   };
   const purchased = {
-    reserve: vi.fn(async () =>
-      overrides.purchasedReserve ?? {
-        kind: "credits-exhausted" as const,
-        available: 0,
-      },
+    reserve: vi.fn(
+      async () =>
+        overrides.purchasedReserve ?? {
+          kind: "credits-exhausted" as const,
+          available: 0,
+        },
     ),
   };
   const paid = {
-    reserve: vi.fn(async ({ recoveryId, sourceKey }: { recoveryId?: string; sourceKey?: string }) =>
-      overrides.paidReserve ?? {
-        kind: "reserved" as const,
-        reservation: {},
-        counter: "INCLUDED_RECOVERY_CREDITS" as const,
-        sourceKey: sourceKey ?? `paid-included:period-1:${recoveryId}`,
-        policy: paidPolicy(),
-      },
+    reserve: vi.fn(
+      async ({
+        recoveryId,
+        sourceKey,
+      }: {
+        recoveryId?: string;
+        sourceKey?: string;
+      }) =>
+        overrides.paidReserve ?? {
+          kind: "reserved" as const,
+          reservation: {},
+          counter: "INCLUDED_RECOVERY_CREDITS" as const,
+          sourceKey: sourceKey ?? `paid-included:period-1:${recoveryId}`,
+          policy: paidPolicy(),
+        },
     ),
   };
   const promotional = {
-    reserve: vi.fn(async ({ sourceKey }: { sourceKey: string }) =>
-      overrides.promotionalReserve ?? { kind: "unavailable" as const, sourceKey },
+    reserve: vi.fn(
+      async ({ sourceKey }: { sourceKey: string }) =>
+        overrides.promotionalReserve ?? {
+          kind: "unavailable" as const,
+          sourceKey,
+        },
     ),
   };
 
@@ -116,7 +132,10 @@ export function capacityHarness(overrides: {
   };
 }
 
-export function normalInput(policy: unknown, overrides: Record<string, unknown> = {}) {
+export function normalInput(
+  policy: unknown,
+  overrides: Record<string, unknown> = {},
+) {
   return {
     shopId: "shop-1",
     recoveryId: "recovery-1",

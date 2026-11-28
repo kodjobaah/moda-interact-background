@@ -65,7 +65,9 @@ export function emptySubscription(
   };
 }
 
-export function transactionHarness(current: GenericExistingSubscription = emptySubscription()) {
+export function transactionHarness(
+  current: GenericExistingSubscription = emptySubscription(),
+) {
   return {
     $queryRaw: vi.fn().mockResolvedValue([]),
     billingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
@@ -96,7 +98,9 @@ export function transactionHarness(current: GenericExistingSubscription = emptyS
     },
     usageEvent: { count: vi.fn().mockResolvedValue(0), updateMany: vi.fn() },
     platformBillingPolicy: {
-      findUnique: vi.fn().mockResolvedValue({ lifetimeFreeRecoveryAllowance: 5 }),
+      findUnique: vi
+        .fn()
+        .mockResolvedValue({ lifetimeFreeRecoveryAllowance: 5 }),
     },
   };
 }
@@ -106,7 +110,10 @@ export function serviceHarness(transaction = transactionHarness()) {
     billingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
     merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
     subscription: { upsert: vi.fn() },
-    $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)),
+    $transaction: vi.fn(
+      async (callback: (value: typeof transaction) => unknown) =>
+        callback(transaction),
+    ),
   };
   const scheduler = { enqueue: vi.fn().mockResolvedValue(undefined) };
   const logger = { warn: vi.fn(), error: vi.fn() };

@@ -43,7 +43,8 @@ export class RefundPreparationService {
   ) {}
 
   async prepare(refund: RefundRow): Promise<RefundPreparationResult> {
-    if (refund.provider !== "SHOPIFY") return { kind: "provider-action-required" };
+    if (refund.provider !== "SHOPIFY")
+      return { kind: "provider-action-required" };
     const proof = await this.readProof(refund);
     if (!proof.safe) {
       await this.markProviderActionRequired(refund, proof.reason);
@@ -110,7 +111,10 @@ export class RefundPreparationService {
     };
   }
 
-  async markProviderActionRequired(refund: RefundRow, reason: string): Promise<void> {
+  async markProviderActionRequired(
+    refund: RefundRow,
+    reason: string,
+  ): Promise<void> {
     const evidence = localRefundEvidence(refund);
     await this.database.recoveryCreditRefund.updateMany({
       where: {
@@ -130,12 +134,12 @@ export class RefundPreparationService {
 
   private async readProof(refund: RefundRow): Promise<PreparationProof> {
     if (
-      refund.status !== RecoveryCreditRefundStatus.REQUESTED
-      || refund.purchase.status !== RecoveryCreditPurchaseStatus.WITHDRAWN
-      || refund.purchase.currentAmount <= 0
-      || refund.purchase.reservedAmount !== 0
-      || refund.purchase.creditsGranted <= 0
-      || !eligibleProviderAmount(
+      refund.status !== RecoveryCreditRefundStatus.REQUESTED ||
+      refund.purchase.status !== RecoveryCreditPurchaseStatus.WITHDRAWN ||
+      refund.purchase.currentAmount <= 0 ||
+      refund.purchase.reservedAmount !== 0 ||
+      refund.purchase.creditsGranted <= 0 ||
+      !eligibleProviderAmount(
         refund.purchaseProviderAmountSnapshot,
         refund.shopifyPartnerDevelopmentSnapshot,
       )
@@ -144,23 +148,33 @@ export class RefundPreparationService {
     }
 
     const finalCreditQuantity = refund.purchase.currentAmount;
-    const ratio = new Prisma.Decimal(finalCreditQuantity).div(refund.purchase.creditsGranted);
-    if (ratio.lte(0) || ratio.gt(1)) return unsafe("refund ratio is outside (0, 1]");
+    const ratio = new Prisma.Decimal(finalCreditQuantity).div(
+      refund.purchase.creditsGranted,
+    );
+    if (ratio.lte(0) || ratio.gt(1))
+      return unsafe("refund ratio is outside (0, 1]");
 
     const provider = await this.providerState.readForPrepare(refund);
     if (!provider.safe) return provider;
-    if (provider.currency !== refund.purchaseProviderCurrencySnapshot.toUpperCase()) {
-      return unsafe("Shopify provider quantity, cost, or currency is unavailable");
+    if (
+      provider.currency !==
+      refund.purchaseProviderCurrencySnapshot.toUpperCase()
+    ) {
+      return unsafe(
+        "Shopify provider quantity, cost, or currency is unavailable",
+      );
     }
 
     const quantityBefore = provider.quantity;
     const costBefore = provider.cost;
     const correctionValue = ratio.neg();
     const quantityAfter = quantityBefore.plus(correctionValue);
-    if (quantityAfter.lt(0)) return unsafe("provider quantity would become negative");
+    if (quantityAfter.lt(0))
+      return unsafe("provider quantity would become negative");
 
     const costAfter = calculateTieredCost(provider.pricing, quantityAfter);
-    if (!costAfter) return unsafe("live Shopify pricing is unavailable or ambiguous");
+    if (!costAfter)
+      return unsafe("live Shopify pricing is unavailable or ambiguous");
 
     const expectedProviderAmount = refund.purchaseProviderAmountSnapshot
       .mul(ratio)
@@ -195,18 +209,25 @@ function calculateTieredCost(
   pricing: PartnerUsagePricingSnapshot,
   quantity: Prisma.Decimal,
 ): Prisma.Decimal | null {
-  if (!quantity.isFinite() || quantity.lt(0) || !pricing.tiers.length) return null;
+  if (!quantity.isFinite() || quantity.lt(0) || !pricing.tiers.length)
+    return null;
   const tiers = pricing.tiers.map((tier) => ({
     ...tier,
     upTo: tier.upTo === null ? null : new Prisma.Decimal(tier.upTo),
     unit: parseDecimal(tier.amountPerUnit),
     flat: parseDecimal(tier.amount),
   }));
-  if (tiers.some((tier) => !tier.unit || !tier.flat || tier.unit.lt(0) || tier.flat.lt(0))) {
+  if (
+    tiers.some(
+      (tier) => !tier.unit || !tier.flat || tier.unit.lt(0) || tier.flat.lt(0),
+    )
+  ) {
     return null;
   }
   if (pricing.tiersMode.toUpperCase() === "VOLUME") {
-    const tier = tiers.find((candidate) => candidate.upTo === null || quantity.lte(candidate.upTo));
+    const tier = tiers.find(
+      (candidate) => candidate.upTo === null || quantity.lte(candidate.upTo),
+    );
     return tier ? tier.flat!.plus(quantity.mul(tier.unit!)) : null;
   }
   if (pricing.tiersMode.toUpperCase() !== "GRADUATED") return null;
@@ -215,7 +236,9 @@ function calculateTieredCost(
   let lower = new Prisma.Decimal(0);
   for (const tier of tiers) {
     const upper = tier.upTo ?? quantity;
-    const segment = nonNegative(quantity.lt(upper) ? quantity.minus(lower) : upper.minus(lower));
+    const segment = nonNegative(
+      quantity.lt(upper) ? quantity.minus(lower) : upper.minus(lower),
+    );
     total = total.plus(segment.mul(tier.unit!).plus(tier.flat!));
     if (quantity.lte(upper)) return total;
     lower = upper;
@@ -240,32 +263,35 @@ function eligibleProviderAmount(
   shopifyPartnerDevelopmentSnapshot: boolean,
 ): boolean {
   return (
-    amount.isFinite()
-    && (
-      amount.gt(0)
-      || (shopifyPartnerDevelopmentSnapshot && amount.isZero())
-    )
+    amount.isFinite() &&
+    (amount.gt(0) || (shopifyPartnerDevelopmentSnapshot && amount.isZero()))
   );
 }
 
-function localRefundEvidence(
-  refund: RefundRow,
-): { finalCreditQuantity: number; expectedProviderAmount: Prisma.Decimal; currency: string } | null {
+function localRefundEvidence(refund: RefundRow): {
+  finalCreditQuantity: number;
+  expectedProviderAmount: Prisma.Decimal;
+  currency: string;
+} | null {
   if (
-    refund.purchase.currentAmount <= 0
-    || refund.purchase.creditsGranted <= 0
-    || !eligibleProviderAmount(
+    refund.purchase.currentAmount <= 0 ||
+    refund.purchase.creditsGranted <= 0 ||
+    !eligibleProviderAmount(
       refund.purchaseProviderAmountSnapshot,
       refund.shopifyPartnerDevelopmentSnapshot,
     )
   ) {
     return null;
   }
-  const ratio = new Prisma.Decimal(refund.purchase.currentAmount).div(refund.purchase.creditsGranted);
+  const ratio = new Prisma.Decimal(refund.purchase.currentAmount).div(
+    refund.purchase.creditsGranted,
+  );
   if (ratio.lte(0) || ratio.gt(1)) return null;
   return {
     finalCreditQuantity: refund.purchase.currentAmount,
-    expectedProviderAmount: refund.purchaseProviderAmountSnapshot.mul(ratio).toDecimalPlaces(2),
+    expectedProviderAmount: refund.purchaseProviderAmountSnapshot
+      .mul(ratio)
+      .toDecimalPlaces(2),
     currency: refund.purchaseProviderCurrencySnapshot,
   };
 }

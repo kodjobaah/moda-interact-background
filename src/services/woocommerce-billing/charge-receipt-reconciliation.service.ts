@@ -20,17 +20,37 @@ export class WooChargeReceiptReconciliationService {
   constructor(
     private readonly database: ChargeReceiptDatabase = prisma,
     private readonly now: () => Date = () => new Date(),
-    private readonly resumeScheduler: Pick<typeof recoveryCapacityResumeService, "schedule"> = recoveryCapacityResumeService,
+    private readonly resumeScheduler: Pick<
+      typeof recoveryCapacityResumeService,
+      "schedule"
+    > = recoveryCapacityResumeService,
   ) {}
 
-  async reconcileBatch(limit = MAX_WOO_CHARGE_ACQUISITION_RECEIPTS_PER_CYCLE): Promise<WooChargeReceiptBatchResult> {
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_WOO_CHARGE_ACQUISITION_RECEIPTS_PER_CYCLE) {
+  async reconcileBatch(
+    limit = MAX_WOO_CHARGE_ACQUISITION_RECEIPTS_PER_CYCLE,
+  ): Promise<WooChargeReceiptBatchResult> {
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_WOO_CHARGE_ACQUISITION_RECEIPTS_PER_CYCLE
+    ) {
       throw new Error("Woo charge receipt batch size must be between 1 and 50");
     }
-    const result: WooChargeReceiptBatchResult = { claimed: 0, processed: 0, activated: 0, canceled: 0, retryable: 0 };
+    const result: WooChargeReceiptBatchResult = {
+      claimed: 0,
+      processed: 0,
+      activated: 0,
+      canceled: 0,
+      retryable: 0,
+    };
     let cursor: ChargeReceiptCursor | null = null;
     for (let index = 0; index < limit; index += 1) {
-      const attempt = await processNextWooChargeReceipt(this.database, this.now(), cursor, this.resumeScheduler);
+      const attempt = await processNextWooChargeReceipt(
+        this.database,
+        this.now(),
+        cursor,
+        this.resumeScheduler,
+      );
       if (attempt.outcome === "empty") break;
       result.claimed += 1;
       cursor = attempt.cursor ?? cursor;
@@ -45,4 +65,5 @@ export class WooChargeReceiptReconciliationService {
   }
 }
 
-export const wooChargeReceiptReconciliationService = new WooChargeReceiptReconciliationService();
+export const wooChargeReceiptReconciliationService =
+  new WooChargeReceiptReconciliationService();

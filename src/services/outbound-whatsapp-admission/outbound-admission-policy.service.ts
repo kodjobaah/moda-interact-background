@@ -1,4 +1,8 @@
-import { CheckoutRecoveryStatus, Prisma, UsageReservationStatus } from "@prisma/client";
+import {
+  CheckoutRecoveryStatus,
+  Prisma,
+  UsageReservationStatus,
+} from "@prisma/client";
 
 import {
   EffectiveBillingPolicyError,
@@ -53,7 +57,9 @@ export class OutboundAdmissionPolicyService {
     try {
       return {
         kind: "resolved",
-        policy: await this.createPolicyResolver(transaction).resolve(input.shopId),
+        policy: await this.createPolicyResolver(transaction).resolve(
+          input.shopId,
+        ),
         executionScope: "general",
       };
     } catch (error) {
@@ -98,9 +104,9 @@ export class OutboundAdmissionPolicyService {
     try {
       return {
         kind: "resolved",
-        policy: await this.createPostContractPolicyResolver(transaction).resolve(
-          input.shopId,
-        ),
+        policy: await this.createPostContractPolicyResolver(
+          transaction,
+        ).resolve(input.shopId),
         executionScope: "recovery",
       };
     } catch (error) {

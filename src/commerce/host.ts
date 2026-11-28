@@ -1,18 +1,40 @@
-import { captureRecoveryIdentityDecision, renderRefreshedRecoveryIdentityDecision, type RecoveryIdentityDecisionReceipt } from "./identity-terminal-presentation.js";
+import {
+  captureRecoveryIdentityDecision,
+  renderRefreshedRecoveryIdentityDecision,
+  type RecoveryIdentityDecisionReceipt,
+} from "./identity-terminal-presentation.js";
 import { recoveryTerminalModelRequest } from "./terminal-phase-instructions.js";
-import { isCatalogueDiscoveryTool, shouldReferAfterUngroundedDiscovery } from "./discovery-factuality.js";
+import {
+  isCatalogueDiscoveryTool,
+  shouldReferAfterUngroundedDiscovery,
+} from "./discovery-factuality.js";
 import { makeRecoveryTerminalFinalizer } from "./recovery-terminal-finalizer.js";
 import { structuredFinalizationInstructions } from "./structured-finalization-instructions.js";
-import { logFinalSelectionShape, projectFinalSelectionShape } from "./final-selection-shape.js";
-import {planCommerceVerificationBudget} from '@modainteract/moda-interact-shared/commerce';
+import {
+  logFinalSelectionShape,
+  projectFinalSelectionShape,
+} from "./final-selection-shape.js";
+import { planCommerceVerificationBudget } from "@modainteract/moda-interact-shared/commerce";
 import { createProductContextRepository } from "./product-context-repository.js";
-import { prepareProductFactsPresentation, PresentationVerificationError } from "./presentation.js";
-import { CommerceVerifiedPresentationSchema, type CommerceVerifiedPresentation } from "@modainteract/moda-interact-shared/commerce/presentation";
-import { PRODUCT_DISCOVERY_INSTRUCTION, shopVoiceInstruction } from "./product-discovery-instructions.js";
+import {
+  prepareProductFactsPresentation,
+  PresentationVerificationError,
+} from "./presentation.js";
+import {
+  CommerceVerifiedPresentationSchema,
+  type CommerceVerifiedPresentation,
+} from "@modainteract/moda-interact-shared/commerce/presentation";
+import {
+  PRODUCT_DISCOVERY_INSTRUCTION,
+  shopVoiceInstruction,
+} from "./product-discovery-instructions.js";
 import { filterMerchantKnowledgeAvailability } from "./merchant-knowledge-availability.js";
 import { conversationLanguageService } from "../services/conversation-language.service.js";
 import { renderStoreReferral } from "./referral.js";
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 import {
   canonicalJson,
   prepareCurrentCustomerMessages,
@@ -58,20 +80,38 @@ import {
   manifestMatchesGrant,
 } from "./grants.js";
 import { RECOVERY_INSTRUCTIONS } from "./recovery-instructions.js";
-import { loadRecommendationContext, refreshRecommendationContext, refreshRecommendationPolicy } from "./recommendations/context.js";
+import {
+  loadRecommendationContext,
+  refreshRecommendationContext,
+  refreshRecommendationPolicy,
+} from "./recommendations/context.js";
 import { TurnRecommendationObservations } from "./recommendations/observations.js";
 import { evaluateRecommendationDiscountInspection } from "./recommendations/observations.js";
 import { readRecommendationSelection } from "./recommendations/disposition.js";
 import { type RenderRecommendationProduct } from "./recommendations/render.js";
 import { planRecommendationRefreshes } from "./recommendations/revalidation.js";
-import { decimalToMinorUnits, isValidDecimal, minorUnitsToDecimal, sumPurchaseSubtotal } from "./recommendations/money.js";
-import { evaluatePurchaseDiscount, type DiscountEvaluationPurchase, type ObservedDiscount } from "./recommendations/eligibility.js";
+import {
+  decimalToMinorUnits,
+  isValidDecimal,
+  minorUnitsToDecimal,
+  sumPurchaseSubtotal,
+} from "./recommendations/money.js";
+import {
+  evaluatePurchaseDiscount,
+  type DiscountEvaluationPurchase,
+  type ObservedDiscount,
+} from "./recommendations/eligibility.js";
 import { selectCompatibleOffers } from "./recommendations/combinations.js";
 import { selectFallbackRecommendation } from "./recommendations/fallback-selection.js";
 import { selectShippingPresentation } from "./recommendations/shipping.js";
 import { resolveModaConfigurationLocale } from "@modainteract/moda-interact-shared/internationalization";
 import { resolveCommerceEnvironment } from "./model-environment.js";
-import { assertLiveBudgetFitsLease, resolveLiveBudget, LiveBudgetPolicyError, type ResolvedLiveBudget } from "./live-budget.js";
+import {
+  assertLiveBudgetFitsLease,
+  resolveLiveBudget,
+  LiveBudgetPolicyError,
+  type ResolvedLiveBudget,
+} from "./live-budget.js";
 import {
   extractTrustedEvidence,
   recordEvidenceRefreshOutcome,
@@ -95,21 +135,51 @@ export type HostDependencies = {
   resolvedBudgetForTest?: ResolvedLiveBudget;
 };
 
-type HostProduct = NonNullable<ReturnType<typeof CommerceToolOutputs.commerce_get_product.parse>["product"]>;
-type HostDiscountOptions = Extract<ReturnType<typeof CommerceToolOutputs.commerce_get_discount_options.parse>, { mode: string }>;
-type HostDiscountDetails = Extract<ReturnType<typeof CommerceToolOutputs.commerce_get_discount_details.parse>, { details: unknown }>;
+type HostProduct = NonNullable<
+  ReturnType<typeof CommerceToolOutputs.commerce_get_product.parse>["product"]
+>;
+type HostDiscountOptions = Extract<
+  ReturnType<typeof CommerceToolOutputs.commerce_get_discount_options.parse>,
+  { mode: string }
+>;
+type HostDiscountDetails = Extract<
+  ReturnType<typeof CommerceToolOutputs.commerce_get_discount_details.parse>,
+  { details: unknown }
+>;
 
 function isPermittedNativeSale(
   product: HostProduct,
-  policy: { mode: "NONE" | "FIXED" | "AI_BEST_APPLICABLE"; authorisedDiscountIds: readonly string[] },
+  policy: {
+    mode: "NONE" | "FIXED" | "AI_BEST_APPLICABLE";
+    authorisedDiscountIds: readonly string[];
+  },
 ): boolean {
-  if (policy.mode === "NONE" || policy.mode === "FIXED" && policy.authorisedDiscountIds.length === 0 ||
-      !product.currency || !product.unitPrice || !product.saleEvidence?.regularPrice ||
-      !product.saleEvidence.salePrice || product.saleEvidence.salePrice !== product.unitPrice) return false;
-  const regular = decimalToMinorUnits(product.saleEvidence.regularPrice, product.currency);
-  const sale = decimalToMinorUnits(product.saleEvidence.salePrice, product.currency);
+  if (
+    policy.mode === "NONE" ||
+    (policy.mode === "FIXED" && policy.authorisedDiscountIds.length === 0) ||
+    !product.currency ||
+    !product.unitPrice ||
+    !product.saleEvidence?.regularPrice ||
+    !product.saleEvidence.salePrice ||
+    product.saleEvidence.salePrice !== product.unitPrice
+  )
+    return false;
+  const regular = decimalToMinorUnits(
+    product.saleEvidence.regularPrice,
+    product.currency,
+  );
+  const sale = decimalToMinorUnits(
+    product.saleEvidence.salePrice,
+    product.currency,
+  );
   const current = decimalToMinorUnits(product.unitPrice, product.currency);
-  return regular !== null && sale !== null && current !== null && regular > sale && sale === current;
+  return (
+    regular !== null &&
+    sale !== null &&
+    current !== null &&
+    regular > sale &&
+    sale === current
+  );
 }
 
 export async function executeCommerceHost(
@@ -119,35 +189,76 @@ export async function executeCommerceHost(
   try {
     return await execute(context, deps);
   } catch (error) {
-    const failure = error instanceof CommerceHostError ? error
-      : error instanceof PresentationVerificationError
-        ? new CommerceHostError(error.code, false, hostDiagnostic("presentation.verify", "HOST_PRESENTATION_REJECTED"), error)
-      : error instanceof LiveBudgetPolicyError
-        ? new CommerceHostError("UNAVAILABLE", false,
-          hostDiagnostic("host.lifecycle", "HOST_LIVE_POLICY_REJECTED"), error)
-      : deps.signal?.aborted
-        ? new CommerceHostError("CANCELLED", false,
-          hostDiagnostic("host.lifecycle", "HOST_CANCELLED"), error)
-        : error instanceof Error && error.name === "TimeoutError"
-          ? new CommerceHostError("DEADLINE", true,
-            hostDiagnostic("host.lifecycle", "HOST_DEADLINE_EXCEEDED"), error)
-          : new CommerceHostError("UNAVAILABLE", true,
-            hostDiagnostic("host.lifecycle", "HOST_UNEXPECTED_FAILURE", { cause: error }), error);
+    const failure =
+      error instanceof CommerceHostError
+        ? error
+        : error instanceof PresentationVerificationError
+          ? new CommerceHostError(
+              error.code,
+              false,
+              hostDiagnostic(
+                "presentation.verify",
+                "HOST_PRESENTATION_REJECTED",
+              ),
+              error,
+            )
+          : error instanceof LiveBudgetPolicyError
+            ? new CommerceHostError(
+                "UNAVAILABLE",
+                false,
+                hostDiagnostic("host.lifecycle", "HOST_LIVE_POLICY_REJECTED"),
+                error,
+              )
+            : deps.signal?.aborted
+              ? new CommerceHostError(
+                  "CANCELLED",
+                  false,
+                  hostDiagnostic("host.lifecycle", "HOST_CANCELLED"),
+                  error,
+                )
+              : error instanceof Error && error.name === "TimeoutError"
+                ? new CommerceHostError(
+                    "DEADLINE",
+                    true,
+                    hostDiagnostic("host.lifecycle", "HOST_DEADLINE_EXCEEDED"),
+                    error,
+                  )
+                : new CommerceHostError(
+                    "UNAVAILABLE",
+                    true,
+                    hostDiagnostic(
+                      "host.lifecycle",
+                      "HOST_UNEXPECTED_FAILURE",
+                      { cause: error },
+                    ),
+                    error,
+                  );
     // This is an internal operational record only. No customer payload, raw
     // exception message, grant, credentials or MCP response is logged.
     try {
-      const logger = deps.logger ?? createLogger({
-        serviceName: "moda-messaging-worker",
-        environment: resolveCommerceEnvironment(),
-      });
-      logCommerceHostFailure(logger, failure.code, failure.retryable,
-        failure.diagnostic ?? hostDiagnostic("host.lifecycle", "HOST_UNEXPECTED_FAILURE"), {
+      const logger =
+        deps.logger ??
+        createLogger({
+          serviceName: "moda-messaging-worker",
+          environment: resolveCommerceEnvironment(),
+        });
+      logCommerceHostFailure(
+        logger,
+        failure.code,
+        failure.retryable,
+        failure.diagnostic ??
+          hostDiagnostic("host.lifecycle", "HOST_UNEXPECTED_FAILURE"),
+        {
           shopId: context.shopId,
           recoveryId: context.recovery.id,
           conversationId: context.conversation.conversationId,
           inboundVersion: context.conversation.version,
-        }, error);
-    } catch { /* Failure reporting must not modify the underlying outcome. */ }
+        },
+        error,
+      );
+    } catch {
+      /* Failure reporting must not modify the underlying outcome. */
+    }
     throw failure;
   }
 }
@@ -160,49 +271,104 @@ async function execute(
     include: {
       checkoutRecovery: {
         include: {
-          shop: { select: { id: true, domain: true, platform: true, brand: { select: { brandName: true } } } },
+          shop: {
+            select: {
+              id: true,
+              domain: true,
+              platform: true,
+              brand: { select: { brandName: true } },
+            },
+          },
           customer: { select: { firstName: true } },
         },
       },
     },
   });
   const recovery = current?.checkoutRecovery;
-  if (!current) throw new CommerceHostError("DENIED", false,
-    hostDiagnostic("host.authorization", "HOST_CONVERSATION_MISSING"));
-  if (current.shopId && recovery && current.shopId !== recovery.shopId) throw new CommerceHostError("DENIED", false,
-    hostDiagnostic("host.authorization", "HOST_SHOP_ID_MISMATCH"));
-  if (!recovery) throw new CommerceHostError("DENIED", false,
-    hostDiagnostic("host.authorization", "HOST_RECOVERY_MISSING"));
-  if (recovery.id !== context.recovery.id) throw new CommerceHostError("DENIED", false,
-    hostDiagnostic("host.authorization", "HOST_RECOVERY_MISMATCH"));
+  if (!current)
+    throw new CommerceHostError(
+      "DENIED",
+      false,
+      hostDiagnostic("host.authorization", "HOST_CONVERSATION_MISSING"),
+    );
+  if (current.shopId && recovery && current.shopId !== recovery.shopId)
+    throw new CommerceHostError(
+      "DENIED",
+      false,
+      hostDiagnostic("host.authorization", "HOST_SHOP_ID_MISMATCH"),
+    );
+  if (!recovery)
+    throw new CommerceHostError(
+      "DENIED",
+      false,
+      hostDiagnostic("host.authorization", "HOST_RECOVERY_MISSING"),
+    );
+  if (recovery.id !== context.recovery.id)
+    throw new CommerceHostError(
+      "DENIED",
+      false,
+      hostDiagnostic("host.authorization", "HOST_RECOVERY_MISMATCH"),
+    );
   if (["standalone", "product-only"].includes(recovery.id))
-    throw new CommerceHostError("DENIED", false,
-      hostDiagnostic("host.authorization", "HOST_RECOVERY_UNSUPPORTED"));
-  if (recovery.shopId !== context.shopId) throw new CommerceHostError("DENIED", false,
-    hostDiagnostic("host.authorization", "HOST_SHOP_ID_MISMATCH"));
-  if (recovery.shop.domain !== context.shop) throw new CommerceHostError("DENIED", false,
-    hostDiagnostic("host.authorization", "HOST_SHOP_DOMAIN_MISMATCH"));
-  if (current.controlMode !== "AI") throw new CommerceHostError("CANCELLED", false,
-    hostDiagnostic("host.turn_state", "HOST_CANCELLED"));
+    throw new CommerceHostError(
+      "DENIED",
+      false,
+      hostDiagnostic("host.authorization", "HOST_RECOVERY_UNSUPPORTED"),
+    );
+  if (recovery.shopId !== context.shopId)
+    throw new CommerceHostError(
+      "DENIED",
+      false,
+      hostDiagnostic("host.authorization", "HOST_SHOP_ID_MISMATCH"),
+    );
+  if (recovery.shop.domain !== context.shop)
+    throw new CommerceHostError(
+      "DENIED",
+      false,
+      hostDiagnostic("host.authorization", "HOST_SHOP_DOMAIN_MISMATCH"),
+    );
+  if (current.controlMode !== "AI")
+    throw new CommerceHostError(
+      "CANCELLED",
+      false,
+      hostDiagnostic("host.turn_state", "HOST_CANCELLED"),
+    );
   const capturedControlRevision = current.controlRevision;
-  if (current.inboundVersion !== context.conversation.version ||
-    current.processingInboundVersion !== current.inboundVersion)
-    throw new CommerceHostError("STALE_TURN", false,
-      hostDiagnostic("host.turn_state", "HOST_VERSION_STALE"));
-  if (!current.processingStartedAt) throw new CommerceHostError("STALE_TURN", false,
-    hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_MISSING"));
+  if (
+    current.inboundVersion !== context.conversation.version ||
+    current.processingInboundVersion !== current.inboundVersion
+  )
+    throw new CommerceHostError(
+      "STALE_TURN",
+      false,
+      hostDiagnostic("host.turn_state", "HOST_VERSION_STALE"),
+    );
+  if (!current.processingStartedAt)
+    throw new CommerceHostError(
+      "STALE_TURN",
+      false,
+      hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_MISSING"),
+    );
   if (Date.now() - current.processingStartedAt.getTime() >= 120_000)
-    throw new CommerceHostError("STALE_TURN", false,
-      hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_EXPIRED"));
+    throw new CommerceHostError(
+      "STALE_TURN",
+      false,
+      hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_EXPIRED"),
+    );
   let currentCustomerMessages: CommerceCurrentCustomerMessages;
   try {
     // Only the server-loaded current CUSTOMER/INBOUND window supplies objective.
     // Preserve exact roles/content; do not promote history or manufacture a fallback.
-    currentCustomerMessages = prepareCurrentCustomerMessages(context.conversation.messages);
+    currentCustomerMessages = prepareCurrentCustomerMessages(
+      context.conversation.messages,
+    );
   } catch {
     // Never retain the Zod cause: it may contain private current-message content.
-    throw new CommerceHostError("INVALID_INPUT", false,
-      hostDiagnostic("host.turn_state", "HOST_CURRENT_CUSTOMER_INPUT_INVALID"));
+    throw new CommerceHostError(
+      "INVALID_INPUT",
+      false,
+      hostDiagnostic("host.turn_state", "HOST_CURRENT_CUSTOMER_INPUT_INVALID"),
+    );
   }
   // Resolve LIVE policy once for this invocation, after trusted Shop and
   // processing-version checks. A later invocation may use updated policy;
@@ -213,26 +379,42 @@ async function execute(
       budget = deps.resolvedBudgetForTest;
       if (budget.environment !== resolveCommerceEnvironment())
         throw new LiveBudgetPolicyError("TEST_BUDGET_ENVIRONMENT_MISMATCH");
-      if (budget.shopId !== recovery.shopId || budget.conversationId !== current.id ||
-        budget.recoveryId !== recovery.id || budget.inboundVersion !== current.inboundVersion)
+      if (
+        budget.shopId !== recovery.shopId ||
+        budget.conversationId !== current.id ||
+        budget.recoveryId !== recovery.id ||
+        budget.inboundVersion !== current.inboundVersion
+      )
         throw new LiveBudgetPolicyError("TEST_BUDGET_IDENTITY_MISMATCH");
     } else {
       budget = await resolveLiveBudget({
-        db: prisma, environment: resolveCommerceEnvironment(),
-        shopId: recovery.shopId, conversationId: current.id,
-        recoveryId: recovery.id, inboundVersion: current.inboundVersion,
+        db: prisma,
+        environment: resolveCommerceEnvironment(),
+        shopId: recovery.shopId,
+        conversationId: current.id,
+        recoveryId: recovery.id,
+        inboundVersion: current.inboundVersion,
       });
     }
     assertLiveBudgetFitsLease(budget, current.processingStartedAt);
   } catch (error) {
     if (error instanceof LiveBudgetPolicyError) {
       try {
-        (deps.logger ?? createLogger({ serviceName: "moda-messaging-worker", environment: resolveCommerceEnvironment() }))
-          .error("commerce.turn.budget_rejected", {
-            reasonCode: error.reasonCode, shopId: recovery.shopId,
-            conversationId: current.id, inboundVersion: current.inboundVersion,
-          });
-      } catch { /* logging must not change the failure */ }
+        (
+          deps.logger ??
+          createLogger({
+            serviceName: "moda-messaging-worker",
+            environment: resolveCommerceEnvironment(),
+          })
+        ).error("commerce.turn.budget_rejected", {
+          reasonCode: error.reasonCode,
+          shopId: recovery.shopId,
+          conversationId: current.id,
+          inboundVersion: current.inboundVersion,
+        });
+      } catch {
+        /* logging must not change the failure */
+      }
     }
     throw error;
   }
@@ -248,39 +430,66 @@ async function execute(
     conversationId: current.id,
     inboundVersion: current.inboundVersion,
   });
-  const logger = deps.logger ?? createLogger({
-    serviceName: "moda-messaging-worker",
-    environment: resolveCommerceEnvironment(),
+  const logger =
+    deps.logger ??
+    createLogger({
+      serviceName: "moda-messaging-worker",
+      environment: resolveCommerceEnvironment(),
+    });
+  try {
+    logger.info("commerce.turn.budget_resolved", {
+      shopId: budget.shopId,
+      conversationId: budget.conversationId,
+      inboundVersion: budget.inboundVersion,
+      environment: budget.environment,
+      deadlineMs: budget.deadlineMs,
+      outputTokens: budget.outputTokens,
+      deadlineSource: budget.deadlineSource,
+      outputTokenSource: budget.outputTokenSource,
+      merchantPricingPlanId: budget.merchantPricingPlanId,
+      policyEditVersions: budget.policyEditVersions,
+      resolvedAt: budget.resolvedAt,
+    });
+  } catch {
+    /* best-effort telemetry */
+  }
+  const productContext = await createProductContextRepository().read({
+    shopId: turn.shopId,
+    conversationId: turn.conversationId,
+    now: Date.now(),
   });
-  try { logger.info("commerce.turn.budget_resolved", {
-    shopId: budget.shopId, conversationId: budget.conversationId,
-    inboundVersion: budget.inboundVersion, environment: budget.environment,
-    deadlineMs: budget.deadlineMs, outputTokens: budget.outputTokens,
-    deadlineSource: budget.deadlineSource, outputTokenSource: budget.outputTokenSource,
-    merchantPricingPlanId: budget.merchantPricingPlanId,
-    policyEditVersions: budget.policyEditVersions, resolvedAt: budget.resolvedAt,
-  }); } catch { /* best-effort telemetry */ }
-  const productContext = await createProductContextRepository().read({ shopId: turn.shopId, conversationId: turn.conversationId, now: Date.now() });
   const config = deps.config ?? mcpConfiguration();
   let grant: Awaited<ReturnType<typeof readGrant>>;
-  try { grant = await readGrant(turn); }
-  catch (error) {
+  try {
+    grant = await readGrant(turn);
+  } catch (error) {
     if (error instanceof CommerceHostError && error.diagnostic) throw error;
-    throw new CommerceHostError(error instanceof CommerceHostError ? error.code : "UNAVAILABLE",
+    throw new CommerceHostError(
+      error instanceof CommerceHostError ? error.code : "UNAVAILABLE",
       error instanceof CommerceHostError ? error.retryable : true,
-      hostDiagnostic("host.grant", error instanceof CommerceHostError && error.code === "DENIED"
-        ? "HOST_AUTHORIZATION_DENIED" : "HOST_GRANT_READ_FAILED"), error);
+      hostDiagnostic(
+        "host.grant",
+        error instanceof CommerceHostError && error.code === "DENIED"
+          ? "HOST_AUTHORIZATION_DENIED"
+          : "HOST_GRANT_READ_FAILED",
+      ),
+      error,
+    );
   }
   if (!grant) {
     const resolver = new CommerceMcpClient(config, turn, signal);
     try {
       await resolver.connect();
-      try { grant = await persistGrant(turn, await resolver.manifest()); }
-      catch (error) {
+      try {
+        grant = await persistGrant(turn, await resolver.manifest());
+      } catch (error) {
         if (error instanceof CommerceHostError && error.diagnostic) throw error;
-        throw new CommerceHostError(error instanceof CommerceHostError ? error.code : "UNAVAILABLE",
+        throw new CommerceHostError(
+          error instanceof CommerceHostError ? error.code : "UNAVAILABLE",
           error instanceof CommerceHostError ? error.retryable : true,
-          hostDiagnostic("host.grant", "HOST_GRANT_PERSIST_FAILED"), error);
+          hostDiagnostic("host.grant", "HOST_GRANT_PERSIST_FAILED"),
+          error,
+        );
       }
     } finally {
       await resolver.close();
@@ -298,14 +507,21 @@ async function execute(
     await client.connect();
     const manifest = await client.manifest();
     if (!manifestMatchesGrant(manifest, grant))
-      throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-        hostDiagnostic("host.grant", "HOST_MANIFEST_GRANT_MISMATCH"));
-    try { await validateRelease(manifest); }
-    catch (error) {
+      throw new CommerceHostError(
+        "INCOMPATIBLE_VERSION",
+        false,
+        hostDiagnostic("host.grant", "HOST_MANIFEST_GRANT_MISMATCH"),
+      );
+    try {
+      await validateRelease(manifest);
+    } catch (error) {
       if (error instanceof CommerceHostError && error.diagnostic) throw error;
-      throw new CommerceHostError(error instanceof CommerceHostError ? error.code : "UNAVAILABLE",
+      throw new CommerceHostError(
+        error instanceof CommerceHostError ? error.code : "UNAVAILABLE",
         error instanceof CommerceHostError ? error.retryable : true,
-        hostDiagnostic("host.release", "HOST_RELEASE_VALIDATION_FAILED"), error);
+        hostDiagnostic("host.release", "HOST_RELEASE_VALIDATION_FAILED"),
+        error,
+      );
     }
     const publishedDescriptors = [
       ...new Map(
@@ -323,102 +539,213 @@ async function execute(
       return failure;
     };
     const observeMcp = async <T>(action: () => Promise<T>): Promise<T> => {
-      try { return await action(); }
-      catch (error) {
+      try {
+        return await action();
+      } catch (error) {
         if (error instanceof CommerceHostError) retain(error);
         throw error;
       }
     };
-    const preserveRunnerFailure = async <T>(action: () => Promise<T>): Promise<T> => {
-      try { return await action(); }
-      catch (error) {
+    const preserveRunnerFailure = async <T>(
+      action: () => Promise<T>,
+    ): Promise<T> => {
+      try {
+        return await action();
+      } catch (error) {
         if (error instanceof CommerceHostError) retain(error);
         else runnerOriginalError = error;
         throw error;
       }
     };
     const assertCurrent = async () => {
-      if (deps.signal?.aborted) throw retain(new CommerceHostError("CANCELLED", false,
-        hostDiagnostic("host.lifecycle", "HOST_CANCELLED")));
+      if (deps.signal?.aborted)
+        throw retain(
+          new CommerceHostError(
+            "CANCELLED",
+            false,
+            hostDiagnostic("host.lifecycle", "HOST_CANCELLED"),
+          ),
+        );
       signal.throwIfAborted();
-      const state = await prisma.conversation.findUnique({
-        where: { id: current.id },
-        select: {
-          inboundVersion: true,
-          processingInboundVersion: true,
-          processingStartedAt: true,
-          controlMode: true,
-          controlRevision: true,
-          languageTag: true,
-          languageSource: true,
-        },
-      }).catch((error: unknown) => {
-        throw retain(new CommerceHostError("UNAVAILABLE", true,
-          hostDiagnostic("host.turn_state", "HOST_STATE_LOOKUP_FAILED"), error));
-      });
-      if (!state || state.inboundVersion !== turn.inboundVersion ||
-        state.processingInboundVersion !== turn.inboundVersion)
-        throw retain(new CommerceHostError("STALE_TURN", false,
-          hostDiagnostic("host.turn_state", "HOST_VERSION_STALE")));
-      if (state.controlMode !== "AI" || state.controlRevision !== capturedControlRevision)
-        throw retain(new CommerceHostError("CANCELLED", false,
-          hostDiagnostic("host.turn_state", "HOST_CANCELLED")));
+      const state = await prisma.conversation
+        .findUnique({
+          where: { id: current.id },
+          select: {
+            inboundVersion: true,
+            processingInboundVersion: true,
+            processingStartedAt: true,
+            controlMode: true,
+            controlRevision: true,
+            languageTag: true,
+            languageSource: true,
+          },
+        })
+        .catch((error: unknown) => {
+          throw retain(
+            new CommerceHostError(
+              "UNAVAILABLE",
+              true,
+              hostDiagnostic("host.turn_state", "HOST_STATE_LOOKUP_FAILED"),
+              error,
+            ),
+          );
+        });
+      if (
+        !state ||
+        state.inboundVersion !== turn.inboundVersion ||
+        state.processingInboundVersion !== turn.inboundVersion
+      )
+        throw retain(
+          new CommerceHostError(
+            "STALE_TURN",
+            false,
+            hostDiagnostic("host.turn_state", "HOST_VERSION_STALE"),
+          ),
+        );
+      if (
+        state.controlMode !== "AI" ||
+        state.controlRevision !== capturedControlRevision
+      )
+        throw retain(
+          new CommerceHostError(
+            "CANCELLED",
+            false,
+            hostDiagnostic("host.turn_state", "HOST_CANCELLED"),
+          ),
+        );
       if (!state.processingStartedAt)
-        throw retain(new CommerceHostError("STALE_TURN", false,
-          hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_MISSING")));
+        throw retain(
+          new CommerceHostError(
+            "STALE_TURN",
+            false,
+            hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_MISSING"),
+          ),
+        );
       if (Date.now() - state.processingStartedAt.getTime() >= 120_000)
-        throw retain(new CommerceHostError("STALE_TURN", false,
-          hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_EXPIRED")));
+        throw retain(
+          new CommerceHostError(
+            "STALE_TURN",
+            false,
+            hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_EXPIRED"),
+          ),
+        );
       return state;
     };
     const recommendationContext = await loadRecommendationContext({
-      recovery: recovery as typeof recovery & { shop: { platform: string; domain: string } },
-      turn, grant, db: prisma, environment: resolveCommerceEnvironment(), signal,
+      recovery: recovery as typeof recovery & {
+        shop: { platform: string; domain: string };
+      },
+      turn,
+      grant,
+      db: prisma,
+      environment: resolveCommerceEnvironment(),
+      signal,
       assertCurrent,
     });
     const recommendationObservations = new TurnRecommendationObservations({
-      shopId: turn.shopId, provider: recommendationContext.provider, turn,
-      grantId: grant.id, releaseId: grant.releaseId,
+      shopId: turn.shopId,
+      provider: recommendationContext.provider,
+      turn,
+      grantId: grant.id,
+      releaseId: grant.releaseId,
     });
     const available = async (requestSignal = signal) => {
       await assertCurrent();
       const listed = await observeMcp(() => client.tools(requestSignal));
       for (const entry of listed) {
         const descriptor = descriptors.find((d) => d.name === entry.name);
-        if (!descriptor) throw retain(new CommerceHostError("DENIED", false,
-          hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
+        if (!descriptor)
+          throw retain(
+            new CommerceHostError(
+              "DENIED",
+              false,
+              hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED"),
+            ),
+          );
         const builtin = "kind" in descriptor ? descriptor : undefined;
         const expectedGrant = builtin
-          ? grant.grantedTools.find((candidate) => isBuiltInTool(candidate) &&
-            candidate.toolName === builtin.name && candidate.definitionVersion === builtin.definitionVersion &&
-            isTrustedCommerceBuiltInGrant(candidate))
-          : grant.grantedTools.find((candidate) => !isBuiltInTool(candidate) && "toolId" in descriptor &&
-            candidate.toolId === descriptor.toolId &&
-            candidate.toolRevisionId === descriptor.toolRevisionId &&
-            candidate.toolName === descriptor.name &&
-            candidate.definitionVersion === descriptor.definitionVersion);
-        if (!expectedGrant) throw retain(new CommerceHostError("DENIED", false,
-          hostDiagnostic("host.authorization", "HOST_TOOL_GRANT_MISMATCH")));
+          ? grant.grantedTools.find(
+              (candidate) =>
+                isBuiltInTool(candidate) &&
+                candidate.toolName === builtin.name &&
+                candidate.definitionVersion === builtin.definitionVersion &&
+                isTrustedCommerceBuiltInGrant(candidate),
+            )
+          : grant.grantedTools.find(
+              (candidate) =>
+                !isBuiltInTool(candidate) &&
+                "toolId" in descriptor &&
+                candidate.toolId === descriptor.toolId &&
+                candidate.toolRevisionId === descriptor.toolRevisionId &&
+                candidate.toolName === descriptor.name &&
+                candidate.definitionVersion === descriptor.definitionVersion,
+            );
+        if (!expectedGrant)
+          throw retain(
+            new CommerceHostError(
+              "DENIED",
+              false,
+              hostDiagnostic("host.authorization", "HOST_TOOL_GRANT_MISMATCH"),
+            ),
+          );
         if (builtin && !isTrustedCommerceBuiltInDescriptor(builtin))
-          throw retain(new CommerceHostError("INCOMPATIBLE_VERSION", false,
-            hostDiagnostic("host.authorization", "HOST_TOOL_DESCRIPTOR_CHANGED")));
-        if (canonicalJson(entry) !== canonicalJson({
-          name: descriptor.name,
-          description: descriptor.description,
-          inputSchema: descriptor.inputSchema,
-        })) throw retain(new CommerceHostError("DENIED", false,
-          hostDiagnostic("host.authorization", "HOST_TOOL_DESCRIPTOR_CHANGED")));
+          throw retain(
+            new CommerceHostError(
+              "INCOMPATIBLE_VERSION",
+              false,
+              hostDiagnostic(
+                "host.authorization",
+                "HOST_TOOL_DESCRIPTOR_CHANGED",
+              ),
+            ),
+          );
+        if (
+          canonicalJson(entry) !==
+          canonicalJson({
+            name: descriptor.name,
+            description: descriptor.description,
+            inputSchema: descriptor.inputSchema,
+          })
+        )
+          throw retain(
+            new CommerceHostError(
+              "DENIED",
+              false,
+              hostDiagnostic(
+                "host.authorization",
+                "HOST_TOOL_DESCRIPTOR_CHANGED",
+              ),
+            ),
+          );
       }
       if (new Set(listed.map((t) => t.name)).size !== listed.length)
-        throw retain(new CommerceHostError("INVALID_INPUT", false,
-          hostDiagnostic("mcp.tool_list", "HOST_TOOL_LIST_DUPLICATE")));
-      if (listed.length !== descriptors.length || descriptors.some((descriptor) =>
-        !listed.some((entry) => entry.name === descriptor.name)))
-        throw retain(new CommerceHostError("DENIED", false,
-          hostDiagnostic("host.authorization", "HOST_TOOL_LIST_UNAUTHORIZED")));
+        throw retain(
+          new CommerceHostError(
+            "INVALID_INPUT",
+            false,
+            hostDiagnostic("mcp.tool_list", "HOST_TOOL_LIST_DUPLICATE"),
+          ),
+        );
+      if (
+        listed.length !== descriptors.length ||
+        descriptors.some(
+          (descriptor) =>
+            !listed.some((entry) => entry.name === descriptor.name),
+        )
+      )
+        throw retain(
+          new CommerceHostError(
+            "DENIED",
+            false,
+            hostDiagnostic("host.authorization", "HOST_TOOL_LIST_UNAUTHORIZED"),
+          ),
+        );
       const names = new Set(listed.map((t) => t.name));
-      if (recommendationContext.policy.mode === "NONE" ||
-          recommendationContext.policy.mode === "FIXED" && recommendationContext.policy.authorisedDiscountIds.length === 0) {
+      if (
+        recommendationContext.policy.mode === "NONE" ||
+        (recommendationContext.policy.mode === "FIXED" &&
+          recommendationContext.policy.authorisedDiscountIds.length === 0)
+      ) {
         names.delete("commerce_get_discount_options");
         names.delete("commerce_get_discount_details");
       }
@@ -428,8 +755,10 @@ async function execute(
     const language = {
       tag: current.languageTag,
       source:
-        current.languageSource === "CUSTOMER_EXPLICIT" ? null :
-        current.languageSource?.toLowerCase().replaceAll("_", "-") ?? null,
+        current.languageSource === "CUSTOMER_EXPLICIT"
+          ? null
+          : (current.languageSource?.toLowerCase().replaceAll("_", "-") ??
+            null),
     };
     const modelBridgeIdentifiers = {
       shopId: context.shopId,
@@ -437,19 +766,41 @@ async function execute(
       conversationId: current.id,
       inboundVersion: current.inboundVersion,
     };
-    const finalizationInstructions = structuredFinalizationInstructions(verifyResponseContract(
-      manifest.responseContract, manifest.responseContractHash, digest,
-    ));
-    const identityDecisionState: { receipt: RecoveryIdentityDecisionReceipt | null } = { receipt: null };
-    const rawTerminalFinalizer = makeRecoveryTerminalFinalizer({ responseContract: manifest.responseContract,
-      responseContractHash: manifest.responseContractHash, digest, platform: recommendationContext.provider,
+    const finalizationInstructions = structuredFinalizationInstructions(
+      verifyResponseContract(
+        manifest.responseContract,
+        manifest.responseContractHash,
+        digest,
+      ),
+    );
+    const identityDecisionState: {
+      receipt: RecoveryIdentityDecisionReceipt | null;
+    } = { receipt: null };
+    const rawTerminalFinalizer = makeRecoveryTerminalFinalizer({
+      responseContract: manifest.responseContract,
+      responseContractHash: manifest.responseContractHash,
+      digest,
+      platform: recommendationContext.provider,
       locale: resolveModaConfigurationLocale(language.tag),
-      hasEligibleEvidence: ids => evidence.hasEligibleEvidence(ids, Date.now()) });
-    const terminalFinalizer = rawTerminalFinalizer ? { ...rawTerminalFinalizer, project: (input: Parameters<typeof rawTerminalFinalizer.project>[0]) => {
-      const decision = rawTerminalFinalizer.project(input);
-      identityDecisionState.receipt = captureRecoveryIdentityDecision(input, decision, digest);
-      return decision;
-    } } : null;
+      hasEligibleEvidence: (ids) =>
+        evidence.hasEligibleEvidence(ids, Date.now()),
+    });
+    const terminalFinalizer = rawTerminalFinalizer
+      ? {
+          ...rawTerminalFinalizer,
+          project: (
+            input: Parameters<typeof rawTerminalFinalizer.project>[0],
+          ) => {
+            const decision = rawTerminalFinalizer.project(input);
+            identityDecisionState.receipt = captureRecoveryIdentityDecision(
+              input,
+              decision,
+              digest,
+            );
+            return decision;
+          },
+        }
+      : null;
     const result = await runCommerceTurn({
       toolProtocol: "native",
       turn,
@@ -458,8 +809,16 @@ async function execute(
       grant,
       manifest,
       signal,
-      hostInstructions: [...RECOVERY_INSTRUCTIONS, ...finalizationInstructions, PRODUCT_DISCOVERY_INSTRUCTION, recommendationContext.platformText,
-        ...(recommendationContext.shopText ? [recommendationContext.shopText] : []), shopVoiceInstruction(recovery.shop.brand?.brandName)],
+      hostInstructions: [
+        ...RECOVERY_INSTRUCTIONS,
+        ...finalizationInstructions,
+        PRODUCT_DISCOVERY_INSTRUCTION,
+        recommendationContext.platformText,
+        ...(recommendationContext.shopText
+          ? [recommendationContext.shopText]
+          : []),
+        shopVoiceInstruction(recovery.shop.brand?.brandName),
+      ],
       context: {
         recovery: {
           id: recovery.id,
@@ -474,151 +833,304 @@ async function execute(
         verifiedStoreDomain: recovery.shop.domain,
         commerceProvider: recommendationContext.provider,
         recoveryOfferMode: recommendationContext.policy.mode,
-        authorisedDiscountIds: recommendationContext.policy.authorisedDiscountIds,
+        authorisedDiscountIds:
+          recommendationContext.policy.authorisedDiscountIds,
         basket: recommendationContext.basket,
       },
       currentCustomerMessages,
       history: context.conversation.history ?? [],
       // Legacy explicit-source rows remain readable, without imposing preference
       // precedence on recovery. Supply their retained tag as context instead.
-      language: current.languageSource === "CUSTOMER_EXPLICIT" ? { tag: null, source: null } : language,
-      budgets: { deadlineMs: budget.deadlineMs, outputTokens: budget.outputTokens, remoteCalls: planCommerceVerificationBudget(10).discoveryCalls },
+      language:
+        current.languageSource === "CUSTOMER_EXPLICIT"
+          ? { tag: null, source: null }
+          : language,
+      budgets: {
+        deadlineMs: budget.deadlineMs,
+        outputTokens: budget.outputTokens,
+        remoteCalls: planCommerceVerificationBudget(10).discoveryCalls,
+      },
       dependencies: {
         ...(terminalFinalizer ? { finalizeTerminal: terminalFinalizer } : {}),
         model: {
-          invoke: async (request, modelSignal) => preserveRunnerFailure(async () => {
-            logCommerceModelBridgeMilestone(logger, modelBridgeIdentifiers, "turn_state_check");
-            await observeCommerceModelBridgePhase(
-              logger, modelBridgeIdentifiers, "turn_state_check", assertCurrent,
-            );
-            logCommerceModelBridgeMilestone(logger, modelBridgeIdentifiers, "production_model_invoke");
-            const step = await observeCommerceModelBridgePhase(
-              logger, modelBridgeIdentifiers, "production_model_invoke",
-              () => deps.model.invoke(recoveryTerminalModelRequest(request, manifest.responseContract), modelSignal),
-            );
-            logFinalSelectionShape(logger, modelBridgeIdentifiers, step, request.requiredToolName === "finalResponse" || request.requireToolCall === true, manifest.responseContractHash);
-            return observeCommerceModelBridgePhase(
-              logger, modelBridgeIdentifiers, "response_postprocess", async () => {
-                if (step.calls.length !== 1 || step.calls[0]?.name !== "finalResponse")
-                  return step;
-                const responseContract = verifyResponseContract(
-                  manifest.responseContract,
-                  manifest.responseContractHash,
-                  digest,
-                );
-                const parsed = finalResponseSchema(responseContract).safeParse(
-                  step.calls[0].arguments,
-                );
-                if (
-                  parsed.success &&
-                  parsed.data.answerKind === "ANSWER" &&
-                  parsed.data.evidenceIds.length > 0 &&
-                  !evidence.hasEligibleEvidence(parsed.data.evidenceIds, Date.now())
-                ) {
-                  return {
-                    ...step,
-                    calls: [
-                      {
-                        ...step.calls[0],
-                        name: "finalResponse",
-                        arguments: {
-                          ...parsed.data,
-                          answerKind: "REFER_TO_STORE",
-                          referralReason: "UNVERIFIABLE_FACTS",
-                          evidenceIds: [],
-                          details: {},
+          invoke: async (request, modelSignal) =>
+            preserveRunnerFailure(async () => {
+              logCommerceModelBridgeMilestone(
+                logger,
+                modelBridgeIdentifiers,
+                "turn_state_check",
+              );
+              await observeCommerceModelBridgePhase(
+                logger,
+                modelBridgeIdentifiers,
+                "turn_state_check",
+                assertCurrent,
+              );
+              logCommerceModelBridgeMilestone(
+                logger,
+                modelBridgeIdentifiers,
+                "production_model_invoke",
+              );
+              const step = await observeCommerceModelBridgePhase(
+                logger,
+                modelBridgeIdentifiers,
+                "production_model_invoke",
+                () =>
+                  deps.model.invoke(
+                    recoveryTerminalModelRequest(
+                      request,
+                      manifest.responseContract,
+                    ),
+                    modelSignal,
+                  ),
+              );
+              logFinalSelectionShape(
+                logger,
+                modelBridgeIdentifiers,
+                step,
+                request.requiredToolName === "finalResponse" ||
+                  request.requireToolCall === true,
+                manifest.responseContractHash,
+              );
+              return observeCommerceModelBridgePhase(
+                logger,
+                modelBridgeIdentifiers,
+                "response_postprocess",
+                async () => {
+                  if (
+                    step.calls.length !== 1 ||
+                    step.calls[0]?.name !== "finalResponse"
+                  )
+                    return step;
+                  const responseContract = verifyResponseContract(
+                    manifest.responseContract,
+                    manifest.responseContractHash,
+                    digest,
+                  );
+                  const parsed = finalResponseSchema(
+                    responseContract,
+                  ).safeParse(step.calls[0].arguments);
+                  if (
+                    parsed.success &&
+                    parsed.data.answerKind === "ANSWER" &&
+                    parsed.data.evidenceIds.length > 0 &&
+                    !evidence.hasEligibleEvidence(
+                      parsed.data.evidenceIds,
+                      Date.now(),
+                    )
+                  ) {
+                    return {
+                      ...step,
+                      calls: [
+                        {
+                          ...step.calls[0],
+                          name: "finalResponse",
+                          arguments: {
+                            ...parsed.data,
+                            answerKind: "REFER_TO_STORE",
+                            referralReason: "UNVERIFIABLE_FACTS",
+                            evidenceIds: [],
+                            details: {},
+                          },
                         },
-                      },
-                    ],
-                  };
-                }
-                return step;
-              },
-            );
-          }),
+                      ],
+                    };
+                  }
+                  return step;
+                },
+              );
+            }),
         },
         logger: logger.child({
           component: "commerce-agent-host",
           recoveryId: recovery.id,
           conversationId: current.id,
           modelSelectionSource: deps.modelSelection?.selectionSource ?? null,
-          merchantPricingPlanId: deps.modelSelection?.merchantPricingPlanId ?? null,
+          merchantPricingPlanId:
+            deps.modelSelection?.merchantPricingPlanId ?? null,
           shopifyPlanHandle: deps.modelSelection?.shopifyPlanHandle ?? null,
         }),
         now: Date.now,
         digest,
         tools: descriptors.map((descriptor) => ({
           descriptor,
-          isAuthorized: async (authorizedGrant, toolSignal) => preserveRunnerFailure(async () => {
-            toolSignal.throwIfAborted();
-            if (!(await available(toolSignal)).has(descriptor.name)) return false;
-            return grant.grantedTools.some((candidate) =>
-              canonicalJson(candidate) === canonicalJson(authorizedGrant) &&
-              (isBuiltInTool(candidate)
-                ? isTrustedCommerceBuiltInGrant(candidate) && manifest.builtInTools.some((builtin) =>
-                  builtin.name === descriptor.name && builtin.definitionVersion === candidate.definitionVersion)
-                : "toolId" in descriptor && candidate.toolId === descriptor.toolId &&
-                  candidate.toolRevisionId === descriptor.toolRevisionId &&
-                  candidate.toolName === descriptor.name &&
-                  candidate.definitionVersion === descriptor.definitionVersion));
-          }),
-          execute: async (args, toolSignal): Promise<CommerceToolResult> => preserveRunnerFailure(async () => {
-            toolSignal.throwIfAborted();
-            await assertCurrent();
-            if (!(await available(toolSignal)).has(descriptor.name))
-              throw retain(new CommerceHostError("DENIED", false,
-                hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
-            const builtin = "kind" in descriptor;
-            const isDiscount = builtin && (descriptor.name === "commerce_get_discount_options" ||
-              descriptor.name === "commerce_get_discount_details");
-            if (isDiscount) {
-              await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal: toolSignal, assertCurrent });
-              if (descriptor.name === "commerce_get_discount_details") {
-                const offerId = args.offerId;
-                const options = recommendationObservations.all("commerce_get_discount_options");
-                const permitted = options.some((observation) => {
-                  const output = observation.output as ReturnType<typeof CommerceToolOutputs.commerce_get_discount_options.parse>;
-                  return !(("outcome" in output)) && output.offers.some((offer) => offer.offerId === offerId) &&
-                    (recommendationContext.policy.mode !== "FIXED" || recommendationContext.policy.authorisedDiscountIds.includes(String(offerId)));
+          isAuthorized: async (authorizedGrant, toolSignal) =>
+            preserveRunnerFailure(async () => {
+              toolSignal.throwIfAborted();
+              if (!(await available(toolSignal)).has(descriptor.name))
+                return false;
+              return grant.grantedTools.some(
+                (candidate) =>
+                  canonicalJson(candidate) === canonicalJson(authorizedGrant) &&
+                  (isBuiltInTool(candidate)
+                    ? isTrustedCommerceBuiltInGrant(candidate) &&
+                      manifest.builtInTools.some(
+                        (builtin) =>
+                          builtin.name === descriptor.name &&
+                          builtin.definitionVersion ===
+                            candidate.definitionVersion,
+                      )
+                    : "toolId" in descriptor &&
+                      candidate.toolId === descriptor.toolId &&
+                      candidate.toolRevisionId === descriptor.toolRevisionId &&
+                      candidate.toolName === descriptor.name &&
+                      candidate.definitionVersion ===
+                        descriptor.definitionVersion),
+              );
+            }),
+          execute: async (args, toolSignal): Promise<CommerceToolResult> =>
+            preserveRunnerFailure(async () => {
+              toolSignal.throwIfAborted();
+              await assertCurrent();
+              if (!(await available(toolSignal)).has(descriptor.name))
+                throw retain(
+                  new CommerceHostError(
+                    "DENIED",
+                    false,
+                    hostDiagnostic(
+                      "host.authorization",
+                      "HOST_TOOL_NOT_GRANTED",
+                    ),
+                  ),
+                );
+              const builtin = "kind" in descriptor;
+              const isDiscount =
+                builtin &&
+                (descriptor.name === "commerce_get_discount_options" ||
+                  descriptor.name === "commerce_get_discount_details");
+              if (isDiscount) {
+                await refreshRecommendationPolicy({
+                  context: recommendationContext,
+                  db: prisma,
+                  signal: toolSignal,
+                  assertCurrent,
                 });
-                if (typeof offerId !== "string" || !permitted)
-                  throw retain(new CommerceHostError("DENIED", false,
-                    hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
-              }
-            }
-            // Shared validated arguments and authorization before execute; the
-            // host has just rechecked current scope and tool availability.
-            if (isCatalogueDiscoveryTool(descriptor.name)) currentDiscoveryAttempted = true;
-            const result = await observeMcp(() => client.call(descriptor.name, args, toolSignal));
-            if (isDiscount) await refreshRecommendationPolicy({
-              context: recommendationContext, db: prisma, signal: toolSignal, assertCurrent,
-            });
-            if (result.status === "OK") {
-              const observationTool = descriptor.name as string;
-              if (["commerce_get_product", "commerce_search_products", "commerce_get_discount_options",
-                "commerce_get_discount_details", "commerce_get_shipping_information"].includes(observationTool)) {
-                const toolName = observationTool as Parameters<typeof recommendationObservations.record>[0]["toolName"];
-                const parsed = CommerceToolOutputs[toolName].safeParse(result.data);
-                if (!parsed.success) throw retain(new CommerceHostError("INCOMPATIBLE_VERSION", false,
-                  hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"), parsed.error));
-                if (isDiscount && descriptor.name === "commerce_get_discount_options" &&
-                    "mode" in parsed.data && parsed.data.mode !== recommendationContext.policy.mode) {
-                  throw retain(new CommerceHostError("DENIED", false,
-                    hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
+                if (descriptor.name === "commerce_get_discount_details") {
+                  const offerId = args.offerId;
+                  const options = recommendationObservations.all(
+                    "commerce_get_discount_options",
+                  );
+                  const permitted = options.some((observation) => {
+                    const output = observation.output as ReturnType<
+                      typeof CommerceToolOutputs.commerce_get_discount_options.parse
+                    >;
+                    return (
+                      !("outcome" in output) &&
+                      output.offers.some(
+                        (offer) => offer.offerId === offerId,
+                      ) &&
+                      (recommendationContext.policy.mode !== "FIXED" ||
+                        recommendationContext.policy.authorisedDiscountIds.includes(
+                          String(offerId),
+                        ))
+                    );
+                  });
+                  if (typeof offerId !== "string" || !permitted)
+                    throw retain(
+                      new CommerceHostError(
+                        "DENIED",
+                        false,
+                        hostDiagnostic(
+                          "host.authorization",
+                          "HOST_TOOL_NOT_GRANTED",
+                        ),
+                      ),
+                    );
                 }
-                if (isDiscount && descriptor.name === "commerce_get_discount_details" && "details" in parsed.data) {
-                  const requested = args.offerId;
-                  if (parsed.data.details && parsed.data.details.offer.offerId !== requested)
-                    throw retain(new CommerceHostError("INCOMPATIBLE_VERSION", false,
-                      hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID")));
-                }
-                recommendationObservations.record({ toolName, descriptorIdentity: canonicalJson(descriptor),
-                  arguments: args, output: parsed.data });
               }
-            }
-            if ("toolRevisionId" in descriptor) evidence.record(descriptor, args, result, extractEvidence);
-            return result;
-          }),
+              // Shared validated arguments and authorization before execute; the
+              // host has just rechecked current scope and tool availability.
+              if (isCatalogueDiscoveryTool(descriptor.name))
+                currentDiscoveryAttempted = true;
+              const result = await observeMcp(() =>
+                client.call(descriptor.name, args, toolSignal),
+              );
+              if (isDiscount)
+                await refreshRecommendationPolicy({
+                  context: recommendationContext,
+                  db: prisma,
+                  signal: toolSignal,
+                  assertCurrent,
+                });
+              if (result.status === "OK") {
+                const observationTool = descriptor.name as string;
+                if (
+                  [
+                    "commerce_get_product",
+                    "commerce_search_products",
+                    "commerce_get_discount_options",
+                    "commerce_get_discount_details",
+                    "commerce_get_shipping_information",
+                  ].includes(observationTool)
+                ) {
+                  const toolName = observationTool as Parameters<
+                    typeof recommendationObservations.record
+                  >[0]["toolName"];
+                  const parsed = CommerceToolOutputs[toolName].safeParse(
+                    result.data,
+                  );
+                  if (!parsed.success)
+                    throw retain(
+                      new CommerceHostError(
+                        "INCOMPATIBLE_VERSION",
+                        false,
+                        hostDiagnostic(
+                          "mcp.tool_result",
+                          "MCP_TOOL_RESULT_SCHEMA_INVALID",
+                        ),
+                        parsed.error,
+                      ),
+                    );
+                  if (
+                    isDiscount &&
+                    descriptor.name === "commerce_get_discount_options" &&
+                    "mode" in parsed.data &&
+                    parsed.data.mode !== recommendationContext.policy.mode
+                  ) {
+                    throw retain(
+                      new CommerceHostError(
+                        "DENIED",
+                        false,
+                        hostDiagnostic(
+                          "host.authorization",
+                          "HOST_TOOL_NOT_GRANTED",
+                        ),
+                      ),
+                    );
+                  }
+                  if (
+                    isDiscount &&
+                    descriptor.name === "commerce_get_discount_details" &&
+                    "details" in parsed.data
+                  ) {
+                    const requested = args.offerId;
+                    if (
+                      parsed.data.details &&
+                      parsed.data.details.offer.offerId !== requested
+                    )
+                      throw retain(
+                        new CommerceHostError(
+                          "INCOMPATIBLE_VERSION",
+                          false,
+                          hostDiagnostic(
+                            "mcp.tool_result",
+                            "MCP_TOOL_RESULT_SCHEMA_INVALID",
+                          ),
+                        ),
+                      );
+                  }
+                  recommendationObservations.record({
+                    toolName,
+                    descriptorIdentity: canonicalJson(descriptor),
+                    arguments: args,
+                    output: parsed.data,
+                  });
+                }
+              }
+              if ("toolRevisionId" in descriptor)
+                evidence.record(descriptor, args, result, extractEvidence);
+              return result;
+            }),
           extractEvidence,
         })),
       },
@@ -629,24 +1141,48 @@ async function execute(
         signal.reason instanceof Error &&
         signal.reason.name === "TimeoutError"
       )
-        throw new CommerceHostError("DEADLINE", true,
-          hostDiagnostic("host.lifecycle", "HOST_DEADLINE_EXCEEDED"));
+        throw new CommerceHostError(
+          "DEADLINE",
+          true,
+          hostDiagnostic("host.lifecycle", "HOST_DEADLINE_EXCEEDED"),
+        );
       if (runnerHostFailure) {
         const source = runnerHostFailure.diagnostic;
-        throw new CommerceHostError(runnerHostFailure.code, runnerHostFailure.retryable,
-          source ? hostDiagnostic(source.stage, source.reasonCode, {
-            ...(source.operation === undefined ? {} : { operation: source.operation }),
-            ...(source.statusCode === undefined ? {} : { statusCode: source.statusCode }),
-            cause: runnerHostFailure,
-            ...(result.error.diagnostic ? { runnerDiagnostic: result.error.diagnostic } : {}),
-          }) : hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE", {
-            ...(result.error.diagnostic ? { runnerDiagnostic: result.error.diagnostic } : {}),
-          }), runnerHostFailure, runnerHostFailure.sourceFailure);
+        throw new CommerceHostError(
+          runnerHostFailure.code,
+          runnerHostFailure.retryable,
+          source
+            ? hostDiagnostic(source.stage, source.reasonCode, {
+                ...(source.operation === undefined
+                  ? {}
+                  : { operation: source.operation }),
+                ...(source.statusCode === undefined
+                  ? {}
+                  : { statusCode: source.statusCode }),
+                cause: runnerHostFailure,
+                ...(result.error.diagnostic
+                  ? { runnerDiagnostic: result.error.diagnostic }
+                  : {}),
+              })
+            : hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE", {
+                ...(result.error.diagnostic
+                  ? { runnerDiagnostic: result.error.diagnostic }
+                  : {}),
+              }),
+          runnerHostFailure,
+          runnerHostFailure.sourceFailure,
+        );
       }
-      throw new CommerceHostError(result.error.code, result.error.retryable,
+      throw new CommerceHostError(
+        result.error.code,
+        result.error.retryable,
         hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE", {
-          ...(result.error.diagnostic ? { runnerDiagnostic: result.error.diagnostic } : {}),
-        }), runnerOriginalError);
+          ...(result.error.diagnostic
+            ? { runnerDiagnostic: result.error.diagnostic }
+            : {}),
+        }),
+        runnerOriginalError,
+      );
     }
     signal.throwIfAborted();
     const latest = await assertCurrent();
@@ -657,7 +1193,9 @@ async function execute(
         remoteCalls: usedCalls,
         maxRemoteCalls: 10,
         now: Date.now,
-        assertCurrent: async () => { await assertCurrent(); },
+        assertCurrent: async () => {
+          await assertCurrent();
+        },
         isCancelled: () => deps.signal?.aborted === true,
         replay: async ({ name, arguments: args }) => {
           usedCalls += 1;
@@ -685,16 +1223,22 @@ async function execute(
       .filter((message) => message.role === "user")
       .map((message) => message.content)
       .join("\n");
-    const languageEvaluation = conversationLanguageService.evaluateDetectedLanguage({
-      recoveryConversation: true,
-      message: languageMessage,
-      currentLanguageTag: latest.languageTag,
-      currentLanguageSource: latest.languageSource
-        ? latest.languageSource.toLowerCase().replaceAll("_", "-") as "customer-explicit" | "detected" | "shopify" | "merchant-default" | "platform-default"
-        : null,
-      detectedLanguageTag: envelope.detectedLanguageTag,
-      detectedLanguageConfidence: envelope.detectedLanguageConfidence,
-    });
+    const languageEvaluation =
+      conversationLanguageService.evaluateDetectedLanguage({
+        recoveryConversation: true,
+        message: languageMessage,
+        currentLanguageTag: latest.languageTag,
+        currentLanguageSource: latest.languageSource
+          ? (latest.languageSource.toLowerCase().replaceAll("_", "-") as
+              | "customer-explicit"
+              | "detected"
+              | "shopify"
+              | "merchant-default"
+              | "platform-default")
+          : null,
+        detectedLanguageTag: envelope.detectedLanguageTag,
+        detectedLanguageConfidence: envelope.detectedLanguageConfidence,
+      });
     const hasDetectionCandidate =
       envelope.detectedLanguageTag !== null ||
       envelope.detectedLanguageConfidence !== null;
@@ -720,50 +1264,133 @@ async function execute(
       }
     }
     let currentShippingPresentationVerified = false;
-    let commerceVerifiedPresentation: CommerceVerifiedPresentation = CommerceVerifiedPresentationSchema.parse({
-      schemaVersion: 1, brandName: recovery.shop.brand?.brandName ?? null,
-      locale: resolveModaConfigurationLocale(languageEvaluation.languageTag), storeUrl: recommendationContext.storeUrl,
-      disposition: "STANDARD", products: [], optionFacts: [], productFacts: [], requiresShipping: null, policyUrl: null, includeNoVerifiedOffer: false,
-    });
-    const productObservations = (): CommerceProductObservation[] => [
-      ...recommendationObservations.all("commerce_search_products"), ...recommendationObservations.all("commerce_get_product"),
-    ].map(observation => {
-      const products = observation.toolName === "commerce_search_products"
-        ? CommerceToolOutputs.commerce_search_products.parse(observation.output).products
-        : (() => { const product = CommerceToolOutputs.commerce_get_product.parse(observation.output).product; return product ? [product] : []; })();
-      return { toolName: observation.toolName, products, observedAt: observation.observedAt };
-    });
-    const imageProducts: NonNullable<ReturnType<typeof CommerceToolOutputs.commerce_get_product.parse>["product"]>[] = [];
-    const authorizedPairs = [ ...(productContext?.references ?? []), ...productObservations().flatMap(item => item.products) ];
-    let presentedRecommendationPairs: { productId: string; variantId: string | null }[] = [];
+    let commerceVerifiedPresentation: CommerceVerifiedPresentation =
+      CommerceVerifiedPresentationSchema.parse({
+        schemaVersion: 1,
+        brandName: recovery.shop.brand?.brandName ?? null,
+        locale: resolveModaConfigurationLocale(languageEvaluation.languageTag),
+        storeUrl: recommendationContext.storeUrl,
+        disposition: "STANDARD",
+        products: [],
+        optionFacts: [],
+        productFacts: [],
+        requiresShipping: null,
+        policyUrl: null,
+        includeNoVerifiedOffer: false,
+      });
+    const productObservations = (): CommerceProductObservation[] =>
+      [
+        ...recommendationObservations.all("commerce_search_products"),
+        ...recommendationObservations.all("commerce_get_product"),
+      ].map((observation) => {
+        const products =
+          observation.toolName === "commerce_search_products"
+            ? CommerceToolOutputs.commerce_search_products.parse(
+                observation.output,
+              ).products
+            : (() => {
+                const product = CommerceToolOutputs.commerce_get_product.parse(
+                  observation.output,
+                ).product;
+                return product ? [product] : [];
+              })();
+        return {
+          toolName: observation.toolName,
+          products,
+          observedAt: observation.observedAt,
+        };
+      });
+    const imageProducts: NonNullable<
+      ReturnType<
+        typeof CommerceToolOutputs.commerce_get_product.parse
+      >["product"]
+    >[] = [];
+    const authorizedPairs = [
+      ...(productContext?.references ?? []),
+      ...productObservations().flatMap((item) => item.products),
+    ];
+    let presentedRecommendationPairs: {
+      productId: string;
+      variantId: string | null;
+    }[] = [];
     let factsPresentation: CommerceVerifiedPresentation | null = null;
     if (envelope.answerKind === "ANSWER") {
-      factsPresentation = await prepareProductFactsPresentation({ envelope, authorizedPairs,
+      factsPresentation = await prepareProductFactsPresentation({
+        envelope,
+        authorizedPairs,
         brandName: recovery.shop.brand?.brandName ?? null,
-        locale: resolveModaConfigurationLocale(languageEvaluation.languageTag), storeUrl: recommendationContext.storeUrl,
-        assertCurrent: async () => { await assertCurrent(); },
+        locale: resolveModaConfigurationLocale(languageEvaluation.languageTag),
+        storeUrl: recommendationContext.storeUrl,
+        assertCurrent: async () => {
+          await assertCurrent();
+        },
         consumeBudget: () => {
-          if (signal.aborted) throw new PresentationVerificationError("DEADLINE");
-          if (usedCalls >= 10) throw new PresentationVerificationError("BUDGET_EXHAUSTED");
+          if (signal.aborted)
+            throw new PresentationVerificationError("DEADLINE");
+          if (usedCalls >= 10)
+            throw new PresentationVerificationError("BUDGET_EXHAUSTED");
           usedCalls += 1;
         },
-        readProduct: async pair => {
-          if (!(await available()).has("commerce_get_product")) throw new CommerceHostError("DENIED", false);
-          const fresh = await observeMcp(() => client.call("commerce_get_product", pair, signal));
-          if (fresh.status !== "OK") throw new CommerceHostError(fresh.code, fresh.retryable);
-          const parsed = CommerceToolOutputs.commerce_get_product.safeParse(fresh.data);
-          if (!parsed.success) throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-            hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"), parsed.error);
-          recommendationObservations.record({ toolName: "commerce_get_product", descriptorIdentity: canonicalJson(descriptors.find(d => d.name === "commerce_get_product")), arguments: pair, output: parsed.data });
+        readProduct: async (pair) => {
+          if (!(await available()).has("commerce_get_product"))
+            throw new CommerceHostError("DENIED", false);
+          const fresh = await observeMcp(() =>
+            client.call("commerce_get_product", pair, signal),
+          );
+          if (fresh.status !== "OK")
+            throw new CommerceHostError(fresh.code, fresh.retryable);
+          const parsed = CommerceToolOutputs.commerce_get_product.safeParse(
+            fresh.data,
+          );
+          if (!parsed.success)
+            throw new CommerceHostError(
+              "INCOMPATIBLE_VERSION",
+              false,
+              hostDiagnostic(
+                "mcp.tool_result",
+                "MCP_TOOL_RESULT_SCHEMA_INVALID",
+              ),
+              parsed.error,
+            );
+          recommendationObservations.record({
+            toolName: "commerce_get_product",
+            descriptorIdentity: canonicalJson(
+              descriptors.find((d) => d.name === "commerce_get_product"),
+            ),
+            arguments: pair,
+            output: parsed.data,
+          });
           if (parsed.data.product) {
             imageProducts.push(parsed.data.product);
             const product = parsed.data.product;
-            try { logger.info("commerce.product.lookup.verified", { shopId: turn.shopId, conversationId: turn.conversationId, recoveryId: recovery.id,
-              productId: product.productId, variantId: product.variantId, stockStatus: product.stock?.status ?? "UNAVAILABLE",
-              stockScope: product.stock?.status === "KNOWN" ? product.stock.scope : null,
-              // Provider-only unavailable reasons remain in MCP diagnostics; the wire intentionally carries status only.
-              reason: product.stock?.status === "KNOWN" ? "KNOWN" : product.stock?.status === "NOT_TRACKED" ? "NOT_TRACKED" : product.stock ? null : "MISSING_PROVIDER_FIELD",
-              contextReferenceCount: productContext?.references.length ?? 0, presentationCount: productContext?.presentation?.references.length ?? 0 }); } catch { /* best effort */ }
+            try {
+              logger.info("commerce.product.lookup.verified", {
+                shopId: turn.shopId,
+                conversationId: turn.conversationId,
+                recoveryId: recovery.id,
+                productId: product.productId,
+                variantId: product.variantId,
+                stockStatus: product.stock?.status ?? "UNAVAILABLE",
+                stockScope:
+                  product.stock?.status === "KNOWN"
+                    ? product.stock.scope
+                    : null,
+                // Provider-only unavailable reasons remain in MCP diagnostics; the wire intentionally carries status only.
+                reason:
+                  product.stock?.status === "KNOWN"
+                    ? "KNOWN"
+                    : product.stock?.status === "NOT_TRACKED"
+                      ? "NOT_TRACKED"
+                      : product.stock
+                        ? null
+                        : "MISSING_PROVIDER_FIELD",
+                contextReferenceCount: productContext?.references.length ?? 0,
+                presentationCount:
+                  productContext?.presentation?.references.length ?? 0,
+              });
+            } catch {
+              /* best effort */
+            }
           }
           return parsed.data;
         },
@@ -771,398 +1398,1141 @@ async function execute(
       if (factsPresentation) commerceVerifiedPresentation = factsPresentation;
     }
     const compositionDiagnostic = (fields: Record<string, unknown>) => {
-      try { logger.info('commerce.response.composition', { ...fields, purpose: 'live', shopId: turn.shopId, conversationId: turn.conversationId, inboundVersion: current.inboundVersion, recoveryId: recovery.id }); } catch { /* Diagnostics must never affect delivery. */ }
+      try {
+        logger.info("commerce.response.composition", {
+          ...fields,
+          purpose: "live",
+          shopId: turn.shopId,
+          conversationId: turn.conversationId,
+          inboundVersion: current.inboundVersion,
+          recoveryId: recovery.id,
+        });
+      } catch {
+        /* Diagnostics must never affect delivery. */
+      }
     };
     if (envelope.answerKind === "ANSWER") {
-      const details = envelope.details && typeof envelope.details === "object" && !Array.isArray(envelope.details)
-        ? envelope.details as Record<string, unknown> : {};
+      const details =
+        envelope.details &&
+        typeof envelope.details === "object" &&
+        !Array.isArray(envelope.details)
+          ? (envelope.details as Record<string, unknown>)
+          : {};
       const selection = readRecommendationSelection(details);
-      compositionDiagnostic({ stage: 'SELECTION_SHAPE', ...projectFinalSelectionShape(envelope),
-        parsedShippingSelectionPresent: Boolean(selection?.shippingInformationSelection),
-        parsedRecommendationCount: Math.min(selection?.productRecommendations?.length ?? 0, 4) });
-      compositionDiagnostic({ stage: 'RECOMMENDATION_SELECTION', answerKind: envelope.answerKind, selectionValid: selection !== null, disposition: selection?.responseDisposition ?? 'STANDARD', proposals: selection?.productRecommendations?.map(p => ({ productId: p.productId, variantId: p.variantId, promotionKind: p.promotionKind, scope: p.scope })) ?? [], reason: selection?.productRecommendations?.length ? null : 'MODEL_SELECTED_NO_RECOMMENDATIONS', factsPresentation: factsPresentation !== null });
-      const ownsPresentation = ["productRecommendationVersion", "productRecommendations", "responseDisposition",
-        "shippingInformationSelection"].some((key) => Object.hasOwn(details, key));
-      const observationsLatch = recommendationObservations.all("commerce_get_product").length > 0 ||
+      compositionDiagnostic({
+        stage: "SELECTION_SHAPE",
+        ...projectFinalSelectionShape(envelope),
+        parsedShippingSelectionPresent: Boolean(
+          selection?.shippingInformationSelection,
+        ),
+        parsedRecommendationCount: Math.min(
+          selection?.productRecommendations?.length ?? 0,
+          4,
+        ),
+      });
+      compositionDiagnostic({
+        stage: "RECOMMENDATION_SELECTION",
+        answerKind: envelope.answerKind,
+        selectionValid: selection !== null,
+        disposition: selection?.responseDisposition ?? "STANDARD",
+        proposals:
+          selection?.productRecommendations?.map((p) => ({
+            productId: p.productId,
+            variantId: p.variantId,
+            promotionKind: p.promotionKind,
+            scope: p.scope,
+          })) ?? [],
+        reason: selection?.productRecommendations?.length
+          ? null
+          : "MODEL_SELECTED_NO_RECOMMENDATIONS",
+        factsPresentation: factsPresentation !== null,
+      });
+      const ownsPresentation = [
+        "productRecommendationVersion",
+        "productRecommendations",
+        "responseDisposition",
+        "shippingInformationSelection",
+      ].some((key) => Object.hasOwn(details, key));
+      const observationsLatch =
+        recommendationObservations.all("commerce_get_product").length > 0 ||
         recommendationObservations.all("commerce_search_products").length > 0 ||
-        recommendationObservations.all("commerce_get_discount_options").length > 0 ||
-        recommendationObservations.all("commerce_get_discount_details").length > 0 ||
-        recommendationObservations.all("commerce_get_shipping_information").some((item) => item.arguments.productId !== null);
-      const controlled = ownsPresentation || observationsLatch ||
+        recommendationObservations.all("commerce_get_discount_options").length >
+          0 ||
+        recommendationObservations.all("commerce_get_discount_details").length >
+          0 ||
+        recommendationObservations
+          .all("commerce_get_shipping_information")
+          .some((item) => item.arguments.productId !== null);
+      const controlled =
+        ownsPresentation ||
+        observationsLatch ||
         selection?.responseDisposition === "OUT_OF_SCOPE_REDIRECT" ||
         selection?.responseDisposition === "SHIPPING_INFORMATION_UNVERIFIED";
       if (controlled && !factsPresentation) {
         await assertCurrent();
-        await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
-        const inspection = evaluateRecommendationDiscountInspection(recommendationObservations, recommendationContext.policy);
-        compositionDiagnostic({ stage: 'DISCOUNT_INSPECTION', inspection });
-        const proposed = inspection === "NOT_REQUIRED" || inspection === "SATISFIED"
-          ? selection?.productRecommendations ?? [] : [];
+        await refreshRecommendationPolicy({
+          context: recommendationContext,
+          db: prisma,
+          signal,
+          assertCurrent,
+        });
+        const inspection = evaluateRecommendationDiscountInspection(
+          recommendationObservations,
+          recommendationContext.policy,
+        );
+        compositionDiagnostic({ stage: "DISCOUNT_INSPECTION", inspection });
+        const proposed =
+          inspection === "NOT_REQUIRED" || inspection === "SATISFIED"
+            ? (selection?.productRecommendations ?? [])
+            : [];
         type ProductProposal = NonNullable<typeof proposed>[number];
-        type Product = NonNullable<ReturnType<typeof CommerceToolOutputs.commerce_get_product.parse>["product"]>;
-        const retained: Array<{ proposal: ProductProposal; product: Product; renderFacts: RenderRecommendationProduct }> = [];
+        type Product = NonNullable<
+          ReturnType<
+            typeof CommerceToolOutputs.commerce_get_product.parse
+          >["product"]
+        >;
+        const retained: Array<{
+          proposal: ProductProposal;
+          product: Product;
+          renderFacts: RenderRecommendationProduct;
+        }> = [];
         const initialProductObservations = [
           ...recommendationObservations.all("commerce_get_product"),
           ...recommendationObservations.all("commerce_search_products"),
         ];
-        const hasInitialProduct = (proposal: ProductProposal) => initialProductObservations.some((observation) => {
-          if (observation.arguments.productId === proposal.productId && observation.arguments.variantId === proposal.variantId) return true;
-          const output = observation.output as { products?: Product[]; product?: Product | null };
-          return output.product?.productId === proposal.productId && output.product.variantId === proposal.variantId ||
-            output.products?.some((product) => product.productId === proposal.productId && product.variantId === proposal.variantId) === true;
-        });
+        const hasInitialProduct = (proposal: ProductProposal) =>
+          initialProductObservations.some((observation) => {
+            if (
+              observation.arguments.productId === proposal.productId &&
+              observation.arguments.variantId === proposal.variantId
+            )
+              return true;
+            const output = observation.output as {
+              products?: Product[];
+              product?: Product | null;
+            };
+            return (
+              (output.product?.productId === proposal.productId &&
+                output.product.variantId === proposal.variantId) ||
+              output.products?.some(
+                (product) =>
+                  product.productId === proposal.productId &&
+                  product.variantId === proposal.variantId,
+              ) === true
+            );
+          });
         let currentBasket = recommendationContext.basket;
         const seenProposalKeys = new Set<string>();
-        const rejectProposal = (proposal: ProductProposal, reason: string) => { compositionDiagnostic({ stage: 'SELECTION_REJECTED', productId: proposal.productId, variantId: proposal.variantId, reason }); return false; };
+        const rejectProposal = (proposal: ProductProposal, reason: string) => {
+          compositionDiagnostic({
+            stage: "SELECTION_REJECTED",
+            productId: proposal.productId,
+            variantId: proposal.variantId,
+            reason,
+          });
+          return false;
+        };
         const budgetedCandidates = proposed.filter((proposal) => {
-          if (!hasInitialProduct(proposal) || recommendationContext.provider === "SHOPIFY" && proposal.variantId === null) return rejectProposal(proposal, 'UNOBSERVED_OR_INCOMPLETE_IDENTITY');
-          if ((proposal.scope === "PRODUCT_ONLY" || proposal.scope === "ADD_TO_BASKET") && proposal.basketLineId !== null) return rejectProposal(proposal, 'UNEXPECTED_BASKET_LINE');
-          if (proposal.scope === "REPLACE_BASKET_LINE" && (!currentBasket || !proposal.basketLineId ||
-              !currentBasket.lines.some((line) => line.lineKey === proposal.basketLineId))) return rejectProposal(proposal, 'BASKET_LINE_NOT_FOUND');
-          if (proposal.scope !== "PRODUCT_ONLY" && (!currentBasket || currentBasket.lines.some((line) =>
-              !line.productId || !line.quantity || recommendationContext.provider === "SHOPIFY" && !line.variantId))) return rejectProposal(proposal, 'BASKET_CONTEXT_INCOMPLETE');
-          if (proposal.promotionKind !== "DISCOUNT" && proposal.offerIds.length > 0 ||
-              proposal.promotionKind === "DISCOUNT" && (proposal.offerIds.length < 1 || proposal.offerIds.length > 3)) return rejectProposal(proposal, 'INVALID_PROMOTION_SELECTION');
-          const key = canonicalJson({ productId: proposal.productId, variantId: proposal.variantId,
-            scope: proposal.scope, basketLineId: proposal.basketLineId });
-          if (seenProposalKeys.has(key)) return rejectProposal(proposal, 'DUPLICATE_SELECTION');
+          if (
+            !hasInitialProduct(proposal) ||
+            (recommendationContext.provider === "SHOPIFY" &&
+              proposal.variantId === null)
+          )
+            return rejectProposal(
+              proposal,
+              "UNOBSERVED_OR_INCOMPLETE_IDENTITY",
+            );
+          if (
+            (proposal.scope === "PRODUCT_ONLY" ||
+              proposal.scope === "ADD_TO_BASKET") &&
+            proposal.basketLineId !== null
+          )
+            return rejectProposal(proposal, "UNEXPECTED_BASKET_LINE");
+          if (
+            proposal.scope === "REPLACE_BASKET_LINE" &&
+            (!currentBasket ||
+              !proposal.basketLineId ||
+              !currentBasket.lines.some(
+                (line) => line.lineKey === proposal.basketLineId,
+              ))
+          )
+            return rejectProposal(proposal, "BASKET_LINE_NOT_FOUND");
+          if (
+            proposal.scope !== "PRODUCT_ONLY" &&
+            (!currentBasket ||
+              currentBasket.lines.some(
+                (line) =>
+                  !line.productId ||
+                  !line.quantity ||
+                  (recommendationContext.provider === "SHOPIFY" &&
+                    !line.variantId),
+              ))
+          )
+            return rejectProposal(proposal, "BASKET_CONTEXT_INCOMPLETE");
+          if (
+            (proposal.promotionKind !== "DISCOUNT" &&
+              proposal.offerIds.length > 0) ||
+            (proposal.promotionKind === "DISCOUNT" &&
+              (proposal.offerIds.length < 1 || proposal.offerIds.length > 3))
+          )
+            return rejectProposal(proposal, "INVALID_PROMOTION_SELECTION");
+          const key = canonicalJson({
+            productId: proposal.productId,
+            variantId: proposal.variantId,
+            scope: proposal.scope,
+            basketLineId: proposal.basketLineId,
+          });
+          if (seenProposalKeys.has(key))
+            return rejectProposal(proposal, "DUPLICATE_SELECTION");
           seenProposalKeys.add(key);
           return true;
         });
-        compositionDiagnostic({ stage: 'RECOMMENDATION_FILTER', proposedCount: proposed.length, validCount: budgetedCandidates.length, rejectedCount: proposed.length - budgetedCandidates.length });
-        const softDisposition = selection?.responseDisposition === "OUT_OF_SCOPE_REDIRECT" ||
+        compositionDiagnostic({
+          stage: "RECOMMENDATION_FILTER",
+          proposedCount: proposed.length,
+          validCount: budgetedCandidates.length,
+          rejectedCount: proposed.length - budgetedCandidates.length,
+        });
+        const softDisposition =
+          selection?.responseDisposition === "OUT_OF_SCOPE_REDIRECT" ||
           selection?.responseDisposition === "SHIPPING_INFORMATION_UNVERIFIED";
-        const currentContextProductIds = new Set(initialProductObservations
-          .filter((observation) => observation.toolName === "commerce_get_product" || observation.arguments.browse !== true)
-          .flatMap((observation) => {
-            const output = observation.output as { product?: Product | null; products?: Product[] };
-            return [output.product?.productId, ...(output.products ?? []).map((product) => product.productId)]
-              .filter((productId): productId is string => Boolean(productId));
-          }));
-        const basketProductIdentities = new Set((currentBasket?.lines ?? [])
-          .filter((line) => line.productId !== null)
-          .map((line) => canonicalJson({ productId: line.productId, variantId: line.variantId })));
-        const fallbackProposal = softDisposition ? selectFallbackRecommendation({
-          selection: budgetedCandidates,
-          observations: recommendationObservations,
-          currentProductIds: currentContextProductIds,
-          basketProductIdentities,
-        }) : null;
-        const proposalsToRefresh = softDisposition ? (fallbackProposal ? [fallbackProposal] : []) : budgetedCandidates;
-        const availableOptions = new Map<string, HostDiscountOptions["offers"][number]>();
-        for (const observation of recommendationObservations.all("commerce_get_discount_options")) {
-          const output = observation.output as ReturnType<typeof CommerceToolOutputs.commerce_get_discount_options.parse>;
-          if ("outcome" in output || output.mode !== recommendationContext.policy.mode) continue;
+        const currentContextProductIds = new Set(
+          initialProductObservations
+            .filter(
+              (observation) =>
+                observation.toolName === "commerce_get_product" ||
+                observation.arguments.browse !== true,
+            )
+            .flatMap((observation) => {
+              const output = observation.output as {
+                product?: Product | null;
+                products?: Product[];
+              };
+              return [
+                output.product?.productId,
+                ...(output.products ?? []).map((product) => product.productId),
+              ].filter((productId): productId is string => Boolean(productId));
+            }),
+        );
+        const basketProductIdentities = new Set(
+          (currentBasket?.lines ?? [])
+            .filter((line) => line.productId !== null)
+            .map((line) =>
+              canonicalJson({
+                productId: line.productId,
+                variantId: line.variantId,
+              }),
+            ),
+        );
+        const fallbackProposal = softDisposition
+          ? selectFallbackRecommendation({
+              selection: budgetedCandidates,
+              observations: recommendationObservations,
+              currentProductIds: currentContextProductIds,
+              basketProductIdentities,
+            })
+          : null;
+        const proposalsToRefresh = softDisposition
+          ? fallbackProposal
+            ? [fallbackProposal]
+            : []
+          : budgetedCandidates;
+        const availableOptions = new Map<
+          string,
+          HostDiscountOptions["offers"][number]
+        >();
+        for (const observation of recommendationObservations.all(
+          "commerce_get_discount_options",
+        )) {
+          const output = observation.output as ReturnType<
+            typeof CommerceToolOutputs.commerce_get_discount_options.parse
+          >;
+          if (
+            "outcome" in output ||
+            output.mode !== recommendationContext.policy.mode
+          )
+            continue;
           for (const offer of output.offers) {
-            if (recommendationContext.policy.mode !== "FIXED" || recommendationContext.policy.authorisedDiscountIds.includes(offer.offerId))
+            if (
+              recommendationContext.policy.mode !== "FIXED" ||
+              recommendationContext.policy.authorisedDiscountIds.includes(
+                offer.offerId,
+              )
+            )
               availableOptions.set(offer.offerId, offer);
           }
         }
         const genericPolicySelection = { productId: null, variantId: null };
-        const observedGenericPolicy = recommendationObservations.latest("commerce_get_shipping_information", genericPolicySelection);
-        const shippingSelection = selection?.shippingInformationSelection ??
-          (selection?.responseDisposition === "SHIPPING_INFORMATION_UNVERIFIED" && observedGenericPolicy &&
-            isCommerceShippingObservationForSelection({ selection: genericPolicySelection, observation: observedGenericPolicy.output,
-              provider: recommendationContext.provider }) ? genericPolicySelection : undefined);
+        const observedGenericPolicy = recommendationObservations.latest(
+          "commerce_get_shipping_information",
+          genericPolicySelection,
+        );
+        const shippingSelection =
+          selection?.shippingInformationSelection ??
+          (selection?.responseDisposition ===
+            "SHIPPING_INFORMATION_UNVERIFIED" &&
+          observedGenericPolicy &&
+          isCommerceShippingObservationForSelection({
+            selection: genericPolicySelection,
+            observation: observedGenericPolicy.output,
+            provider: recommendationContext.provider,
+          })
+            ? genericPolicySelection
+            : undefined);
         const shippingArgs = shippingSelection
-          ? { productId: shippingSelection.productId, variantId: shippingSelection.variantId } : null;
-        const shippingObserved = shippingArgs && recommendationObservations.latest("commerce_get_shipping_information", shippingArgs);
-        const planRefreshes = (proposals: readonly ProductProposal[], shippingCallKey: string | null) => planRecommendationRefreshes({
-          proposals: proposals.map((proposal) => ({
-            proposal,
-            productCallKey: canonicalJson({ name: "commerce_get_product", arguments: {
-              productId: proposal.productId, variantId: proposal.variantId,
-            } }),
-            basketCallKeys: proposal.scope === "PRODUCT_ONLY" ? [] : (currentBasket?.lines ?? []).map((line) => canonicalJson({
-              name: "commerce_get_product", arguments: { productId: line.productId, variantId: line.variantId },
+          ? {
+              productId: shippingSelection.productId,
+              variantId: shippingSelection.variantId,
+            }
+          : null;
+        const shippingObserved =
+          shippingArgs &&
+          recommendationObservations.latest(
+            "commerce_get_shipping_information",
+            shippingArgs,
+          );
+        const planRefreshes = (
+          proposals: readonly ProductProposal[],
+          shippingCallKey: string | null,
+        ) =>
+          planRecommendationRefreshes({
+            proposals: proposals.map((proposal) => ({
+              proposal,
+              productCallKey: canonicalJson({
+                name: "commerce_get_product",
+                arguments: {
+                  productId: proposal.productId,
+                  variantId: proposal.variantId,
+                },
+              }),
+              basketCallKeys:
+                proposal.scope === "PRODUCT_ONLY"
+                  ? []
+                  : (currentBasket?.lines ?? []).map((line) =>
+                      canonicalJson({
+                        name: "commerce_get_product",
+                        arguments: {
+                          productId: line.productId,
+                          variantId: line.variantId,
+                        },
+                      }),
+                    ),
+              offerIds:
+                proposal.promotionKind === "DISCOUNT"
+                  ? proposal.offerIds.filter((id) => availableOptions.has(id))
+                  : [],
             })),
-            offerIds: proposal.promotionKind === "DISCOUNT" ? proposal.offerIds.filter((id) => availableOptions.has(id)) : [],
-          })),
-          ...(shippingCallKey ? { shippingCallKey } : shippingObserved && shippingArgs ? { shippingCallKey: canonicalJson({
-            name: "commerce_get_shipping_information", arguments: shippingArgs,
-          }) } : {}),
-          availableCalls: Math.max(0, 10 - usedCalls),
-        });
+            ...(shippingCallKey
+              ? { shippingCallKey }
+              : shippingObserved && shippingArgs
+                ? {
+                    shippingCallKey: canonicalJson({
+                      name: "commerce_get_shipping_information",
+                      arguments: shippingArgs,
+                    }),
+                  }
+                : {}),
+            availableCalls: Math.max(0, 10 - usedCalls),
+          });
         let refreshPlan = planRefreshes(proposalsToRefresh, null);
-        if (refreshPlan.proposals.some((item) => item.proposal.scope !== "PRODUCT_ONLY")) {
-          const refreshedBasket = await refreshRecommendationContext({ context: recommendationContext,
-            recoveryId: recovery.id, db: prisma, signal, assertCurrent });
+        if (
+          refreshPlan.proposals.some(
+            (item) => item.proposal.scope !== "PRODUCT_ONLY",
+          )
+        ) {
+          const refreshedBasket = await refreshRecommendationContext({
+            context: recommendationContext,
+            recoveryId: recovery.id,
+            db: prisma,
+            signal,
+            assertCurrent,
+          });
           if (refreshedBasket.basketChanged) {
             currentBasket = null;
             refreshPlan = planRecommendationRefreshes({
-              proposals: refreshPlan.proposals.filter((item) => item.proposal.scope === "PRODUCT_ONLY"),
-              ...(refreshPlan.shippingCallKey ? { shippingCallKey: refreshPlan.shippingCallKey } : {}),
+              proposals: refreshPlan.proposals.filter(
+                (item) => item.proposal.scope === "PRODUCT_ONLY",
+              ),
+              ...(refreshPlan.shippingCallKey
+                ? { shippingCallKey: refreshPlan.shippingCallKey }
+                : {}),
               availableCalls: Math.max(0, 10 - usedCalls),
             });
           } else currentBasket = refreshedBasket.basket;
         }
-        const budgeted = refreshPlan.proposals.map((item) => ({ ...item.proposal, offerIds: [...item.offerIds],
-          promotionKind: item.proposal.promotionKind === "DISCOUNT" && item.offerIds.length === 0 ? "NONE" as const : item.proposal.promotionKind }));
-        compositionDiagnostic({ stage: 'REFRESH_PLAN', selectedCount: proposalsToRefresh.length, plannedCount: budgeted.length, reason: budgeted.length < proposalsToRefresh.length ? 'REFRESH_BUDGET_OR_BASKET_CHANGED' : null });
+        const budgeted = refreshPlan.proposals.map((item) => ({
+          ...item.proposal,
+          offerIds: [...item.offerIds],
+          promotionKind:
+            item.proposal.promotionKind === "DISCOUNT" &&
+            item.offerIds.length === 0
+              ? ("NONE" as const)
+              : item.proposal.promotionKind,
+        }));
+        compositionDiagnostic({
+          stage: "REFRESH_PLAN",
+          selectedCount: proposalsToRefresh.length,
+          plannedCount: budgeted.length,
+          reason:
+            budgeted.length < proposalsToRefresh.length
+              ? "REFRESH_BUDGET_OR_BASKET_CHANGED"
+              : null,
+        });
         const shippingPlanned = refreshPlan.shippingCallKey !== null;
         const refreshedProducts = new Map<string, Product | null>();
-        const productKey = (productId: string | null, variantId: string | null) => canonicalJson({ productId, variantId });
-        const refreshProduct = async (productId: string, variantId: string | null, requireInitialObservation: boolean): Promise<Product | null> => {
+        const productKey = (
+          productId: string | null,
+          variantId: string | null,
+        ) => canonicalJson({ productId, variantId });
+        const refreshProduct = async (
+          productId: string,
+          variantId: string | null,
+          requireInitialObservation: boolean,
+        ): Promise<Product | null> => {
           const key = productKey(productId, variantId);
-          if (refreshedProducts.has(key)) return refreshedProducts.get(key) ?? null;
-          if (requireInitialObservation && !initialProductObservations.some((observation) => {
-            if (observation.arguments.productId === productId && observation.arguments.variantId === variantId) return true;
-            const output = observation.output as { products?: Product[]; product?: Product | null };
-            return output.product?.productId === productId && output.product.variantId === variantId ||
-              output.products?.some((item) => item.productId === productId && item.variantId === variantId) === true;
-          })) return null;
+          if (refreshedProducts.has(key))
+            return refreshedProducts.get(key) ?? null;
+          if (
+            requireInitialObservation &&
+            !initialProductObservations.some((observation) => {
+              if (
+                observation.arguments.productId === productId &&
+                observation.arguments.variantId === variantId
+              )
+                return true;
+              const output = observation.output as {
+                products?: Product[];
+                product?: Product | null;
+              };
+              return (
+                (output.product?.productId === productId &&
+                  output.product.variantId === variantId) ||
+                output.products?.some(
+                  (item) =>
+                    item.productId === productId &&
+                    item.variantId === variantId,
+                ) === true
+              );
+            })
+          )
+            return null;
           await assertCurrent();
           if (!(await available()).has("commerce_get_product"))
-            throw retain(new CommerceHostError("DENIED", false, hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
+            throw retain(
+              new CommerceHostError(
+                "DENIED",
+                false,
+                hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED"),
+              ),
+            );
           if (usedCalls >= 10) return null;
           usedCalls += 1;
           const args = { productId, variantId };
-          const fresh = await observeMcp(() => client.call("commerce_get_product", args, signal));
+          const fresh = await observeMcp(() =>
+            client.call("commerce_get_product", args, signal),
+          );
           await assertCurrent();
-          if (fresh.status !== "OK") throw new CommerceHostError(fresh.code, fresh.retryable,
-            hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
-          const parsed = CommerceToolOutputs.commerce_get_product.safeParse(fresh.data);
-          if (!parsed.success) throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-            hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"), parsed.error);
-          if (parsed.data.product && (parsed.data.product.productId !== productId || parsed.data.product.variantId !== variantId))
-            throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-              hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"));
-          recommendationObservations.record({ toolName: "commerce_get_product", descriptorIdentity: canonicalJson(
-            descriptors.find((descriptor) => descriptor.name === "commerce_get_product")), arguments: args, output: parsed.data });
+          if (fresh.status !== "OK")
+            throw new CommerceHostError(
+              fresh.code,
+              fresh.retryable,
+              hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"),
+            );
+          const parsed = CommerceToolOutputs.commerce_get_product.safeParse(
+            fresh.data,
+          );
+          if (!parsed.success)
+            throw new CommerceHostError(
+              "INCOMPATIBLE_VERSION",
+              false,
+              hostDiagnostic(
+                "mcp.tool_result",
+                "MCP_TOOL_RESULT_SCHEMA_INVALID",
+              ),
+              parsed.error,
+            );
+          if (
+            parsed.data.product &&
+            (parsed.data.product.productId !== productId ||
+              parsed.data.product.variantId !== variantId)
+          )
+            throw new CommerceHostError(
+              "INCOMPATIBLE_VERSION",
+              false,
+              hostDiagnostic(
+                "mcp.tool_result",
+                "MCP_TOOL_RESULT_SCHEMA_INVALID",
+              ),
+            );
+          recommendationObservations.record({
+            toolName: "commerce_get_product",
+            descriptorIdentity: canonicalJson(
+              descriptors.find(
+                (descriptor) => descriptor.name === "commerce_get_product",
+              ),
+            ),
+            arguments: args,
+            output: parsed.data,
+          });
           const product = parsed.data.product;
-          const safe = product?.available === true && productBelongsToDomain(product, recovery.shop.domain)
+          const safe =
+            product?.available === true &&
+            productBelongsToDomain(product, recovery.shop.domain) &&
             // Product titles are untrusted catalogue text; control characters are not rendered.
             // eslint-disable-next-line no-control-regex
-            && !/[\u0000-\u001f\u007f]/.test(product.title) ? product : null;
+            !/[\u0000-\u001f\u007f]/.test(product.title)
+              ? product
+              : null;
           refreshedProducts.set(key, safe);
           return safe;
         };
         for (const proposal of budgeted) {
-          const product = await refreshProduct(proposal.productId, proposal.variantId, true);
-          if (!product) { compositionDiagnostic({ stage: 'PRODUCT_REFRESH', productId: proposal.productId, variantId: proposal.variantId, outcome: 'REJECTED', reason: 'PRODUCT_REFRESH_NOT_VERIFIED' }); continue; }
+          const product = await refreshProduct(
+            proposal.productId,
+            proposal.variantId,
+            true,
+          );
+          if (!product) {
+            compositionDiagnostic({
+              stage: "PRODUCT_REFRESH",
+              productId: proposal.productId,
+              variantId: proposal.variantId,
+              outcome: "REJECTED",
+              reason: "PRODUCT_REFRESH_NOT_VERIFIED",
+            });
+            continue;
+          }
           // Missing storefront links permit catalogue discovery only, never basket actions.
-          const facts = { title: product.title, quantity: proposal.quantity,
-            currentPrice: product.unitPrice, currency: product.currency };
+          const facts = {
+            title: product.title,
+            quantity: proposal.quantity,
+            currentPrice: product.unitPrice,
+            currency: product.currency,
+          };
           let renderFacts: RenderRecommendationProduct;
           if (proposal.scope === "PRODUCT_ONLY") {
             renderFacts = { ...facts, scope: proposal.scope, url: product.url };
           } else {
             if (product.url === null) {
-              compositionDiagnostic({ stage: 'PRODUCT_REFRESH', productId: proposal.productId, variantId: proposal.variantId, outcome: 'REJECTED', reason: 'PRODUCT_REFRESH_NOT_VERIFIED' });
+              compositionDiagnostic({
+                stage: "PRODUCT_REFRESH",
+                productId: proposal.productId,
+                variantId: proposal.variantId,
+                outcome: "REJECTED",
+                reason: "PRODUCT_REFRESH_NOT_VERIFIED",
+              });
               continue;
             }
             renderFacts = { ...facts, scope: proposal.scope, url: product.url };
           }
-          compositionDiagnostic({ stage: 'PRODUCT_REFRESH', productId: proposal.productId, variantId: proposal.variantId, outcome: 'ACCEPTED' });
+          compositionDiagnostic({
+            stage: "PRODUCT_REFRESH",
+            productId: proposal.productId,
+            variantId: proposal.variantId,
+            outcome: "ACCEPTED",
+          });
           retained.push({ proposal, product, renderFacts });
         }
-        if (currentBasket && retained.some(({ proposal }) => proposal.scope !== "PRODUCT_ONLY")) {
-          const basketLines = [...currentBasket.lines].sort((a, b) => a.lineKey.localeCompare(b.lineKey));
+        if (
+          currentBasket &&
+          retained.some(({ proposal }) => proposal.scope !== "PRODUCT_ONLY")
+        ) {
+          const basketLines = [...currentBasket.lines].sort((a, b) =>
+            a.lineKey.localeCompare(b.lineKey),
+          );
           for (const line of basketLines) {
-            if (!line.productId || !line.quantity || recommendationContext.provider === "SHOPIFY" && !line.variantId) continue;
+            if (
+              !line.productId ||
+              !line.quantity ||
+              (recommendationContext.provider === "SHOPIFY" && !line.variantId)
+            )
+              continue;
             await refreshProduct(line.productId, line.variantId, false);
           }
         }
         const optionsById = availableOptions;
-        const refreshedDetails = new Map<string, HostDiscountDetails["details"]>();
-        const retainedOfferIds = new Set(retained.flatMap(({ proposal }) => proposal.offerIds));
-        const plannedOfferIds = [...new Set(refreshPlan.proposals.flatMap((item) => item.offerIds)
-          .filter((offerId) => retainedOfferIds.has(offerId)))];
+        const refreshedDetails = new Map<
+          string,
+          HostDiscountDetails["details"]
+        >();
+        const retainedOfferIds = new Set(
+          retained.flatMap(({ proposal }) => proposal.offerIds),
+        );
+        const plannedOfferIds = [
+          ...new Set(
+            refreshPlan.proposals
+              .flatMap((item) => item.offerIds)
+              .filter((offerId) => retainedOfferIds.has(offerId)),
+          ),
+        ];
         for (const offerId of plannedOfferIds) {
           if (!optionsById.has(offerId)) continue;
           if (!(await available()).has("commerce_get_discount_details"))
-            throw retain(new CommerceHostError("DENIED", false, hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
-          await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
-          if (recommendationContext.policy.mode === "FIXED" && !recommendationContext.policy.authorisedDiscountIds.includes(offerId))
-            throw retain(new CommerceHostError("DENIED", false, hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
+            throw retain(
+              new CommerceHostError(
+                "DENIED",
+                false,
+                hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED"),
+              ),
+            );
+          await refreshRecommendationPolicy({
+            context: recommendationContext,
+            db: prisma,
+            signal,
+            assertCurrent,
+          });
+          if (
+            recommendationContext.policy.mode === "FIXED" &&
+            !recommendationContext.policy.authorisedDiscountIds.includes(
+              offerId,
+            )
+          )
+            throw retain(
+              new CommerceHostError(
+                "DENIED",
+                false,
+                hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED"),
+              ),
+            );
           if (usedCalls >= 10) continue;
           usedCalls += 1;
-          const refreshed = await observeMcp(() => client.call("commerce_get_discount_details", { offerId }, signal));
-          await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
-          if (refreshed.status !== "OK") throw new CommerceHostError(refreshed.code, refreshed.retryable,
-            hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
-          const output = CommerceToolOutputs.commerce_get_discount_details.safeParse(refreshed.data);
-          if (!output.success) throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-            hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"), output.error);
+          const refreshed = await observeMcp(() =>
+            client.call("commerce_get_discount_details", { offerId }, signal),
+          );
+          await refreshRecommendationPolicy({
+            context: recommendationContext,
+            db: prisma,
+            signal,
+            assertCurrent,
+          });
+          if (refreshed.status !== "OK")
+            throw new CommerceHostError(
+              refreshed.code,
+              refreshed.retryable,
+              hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"),
+            );
+          const output =
+            CommerceToolOutputs.commerce_get_discount_details.safeParse(
+              refreshed.data,
+            );
+          if (!output.success)
+            throw new CommerceHostError(
+              "INCOMPATIBLE_VERSION",
+              false,
+              hostDiagnostic(
+                "mcp.tool_result",
+                "MCP_TOOL_RESULT_SCHEMA_INVALID",
+              ),
+              output.error,
+            );
           if ("outcome" in output.data) {
-            if (output.data.reasonCode !== "TEMPORARY_UNAVAILABLE") throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-              hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"));
-          } else if (output.data.details && output.data.details.offer.offerId !== offerId) {
-            throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-              hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"));
+            if (output.data.reasonCode !== "TEMPORARY_UNAVAILABLE")
+              throw new CommerceHostError(
+                "INCOMPATIBLE_VERSION",
+                false,
+                hostDiagnostic(
+                  "mcp.tool_result",
+                  "MCP_TOOL_RESULT_SCHEMA_INVALID",
+                ),
+              );
+          } else if (
+            output.data.details &&
+            output.data.details.offer.offerId !== offerId
+          ) {
+            throw new CommerceHostError(
+              "INCOMPATIBLE_VERSION",
+              false,
+              hostDiagnostic(
+                "mcp.tool_result",
+                "MCP_TOOL_RESULT_SCHEMA_INVALID",
+              ),
+            );
           }
-          recommendationObservations.record({ toolName: "commerce_get_discount_details",
-            descriptorIdentity: canonicalJson(descriptors.find((descriptor) => descriptor.name === "commerce_get_discount_details")),
-            arguments: { offerId }, output: output.data });
-          refreshedDetails.set(offerId, "outcome" in output.data ? null : output.data.details);
+          recommendationObservations.record({
+            toolName: "commerce_get_discount_details",
+            descriptorIdentity: canonicalJson(
+              descriptors.find(
+                (descriptor) =>
+                  descriptor.name === "commerce_get_discount_details",
+              ),
+            ),
+            arguments: { offerId },
+            output: output.data,
+          });
+          refreshedDetails.set(
+            offerId,
+            "outcome" in output.data ? null : output.data.details,
+          );
         }
         for (const item of retained) {
           const proposal = item.proposal;
           const productCurrency = item.product.currency;
           const isSale = (product: Product | null): boolean => {
-            if (!product || !product.currency || product.currency !== productCurrency || !product.unitPrice || !product.saleEvidence?.regularPrice ||
-                !product.saleEvidence.salePrice || product.saleEvidence.salePrice !== product.unitPrice) return false;
-            const regular = decimalToMinorUnits(product.saleEvidence.regularPrice, product.currency);
-            const sale = decimalToMinorUnits(product.saleEvidence.salePrice, product.currency);
+            if (
+              !product ||
+              !product.currency ||
+              product.currency !== productCurrency ||
+              !product.unitPrice ||
+              !product.saleEvidence?.regularPrice ||
+              !product.saleEvidence.salePrice ||
+              product.saleEvidence.salePrice !== product.unitPrice
+            )
+              return false;
+            const regular = decimalToMinorUnits(
+              product.saleEvidence.regularPrice,
+              product.currency,
+            );
+            const sale = decimalToMinorUnits(
+              product.saleEvidence.salePrice,
+              product.currency,
+            );
             return regular !== null && sale !== null && regular > sale;
           };
-          type PurchaseLine = { lineKey: string; productId: string | null; variantId: string | null; quantity: number | null;
-            categoryIds: readonly string[] | null; collectionIds: readonly string[] | null; isSaleItem: boolean | null; product: Product | null };
-          const productLine: PurchaseLine = { lineKey: `proposal-${proposal.productId}`, productId: item.product.productId,
-            variantId: item.product.variantId, quantity: proposal.quantity,
+          type PurchaseLine = {
+            lineKey: string;
+            productId: string | null;
+            variantId: string | null;
+            quantity: number | null;
+            categoryIds: readonly string[] | null;
+            collectionIds: readonly string[] | null;
+            isSaleItem: boolean | null;
+            product: Product | null;
+          };
+          const productLine: PurchaseLine = {
+            lineKey: `proposal-${proposal.productId}`,
+            productId: item.product.productId,
+            variantId: item.product.variantId,
+            quantity: proposal.quantity,
             categoryIds: item.product.categoryIds ?? null,
-            collectionIds: recommendationContext.provider === "SHOPIFY" && (item.product.collectionIds?.length ?? 0) >= 20
-              ? null : item.product.collectionIds ?? null,
-            isSaleItem: isSale(item.product) ? true : null, product: item.product };
-          const purchaseLines: PurchaseLine[] = proposal.scope === "PRODUCT_ONLY" ? [productLine] : (currentBasket?.lines ?? [])
-            .filter((line) => proposal.scope !== "REPLACE_BASKET_LINE" || line.lineKey !== proposal.basketLineId)
-            .map((line) => {
-              const product = line.productId ? refreshedProducts.get(productKey(line.productId, line.variantId)) ?? null : null;
-              return { lineKey: line.lineKey, productId: product?.productId ?? null, variantId: product?.variantId ?? null,
-                quantity: line.quantity, categoryIds: product?.categoryIds ?? null,
-                collectionIds: recommendationContext.provider === "SHOPIFY" && (product?.collectionIds?.length ?? 0) >= 20
-                  ? null : product?.collectionIds ?? null, isSaleItem: isSale(product) ? true : null, product };
-            });
-          if (proposal.scope !== "PRODUCT_ONLY") purchaseLines.push(productLine);
+            collectionIds:
+              recommendationContext.provider === "SHOPIFY" &&
+              (item.product.collectionIds?.length ?? 0) >= 20
+                ? null
+                : (item.product.collectionIds ?? null),
+            isSaleItem: isSale(item.product) ? true : null,
+            product: item.product,
+          };
+          const purchaseLines: PurchaseLine[] =
+            proposal.scope === "PRODUCT_ONLY"
+              ? [productLine]
+              : (currentBasket?.lines ?? [])
+                  .filter(
+                    (line) =>
+                      proposal.scope !== "REPLACE_BASKET_LINE" ||
+                      line.lineKey !== proposal.basketLineId,
+                  )
+                  .map((line) => {
+                    const product = line.productId
+                      ? (refreshedProducts.get(
+                          productKey(line.productId, line.variantId),
+                        ) ?? null)
+                      : null;
+                    return {
+                      lineKey: line.lineKey,
+                      productId: product?.productId ?? null,
+                      variantId: product?.variantId ?? null,
+                      quantity: line.quantity,
+                      categoryIds: product?.categoryIds ?? null,
+                      collectionIds:
+                        recommendationContext.provider === "SHOPIFY" &&
+                        (product?.collectionIds?.length ?? 0) >= 20
+                          ? null
+                          : (product?.collectionIds ?? null),
+                      isSaleItem: isSale(product) ? true : null,
+                      product,
+                    };
+                  });
+          if (proposal.scope !== "PRODUCT_ONLY")
+            purchaseLines.push(productLine);
           const lineProducts = purchaseLines.map((line) => line.product);
-          const allPriced = lineProducts.every((product) => product && product.unitPrice && product.currency && product.currency === productCurrency) &&
-            (proposal.scope === "PRODUCT_ONLY" || currentBasket?.currency === productCurrency) &&
-            purchaseLines.every((line) => Number.isSafeInteger(line.quantity) && line.quantity !== null);
-          const subtotalMinor = allPriced && productCurrency ? sumPurchaseSubtotal(purchaseLines.map((line, index) => ({
-            amountDecimal: lineProducts[index]!.unitPrice!, quantity: line.quantity!,
-          })), productCurrency) : null;
-          const subtotal = allPriced && productCurrency && subtotalMinor !== null
-            ? minorUnitsToDecimal(subtotalMinor, productCurrency) : null;
+          const allPriced =
+            lineProducts.every(
+              (product) =>
+                product &&
+                product.unitPrice &&
+                product.currency &&
+                product.currency === productCurrency,
+            ) &&
+            (proposal.scope === "PRODUCT_ONLY" ||
+              currentBasket?.currency === productCurrency) &&
+            purchaseLines.every(
+              (line) =>
+                Number.isSafeInteger(line.quantity) && line.quantity !== null,
+            );
+          const subtotalMinor =
+            allPriced && productCurrency
+              ? sumPurchaseSubtotal(
+                  purchaseLines.map((line, index) => ({
+                    amountDecimal: lineProducts[index]!.unitPrice!,
+                    quantity: line.quantity!,
+                  })),
+                  productCurrency,
+                )
+              : null;
+          const subtotal =
+            allPriced && productCurrency && subtotalMinor !== null
+              ? minorUnitsToDecimal(subtotalMinor, productCurrency)
+              : null;
           const purchase: DiscountEvaluationPurchase = {
-            provider: recommendationContext.provider, mode: recommendationContext.policy.mode,
-            authorisedDiscountIds: recommendationContext.policy.authorisedDiscountIds, currency: allPriced ? productCurrency : null,
+            provider: recommendationContext.provider,
+            mode: recommendationContext.policy.mode,
+            authorisedDiscountIds:
+              recommendationContext.policy.authorisedDiscountIds,
+            currency: allPriced ? productCurrency : null,
             lines: purchaseLines.map(({ product: _product, ...line }) => line),
-            currentMerchandiseSubtotal: subtotal !== null && productCurrency ? { amountDecimal: subtotal, currency: productCurrency } : null,
+            currentMerchandiseSubtotal:
+              subtotal !== null && productCurrency
+                ? { amountDecimal: subtotal, currency: productCurrency }
+                : null,
           };
           const candidateDiscounts: ObservedDiscount[] = [];
           for (const offerId of proposal.offerIds) {
             const offer = optionsById.get(offerId);
             const discountDetails = refreshedDetails.get(offerId) ?? null;
             if (!offer || !discountDetails) continue;
-            const eligibility = evaluatePurchaseDiscount({ purchase, offerFromOptions: offer, details: discountDetails, evaluatedAt: new Date() });
-            candidateDiscounts.push({ offer, details: discountDetails, eligibility });
-          }
-          const combination = proposal.promotionKind === "DISCOUNT" && candidateDiscounts.length
-            ? selectCompatibleOffers({ candidates: candidateDiscounts, proposedOfferIds: proposal.offerIds }) : null;
-          const terms: NonNullable<RenderRecommendationProduct["offerTerms"]>[number][] = [];
-          if (combination?.verdict === "SUPPORTED") for (const id of combination.offerIds) {
-            const candidate = candidateDiscounts.find((discount) => discount.offer.offerId === id);
-            if (!candidate) continue;
-            const facts = candidate.details.facts;
-            const code = candidate.offer.method === "CODE" ? candidate.offer.code : null;
-            if (candidate.offer.method === "CODE" && (!code || !code.trim() || /[\r\n]/.test(code))) continue;
-            if (facts.discountKind === "PERCENTAGE" && facts.discountValue && isValidDecimal(facts.discountValue)) {
-              const value = Number(facts.discountValue);
-              if (Number.isFinite(value) && value > 0 && value <= 100)
-                terms.push({ kind: "percent", value: facts.discountValue, code, automatic: candidate.offer.method === "AUTOMATIC" });
-              continue;
-            }
-            if (facts.discountKind === "FIXED_AMOUNT" && facts.discountValue && facts.discountCurrency && isValidDecimal(facts.discountValue) &&
-                decimalToMinorUnits(facts.discountValue, facts.discountCurrency) !== null && decimalToMinorUnits(facts.discountValue, facts.discountCurrency)! > 0n)
-              terms.push({ kind: "amount", value: facts.discountValue, currency: facts.discountCurrency,
-                code, automatic: candidate.offer.method === "AUTOMATIC" });
-            if (facts.discountKind === "FREE_SHIPPING")
-              terms.push({ kind: "free-shipping", code, automatic: candidate.offer.method === "AUTOMATIC" });
-          }
-          if (terms.length > 0) item.renderFacts = { ...item.renderFacts, offerTerms: terms };
-          if (isPermittedNativeSale(item.product, recommendationContext.policy) && proposal.promotionKind === "NATIVE_SALE")
-            item.renderFacts = { ...item.renderFacts, regularPrice: item.product.saleEvidence!.regularPrice! };
-        }
-        await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
-        let shippingPresentation: ReturnType<typeof selectShippingPresentation> | undefined;
-        if (shippingSelection && shippingArgs) {
-          const args = shippingArgs;
-          const observed = recommendationObservations.latest("commerce_get_shipping_information", args);
-          if (shippingPlanned && observed && isCommerceShippingObservationForSelection({ selection: shippingSelection,
-            observation: observed.output, provider: recommendationContext.provider }) &&
-            usedCalls < 10 && (await available()).has("commerce_get_shipping_information")) {
-            await assertCurrent();
-            usedCalls += 1;
-            const refreshed = await observeMcp(() => client.call("commerce_get_shipping_information", args, signal));
-            await assertCurrent();
-            if (refreshed.status !== "OK") throw new CommerceHostError(refreshed.code, refreshed.retryable,
-              hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
-            const output = CommerceToolOutputs.commerce_get_shipping_information.safeParse(refreshed.data);
-            if (!output.success) throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-              hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"), output.error);
-            recommendationObservations.record({ toolName: "commerce_get_shipping_information",
-              descriptorIdentity: canonicalJson(descriptors.find((descriptor) => descriptor.name === "commerce_get_shipping_information")),
-              arguments: args, output: output.data });
-            if ("product" in output.data && isCommerceShippingObservationForSelection({ selection: shippingSelection, observation: output.data,
-              provider: recommendationContext.provider })) shippingPresentation = selectShippingPresentation({
-              selection: shippingSelection,
-              observation: observed.output as ReturnType<typeof CommerceToolOutputs.commerce_get_shipping_information.parse>,
-              refreshed: output.data as ReturnType<typeof CommerceToolOutputs.commerce_get_shipping_information.parse>,
+            const eligibility = evaluatePurchaseDiscount({
+              purchase,
+              offerFromOptions: offer,
+              details: discountDetails,
+              evaluatedAt: new Date(),
+            });
+            candidateDiscounts.push({
+              offer,
+              details: discountDetails,
+              eligibility,
             });
           }
+          const combination =
+            proposal.promotionKind === "DISCOUNT" && candidateDiscounts.length
+              ? selectCompatibleOffers({
+                  candidates: candidateDiscounts,
+                  proposedOfferIds: proposal.offerIds,
+                })
+              : null;
+          const terms: NonNullable<
+            RenderRecommendationProduct["offerTerms"]
+          >[number][] = [];
+          if (combination?.verdict === "SUPPORTED")
+            for (const id of combination.offerIds) {
+              const candidate = candidateDiscounts.find(
+                (discount) => discount.offer.offerId === id,
+              );
+              if (!candidate) continue;
+              const facts = candidate.details.facts;
+              const code =
+                candidate.offer.method === "CODE" ? candidate.offer.code : null;
+              if (
+                candidate.offer.method === "CODE" &&
+                (!code || !code.trim() || /[\r\n]/.test(code))
+              )
+                continue;
+              if (
+                facts.discountKind === "PERCENTAGE" &&
+                facts.discountValue &&
+                isValidDecimal(facts.discountValue)
+              ) {
+                const value = Number(facts.discountValue);
+                if (Number.isFinite(value) && value > 0 && value <= 100)
+                  terms.push({
+                    kind: "percent",
+                    value: facts.discountValue,
+                    code,
+                    automatic: candidate.offer.method === "AUTOMATIC",
+                  });
+                continue;
+              }
+              if (
+                facts.discountKind === "FIXED_AMOUNT" &&
+                facts.discountValue &&
+                facts.discountCurrency &&
+                isValidDecimal(facts.discountValue) &&
+                decimalToMinorUnits(
+                  facts.discountValue,
+                  facts.discountCurrency,
+                ) !== null &&
+                decimalToMinorUnits(
+                  facts.discountValue,
+                  facts.discountCurrency,
+                )! > 0n
+              )
+                terms.push({
+                  kind: "amount",
+                  value: facts.discountValue,
+                  currency: facts.discountCurrency,
+                  code,
+                  automatic: candidate.offer.method === "AUTOMATIC",
+                });
+              if (facts.discountKind === "FREE_SHIPPING")
+                terms.push({
+                  kind: "free-shipping",
+                  code,
+                  automatic: candidate.offer.method === "AUTOMATIC",
+                });
+            }
+          if (terms.length > 0)
+            item.renderFacts = { ...item.renderFacts, offerTerms: terms };
+          if (
+            isPermittedNativeSale(item.product, recommendationContext.policy) &&
+            proposal.promotionKind === "NATIVE_SALE"
+          )
+            item.renderFacts = {
+              ...item.renderFacts,
+              regularPrice: item.product.saleEvidence!.regularPrice!,
+            };
         }
-        await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
-        const locale = resolveModaConfigurationLocale(languageEvaluation.languageTag);
-        const disposition = selection?.responseDisposition ?? "STANDARD";
-        imageProducts.push(...retained.map(item => item.product));
-        presentedRecommendationPairs = retained.map(({ proposal }) => ({ productId: proposal.productId, variantId: proposal.variantId }));
-        const renderedProducts: RenderRecommendationProduct[] = retained.map(({ renderFacts }) => renderFacts);
-        currentShippingPresentationVerified = Boolean(shippingPresentation);
-        compositionDiagnostic({ stage: 'SHIPPING_SELECTION_EVIDENCE', selected: Boolean(shippingSelection), verified: Boolean(shippingPresentation) });
-        const hasObservedProducts = initialProductObservations.some(observation => {
-          const output = observation.output as { products?: Product[]; product?: Product | null };
-          return Boolean(output.product) || Boolean(output.products?.length);
+        await refreshRecommendationPolicy({
+          context: recommendationContext,
+          db: prisma,
+          signal,
+          assertCurrent,
         });
-        if (hasObservedProducts && !shippingPresentation &&
-          (disposition === "SHIPPING_INFORMATION_UNVERIFIED" || disposition === "STANDARD" && renderedProducts.length === 0)) {
-          compositionDiagnostic({ stage: 'RESULT', outcome: 'REFUSED', reason: 'MISSING_VERIFIED_PRODUCT_SELECTION' });
-          throw new CommerceHostError("INVALID_FINAL", false, hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
+        let shippingPresentation:
+          ReturnType<typeof selectShippingPresentation> | undefined;
+        if (shippingSelection && shippingArgs) {
+          const args = shippingArgs;
+          const observed = recommendationObservations.latest(
+            "commerce_get_shipping_information",
+            args,
+          );
+          if (
+            shippingPlanned &&
+            observed &&
+            isCommerceShippingObservationForSelection({
+              selection: shippingSelection,
+              observation: observed.output,
+              provider: recommendationContext.provider,
+            }) &&
+            usedCalls < 10 &&
+            (await available()).has("commerce_get_shipping_information")
+          ) {
+            await assertCurrent();
+            usedCalls += 1;
+            const refreshed = await observeMcp(() =>
+              client.call("commerce_get_shipping_information", args, signal),
+            );
+            await assertCurrent();
+            if (refreshed.status !== "OK")
+              throw new CommerceHostError(
+                refreshed.code,
+                refreshed.retryable,
+                hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"),
+              );
+            const output =
+              CommerceToolOutputs.commerce_get_shipping_information.safeParse(
+                refreshed.data,
+              );
+            if (!output.success)
+              throw new CommerceHostError(
+                "INCOMPATIBLE_VERSION",
+                false,
+                hostDiagnostic(
+                  "mcp.tool_result",
+                  "MCP_TOOL_RESULT_SCHEMA_INVALID",
+                ),
+                output.error,
+              );
+            recommendationObservations.record({
+              toolName: "commerce_get_shipping_information",
+              descriptorIdentity: canonicalJson(
+                descriptors.find(
+                  (descriptor) =>
+                    descriptor.name === "commerce_get_shipping_information",
+                ),
+              ),
+              arguments: args,
+              output: output.data,
+            });
+            if (
+              "product" in output.data &&
+              isCommerceShippingObservationForSelection({
+                selection: shippingSelection,
+                observation: output.data,
+                provider: recommendationContext.provider,
+              })
+            )
+              shippingPresentation = selectShippingPresentation({
+                selection: shippingSelection,
+                observation: observed.output as ReturnType<
+                  typeof CommerceToolOutputs.commerce_get_shipping_information.parse
+                >,
+                refreshed: output.data as ReturnType<
+                  typeof CommerceToolOutputs.commerce_get_shipping_information.parse
+                >,
+              });
+          }
         }
-        const includeNoVerifiedOffer = inspection === "SATISFIED" &&
-          recommendationObservations.all("commerce_get_discount_options").length > 0 && retained.length > 0 &&
+        await refreshRecommendationPolicy({
+          context: recommendationContext,
+          db: prisma,
+          signal,
+          assertCurrent,
+        });
+        const locale = resolveModaConfigurationLocale(
+          languageEvaluation.languageTag,
+        );
+        const disposition = selection?.responseDisposition ?? "STANDARD";
+        imageProducts.push(...retained.map((item) => item.product));
+        presentedRecommendationPairs = retained.map(({ proposal }) => ({
+          productId: proposal.productId,
+          variantId: proposal.variantId,
+        }));
+        const renderedProducts: RenderRecommendationProduct[] = retained.map(
+          ({ renderFacts }) => renderFacts,
+        );
+        currentShippingPresentationVerified = Boolean(shippingPresentation);
+        compositionDiagnostic({
+          stage: "SHIPPING_SELECTION_EVIDENCE",
+          selected: Boolean(shippingSelection),
+          verified: Boolean(shippingPresentation),
+        });
+        const hasObservedProducts = initialProductObservations.some(
+          (observation) => {
+            const output = observation.output as {
+              products?: Product[];
+              product?: Product | null;
+            };
+            return Boolean(output.product) || Boolean(output.products?.length);
+          },
+        );
+        if (
+          hasObservedProducts &&
+          !shippingPresentation &&
+          (disposition === "SHIPPING_INFORMATION_UNVERIFIED" ||
+            (disposition === "STANDARD" && renderedProducts.length === 0))
+        ) {
+          compositionDiagnostic({
+            stage: "RESULT",
+            outcome: "REFUSED",
+            reason: "MISSING_VERIFIED_PRODUCT_SELECTION",
+          });
+          throw new CommerceHostError(
+            "INVALID_FINAL",
+            false,
+            hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"),
+          );
+        }
+        const includeNoVerifiedOffer =
+          inspection === "SATISFIED" &&
+          recommendationObservations.all("commerce_get_discount_options")
+            .length > 0 &&
+          retained.length > 0 &&
           retained.some((item) => item.proposal.promotionKind === "DISCOUNT") &&
           retained.every((item) => !item.renderFacts.offerTerms?.length);
-        commerceVerifiedPresentation = CommerceVerifiedPresentationSchema.parse({
-          schemaVersion: 1, brandName: recovery.shop.brand?.brandName ?? null, locale,
-          disposition, storeUrl: recommendationContext.storeUrl, products: renderedProducts,
-          optionFacts: [], productFacts: [], includeNoVerifiedOffer,
-          requiresShipping: shippingPresentation?.requiresShipping ?? null, policyUrl: shippingPresentation?.policyUrl ?? null,
-        });
-
+        commerceVerifiedPresentation = CommerceVerifiedPresentationSchema.parse(
+          {
+            schemaVersion: 1,
+            brandName: recovery.shop.brand?.brandName ?? null,
+            locale,
+            disposition,
+            storeUrl: recommendationContext.storeUrl,
+            products: renderedProducts,
+            optionFacts: [],
+            productFacts: [],
+            includeNoVerifiedOffer,
+            requiresShipping: shippingPresentation?.requiresShipping ?? null,
+            policyUrl: shippingPresentation?.policyUrl ?? null,
+          },
+        );
       }
     }
     if (identityDecisionState.receipt && envelope.answerKind === "ANSWER") {
       try {
-        envelope = { ...envelope, replyText: renderRefreshedRecoveryIdentityDecision({ receipt: identityDecisionState.receipt,
-          original: result.result, turn, responseContractHash: manifest.responseContractHash,
-          presentation: commerceVerifiedPresentation, currentProducts: imageProducts, digest }) };
+        envelope = {
+          ...envelope,
+          replyText: renderRefreshedRecoveryIdentityDecision({
+            receipt: identityDecisionState.receipt,
+            original: result.result,
+            turn,
+            responseContractHash: manifest.responseContractHash,
+            presentation: commerceVerifiedPresentation,
+            currentProducts: imageProducts,
+            digest,
+          }),
+        };
       } catch {
-        throw new CommerceHostError("INVALID_FINAL", false, hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
+        throw new CommerceHostError(
+          "INVALID_FINAL",
+          false,
+          hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"),
+        );
       }
     }
-    if (shouldReferAfterUngroundedDiscovery({ attempted: currentDiscoveryAttempted, answerKind: envelope.answerKind,
-      presentation: commerceVerifiedPresentation, shippingVerified: currentShippingPresentationVerified })) {
-      envelope = { ...envelope, answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", evidenceIds: [], details: {} };
+    if (
+      shouldReferAfterUngroundedDiscovery({
+        attempted: currentDiscoveryAttempted,
+        answerKind: envelope.answerKind,
+        presentation: commerceVerifiedPresentation,
+        shippingVerified: currentShippingPresentationVerified,
+      })
+    ) {
+      envelope = {
+        ...envelope,
+        answerKind: "REFER_TO_STORE",
+        referralReason: "UNVERIFIABLE_FACTS",
+        evidenceIds: [],
+        details: {},
+      };
     }
-    compositionDiagnostic({ stage: 'VERIFIED_PROJECTION', disposition: commerceVerifiedPresentation.disposition, productCount: commerceVerifiedPresentation.products.length, optionCount: commerceVerifiedPresentation.optionFacts.length, detailCount: (commerceVerifiedPresentation.productFacts?.length ?? 0) });
+    compositionDiagnostic({
+      stage: "VERIFIED_PROJECTION",
+      disposition: commerceVerifiedPresentation.disposition,
+      productCount: commerceVerifiedPresentation.products.length,
+      optionCount: commerceVerifiedPresentation.optionFacts.length,
+      detailCount: commerceVerifiedPresentation.productFacts?.length ?? 0,
+    });
     // Referrals retain the trusted contact/language grounding boundary. Only
     // grounded ANSWER content is preserved verbatim through AGENT composition.
-    const deliveredEnvelope = envelope.answerKind === "REFER_TO_STORE"
-      ? {...envelope, replyText: renderStoreReferral(recovery.shop.domain, language, context.conversation.messages, envelope)} : envelope;
+    const deliveredEnvelope =
+      envelope.answerKind === "REFER_TO_STORE"
+        ? {
+            ...envelope,
+            replyText: renderStoreReferral(
+              recovery.shop.domain,
+              language,
+              context.conversation.messages,
+              envelope,
+            ),
+          }
+        : envelope;
     // Custom details are intentionally not returned to the delivery adapter.
     return {
       answerKind: envelope.answerKind,
       referralReason: envelope.referralReason,
       evidenceIds: envelope.evidenceIds,
       replyText: deliveredEnvelope.replyText,
-      commercePresentation: { envelope: deliveredEnvelope, verified: commerceVerifiedPresentation, productPairs: presentedRecommendationPairs,
-        verifiedProducts: {shopId: turn.shopId, platform: recommendationContext.provider, products: [...new Map(imageProducts.map(product => [JSON.stringify([product.productId, product.variantId]), product])).values()].slice(0,3)},
-        deadlineAt: mediaTurnStartedAt + budget.deadlineMs, signal },
-      ...(envelope.answerKind === "ANSWER" && productObservations().length ? {
-        productContextUpdate: mergeConversationProductContext(result.productContextUpdate ?? productContext, productObservations(), {
-          shopId: turn.shopId, conversationId: turn.conversationId, platform: recommendationContext.provider, now: Date.now(),
-        }),
-      } : {}),
+      commercePresentation: {
+        envelope: deliveredEnvelope,
+        verified: commerceVerifiedPresentation,
+        productPairs: presentedRecommendationPairs,
+        verifiedProducts: {
+          shopId: turn.shopId,
+          platform: recommendationContext.provider,
+          products: [
+            ...new Map(
+              imageProducts.map((product) => [
+                JSON.stringify([product.productId, product.variantId]),
+                product,
+              ]),
+            ).values(),
+          ].slice(0, 3),
+        },
+        deadlineAt: mediaTurnStartedAt + budget.deadlineMs,
+        signal,
+      },
+      ...(envelope.answerKind === "ANSWER" && productObservations().length
+        ? {
+            productContextUpdate: mergeConversationProductContext(
+              result.productContextUpdate ?? productContext,
+              productObservations(),
+              {
+                shopId: turn.shopId,
+                conversationId: turn.conversationId,
+                platform: recommendationContext.provider,
+                now: Date.now(),
+              },
+            ),
+          }
+        : {}),
       detectedLanguageTag: envelope.detectedLanguageTag,
       detectedLanguageConfidence: envelope.detectedLanguageConfidence,
     };

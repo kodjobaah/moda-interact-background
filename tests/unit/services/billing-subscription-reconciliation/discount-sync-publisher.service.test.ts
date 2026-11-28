@@ -10,7 +10,9 @@ afterEach(() => vi.restoreAllMocks());
 
 function harness({ queue = true, shop = { domain: "merchant.example" } } = {}) {
   const database = { shop: { findUnique: vi.fn().mockResolvedValue(shop) } };
-  const discountQueue = queue ? { add: vi.fn().mockResolvedValue({}) } : undefined;
+  const discountQueue = queue
+    ? { add: vi.fn().mockResolvedValue({}) }
+    : undefined;
   const logger = { warn: vi.fn() };
   const service = new DiscountSyncPublisherService(
     database as never,
@@ -32,11 +34,16 @@ describe("DiscountSyncPublisherService", () => {
 
   it("publishes the canonical deterministic discount-sync job after requesting sync", async () => {
     const test = harness();
-    const requestSync = vi.spyOn(shopifyDiscountCatalogueService, "requestSync").mockResolvedValue("requested");
+    const requestSync = vi
+      .spyOn(shopifyDiscountCatalogueService, "requestSync")
+      .mockResolvedValue("requested");
 
     await test.service.publishDiscountSync("shop-1", "SUBSCRIPTION_ACTIVATED");
 
-    expect(test.database.shop.findUnique).toHaveBeenCalledWith({ where: { id: "shop-1" }, select: { domain: true } });
+    expect(test.database.shop.findUnique).toHaveBeenCalledWith({
+      where: { id: "shop-1" },
+      select: { domain: true },
+    });
     expect(requestSync).toHaveBeenCalledWith("shop-1", requestedAt);
     expect(test.discountQueue?.add).toHaveBeenCalledWith(
       expect.any(String),
@@ -65,7 +72,9 @@ describe("DiscountSyncPublisherService", () => {
 
   it("skips queue publication when catalogue sync is unavailable", async () => {
     const test = harness();
-    vi.spyOn(shopifyDiscountCatalogueService, "requestSync").mockResolvedValue("unavailable");
+    vi.spyOn(shopifyDiscountCatalogueService, "requestSync").mockResolvedValue(
+      "unavailable",
+    );
 
     await test.service.publishDiscountSync("shop-1", "REINSTALL_RECONCILED");
 
@@ -74,16 +83,23 @@ describe("DiscountSyncPublisherService", () => {
 
   it("isolates catalogue and queue failures with the existing warning", async () => {
     const test = harness();
-    vi.spyOn(shopifyDiscountCatalogueService, "requestSync").mockRejectedValue(new Error("catalogue unavailable"));
+    vi.spyOn(shopifyDiscountCatalogueService, "requestSync").mockRejectedValue(
+      new Error("catalogue unavailable"),
+    );
 
-    await expect(test.service.publishDiscountSync("shop-1", "SUBSCRIPTION_ACTIVATED")).resolves.toBeUndefined();
+    await expect(
+      test.service.publishDiscountSync("shop-1", "SUBSCRIPTION_ACTIVATED"),
+    ).resolves.toBeUndefined();
 
     expect(test.discountQueue?.add).not.toHaveBeenCalled();
-    expect(test.logger.warn).toHaveBeenCalledWith("shopify.discount_sync.enqueue_failed", {
-      shopId: "shop-1",
-      reason: "SUBSCRIPTION_ACTIVATED",
-      errorMessage: "catalogue unavailable",
-      error: expect.objectContaining({ message: "catalogue unavailable" }),
-    });
+    expect(test.logger.warn).toHaveBeenCalledWith(
+      "shopify.discount_sync.enqueue_failed",
+      {
+        shopId: "shop-1",
+        reason: "SUBSCRIPTION_ACTIVATED",
+        errorMessage: "catalogue unavailable",
+        error: expect.objectContaining({ message: "catalogue unavailable" }),
+      },
+    );
   });
 });

@@ -4,7 +4,8 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { createPrismaConfigurationRepository } from "./repository.js";
 import {
-  createBackgroundPlatformConfigurationService, createExternalUnsealKeyringProvider,
+  createBackgroundPlatformConfigurationService,
+  createExternalUnsealKeyringProvider,
 } from "./service.js";
 
 export function createProductionBackgroundPlatformConfiguration() {
@@ -12,7 +13,10 @@ export function createProductionBackgroundPlatformConfiguration() {
   return createBackgroundPlatformConfigurationService({
     repository: createPrismaConfigurationRepository(prisma),
     environment,
-    logger: createLogger({ serviceName: "moda-background-runtime", environment }),
+    logger: createLogger({
+      serviceName: "moda-background-runtime",
+      environment,
+    }),
     unsealKeyring: createExternalUnsealKeyringProvider(),
   });
 }

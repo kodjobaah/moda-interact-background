@@ -4,9 +4,18 @@ import type { abandonedCheckoutLookupService } from "../abandoned-checkout-looku
 import type { recoverySnapshotBuilderService } from "./recovery-snapshot-builder.service.js";
 import type { RecoveryRecipientResolverService } from "./recovery-recipient-resolver.service.js";
 
-type AbandonedCheckoutLookupPort = Pick<typeof abandonedCheckoutLookupService, "lookup">;
-type RecoverySnapshotBuilderPort = Pick<typeof recoverySnapshotBuilderService, "build">;
-type RecoveryRecipientResolverPort = Pick<RecoveryRecipientResolverService, "resolve" | "resolveForCustomerInShop">;
+type AbandonedCheckoutLookupPort = Pick<
+  typeof abandonedCheckoutLookupService,
+  "lookup"
+>;
+type RecoverySnapshotBuilderPort = Pick<
+  typeof recoverySnapshotBuilderService,
+  "build"
+>;
+type RecoveryRecipientResolverPort = Pick<
+  RecoveryRecipientResolverService,
+  "resolve" | "resolveForCustomerInShop"
+>;
 
 export async function prepareRecoveryCapacityResumeCheckout(input: {
   recovery: {
@@ -23,7 +32,8 @@ export async function prepareRecoveryCapacityResumeCheckout(input: {
   snapshotBuilder: RecoverySnapshotBuilderPort;
   recipientResolver: RecoveryRecipientResolverPort;
 }) {
-  const { recovery, shopDomain, lookup, snapshotBuilder, recipientResolver } = input;
+  const { recovery, shopDomain, lookup, snapshotBuilder, recipientResolver } =
+    input;
   const outcome = await lookup.lookup({
     shopId: recovery.shopId,
     shopDomain,
@@ -37,13 +47,17 @@ export async function prepareRecoveryCapacityResumeCheckout(input: {
       `Abandoned checkout provider error while resuming recovery ${recovery.id}: ${outcome.message}`,
     );
   }
-  if (outcome.kind === "ambiguous" || outcome.kind === "bounded-limit-exceeded") {
+  if (
+    outcome.kind === "ambiguous" ||
+    outcome.kind === "bounded-limit-exceeded"
+  ) {
     throw new Error(
       `Abandoned checkout lookup ${outcome.kind} while resuming recovery ${recovery.id}`,
     );
   }
 
-  const terminal = outcome.kind === "not-found" || outcome.checkout.completedAt !== null;
+  const terminal =
+    outcome.kind === "not-found" || outcome.checkout.completedAt !== null;
   let seed: RecoveryCheckoutSeed | null = null;
   let recipient: string | null = null;
   if (!terminal && outcome.kind === "found") {
@@ -56,9 +70,13 @@ export async function prepareRecoveryCapacityResumeCheckout(input: {
       checkoutCreatedAt: recovery.detectedAt.toISOString(),
     };
     seed = await snapshotBuilder.build(candidate, shopDomain, outcome.checkout);
-    recipient = await recipientResolver.resolve(seed) ??
+    recipient =
+      (await recipientResolver.resolve(seed)) ??
       (recovery.customerId
-        ? await recipientResolver.resolveForCustomerInShop(recovery.customerId, recovery.shopId)
+        ? await recipientResolver.resolveForCustomerInShop(
+            recovery.customerId,
+            recovery.shopId,
+          )
         : null);
   }
 

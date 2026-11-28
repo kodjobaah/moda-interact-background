@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
-  processor: undefined as undefined | ((job: { name: string; data: unknown; id: string; attemptsMade: number; failedReason?: string }) => Promise<unknown>),
+  processor: undefined as
+    | undefined
+    | ((job: {
+        name: string;
+        data: unknown;
+        id: string;
+        attemptsMade: number;
+        failedReason?: string;
+      }) => Promise<unknown>),
   listeners: new Map<string, Array<(...args: unknown[]) => void>>(),
   records: [] as Array<Record<string, unknown>>,
   materialize: vi.fn(async (_candidate?: unknown, _options?: unknown) => ({
@@ -9,7 +17,11 @@ const hoisted = vi.hoisted(() => ({
     checkoutToken: "checkout_1",
   })),
   cleanup: vi.fn(async () => undefined),
-  deferNotFound: vi.fn(async (_candidate: unknown, _jobId: string, _move: unknown) => ({kind: "exhausted" as const})),
+  deferNotFound: vi.fn(
+    async (_candidate: unknown, _jobId: string, _move: unknown) => ({
+      kind: "exhausted" as const,
+    }),
+  ),
   durableRecovery: null as Record<string, unknown> | null,
   createRecovery: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     hoisted.durableRecovery ??= {
@@ -21,25 +33,31 @@ const hoisted = vi.hoisted(() => ({
     };
     return hoisted.durableRecovery;
   }),
-  updateRecoveryMany: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
-    if (hoisted.durableRecovery) {
-      hoisted.durableRecovery = {
-        ...hoisted.durableRecovery,
-        ...data,
-        updatedAt: new Date(Math.max(
-          Date.now(),
-          (hoisted.durableRecovery.updatedAt as Date).getTime() + 1,
-        )),
-      };
-    }
-    return { count: 1 };
-  }),
+  updateRecoveryMany: vi.fn(
+    async ({ data }: { data: Record<string, unknown> }) => {
+      if (hoisted.durableRecovery) {
+        hoisted.durableRecovery = {
+          ...hoisted.durableRecovery,
+          ...data,
+          updatedAt: new Date(
+            Math.max(
+              Date.now(),
+              (hoisted.durableRecovery.updatedAt as Date).getTime() + 1,
+            ),
+          ),
+        };
+      }
+      return { count: 1 };
+    },
+  ),
   findLatestRecovery: vi.fn(async () => hoisted.durableRecovery),
   findRecovery: vi.fn(async () => hoisted.durableRecovery),
   findShop: vi.fn(async () => ({ id: "shop_1", platform: "SHOPIFY" })),
   findInitialAttempt: vi.fn(async () => null),
   suppressUntil: new Date(),
-  findSuppression: vi.fn(async () => ({ suppressUntil: new Date("2026-10-12T00:00:00Z") })),
+  findSuppression: vi.fn(async () => ({
+    suppressUntil: new Date("2026-10-12T00:00:00Z"),
+  })),
   scheduleResume: vi.fn(async () => "resume-job"),
   redis: {
     set: vi.fn(async () => "OK"),
@@ -57,7 +75,10 @@ const hoisted = vi.hoisted(() => ({
     offerSnapshot: null,
   })),
   attemptGetOrCreate: vi.fn(async () => ({ id: "attempt-1" })),
-  billingAdmit: vi.fn(async () => ({ kind: "admitted", admission: { kind: "paid", sourceKey: "recovery:test" } })),
+  billingAdmit: vi.fn(async () => ({
+    kind: "admitted",
+    admission: { kind: "paid", sourceKey: "recovery:test" },
+  })),
   providerSend: vi.fn(async () => ({ kind: "admitted" })),
   inspectInitialAdmission: vi.fn(async () => ({ kind: "absent" })),
 }));
@@ -77,24 +98,41 @@ vi.mock("bullmq", () => ({
     }
   },
 }));
-vi.mock("@modainteract/moda-interact-shared/logging", async (importOriginal) => {
-  const shared = await importOriginal<typeof import("@modainteract/moda-interact-shared/logging")>();
-  return {
-    ...shared,
-    createLogger: (options: Parameters<typeof shared.createLogger>[0]) => shared.createLogger({
-      ...options,
-      sink: (record) => hoisted.records.push(JSON.parse(JSON.stringify(record)) as Record<string, unknown>),
-    }),
-  };
-});
+vi.mock(
+  "@modainteract/moda-interact-shared/logging",
+  async (importOriginal) => {
+    const shared =
+      await importOriginal<
+        typeof import("@modainteract/moda-interact-shared/logging")
+      >();
+    return {
+      ...shared,
+      createLogger: (options: Parameters<typeof shared.createLogger>[0]) =>
+        shared.createLogger({
+          ...options,
+          sink: (record) =>
+            hoisted.records.push(
+              JSON.parse(JSON.stringify(record)) as Record<string, unknown>,
+            ),
+        }),
+    };
+  },
+);
 vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
   createBullMQTelemetry: vi.fn(() => ({})),
 }));
-vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: hoisted.redis }));
+vi.mock("../../../src/lib/redis.js", () => ({
+  connectionRedis: hoisted.redis,
+}));
 vi.mock("../../../src/lib/db.js", () => ({
   default: {
-    shop: { findUniqueOrThrow: vi.fn(async () => ({ id: "shop_1" })), findUnique: hoisted.findShop },
-    customer: { findFirst: vi.fn(async () => ({ id: "customer-1", shopId: "shop_1" })) },
+    shop: {
+      findUniqueOrThrow: vi.fn(async () => ({ id: "shop_1" })),
+      findUnique: hoisted.findShop,
+    },
+    customer: {
+      findFirst: vi.fn(async () => ({ id: "customer-1", shopId: "shop_1" })),
+    },
     checkoutRecovery: {
       create: hoisted.createRecovery,
       findFirst: hoisted.findLatestRecovery,
@@ -110,18 +148,32 @@ vi.mock("../../../src/lib/db.js", () => ({
     whatsAppRecipientReachability: { findUnique: hoisted.findSuppression },
   },
 }));
-vi.mock("../../../src/services/shopify-whatsapp-consent/phone-resolution.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../../src/services/shopify-whatsapp-consent/phone-resolution.js")>(),
-  selectStoredShopifyCheckoutPhone: vi.fn(async () => ({ customerId: "customer-1", customerPhoneId: "phone-1",
-    recipient: "15551234567", source: "customer" })),
-}));
+vi.mock(
+  "../../../src/services/shopify-whatsapp-consent/phone-resolution.js",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("../../../src/services/shopify-whatsapp-consent/phone-resolution.js")
+    >()),
+    selectStoredShopifyCheckoutPhone: vi.fn(async () => ({
+      customerId: "customer-1",
+      customerPhoneId: "phone-1",
+      recipient: "15551234567",
+      source: "customer",
+    })),
+  }),
+);
 vi.mock("../../../src/services/customer.service.js", () => ({
   customerService: { resolveCustomer: hoisted.resolveCustomer },
 }));
-vi.mock("../../../src/services/recovery-policy.service.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../../src/services/recovery-policy.service.js")>(),
-  recoveryPolicyService: { resolve: hoisted.resolvePolicy },
-}));
+vi.mock(
+  "../../../src/services/recovery-policy.service.js",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("../../../src/services/recovery-policy.service.js")
+    >()),
+    recoveryPolicyService: { resolve: hoisted.resolvePolicy },
+  }),
+);
 vi.mock("../../../src/services/recovery-outreach-attempt.service.js", () => ({
   recoveryOutreachAttemptService: { getOrCreate: hoisted.attemptGetOrCreate },
 }));
@@ -153,7 +205,10 @@ vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
 }));
 vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
   backgroundRuntimeConfigService: {
-    current: vi.fn(() => ({ version: 1, pendingRecoveryQueueGlobalConcurrency: 10 })),
+    current: vi.fn(() => ({
+      version: 1,
+      pendingRecoveryQueueGlobalConcurrency: 10,
+    })),
     subscribe: vi.fn(() => () => undefined),
   },
 }));
@@ -182,16 +237,24 @@ describe("pending recovery candidate worker", () => {
     hoisted.createRecovery.mockClear();
     hoisted.updateRecoveryMany.mockClear();
     hoisted.findLatestRecovery.mockClear();
-    hoisted.findRecovery.mockReset().mockImplementation(async () => hoisted.durableRecovery);
-    hoisted.findShop.mockReset().mockResolvedValue({ id: "shop_1", platform: "SHOPIFY" });
+    hoisted.findRecovery
+      .mockReset()
+      .mockImplementation(async () => hoisted.durableRecovery);
+    hoisted.findShop
+      .mockReset()
+      .mockResolvedValue({ id: "shop_1", platform: "SHOPIFY" });
     hoisted.findInitialAttempt.mockReset().mockResolvedValue(null);
-    hoisted.inspectInitialAdmission.mockReset().mockResolvedValue({ kind: "absent" });
+    hoisted.inspectInitialAdmission
+      .mockReset()
+      .mockResolvedValue({ kind: "absent" });
     hoisted.suppressUntil = new Date(Date.now() + 60 * 60_000);
     hoisted.findSuppression.mockReset().mockResolvedValue({
       suppressUntil: hoisted.suppressUntil,
     });
     hoisted.scheduleResume.mockReset().mockResolvedValue("resume-job");
-    hoisted.scheduleResume.mockRejectedValueOnce(new Error("Redis temporarily unavailable"));
+    hoisted.scheduleResume.mockRejectedValueOnce(
+      new Error("Redis temporarily unavailable"),
+    );
     hoisted.redis.set.mockReset().mockResolvedValue("OK");
     hoisted.redis.get.mockReset().mockResolvedValue("lock-owner");
     hoisted.redis.del.mockReset().mockResolvedValue(1);
@@ -205,7 +268,7 @@ describe("pending recovery candidate worker", () => {
       checkoutToken: "checkout_1",
     });
     hoisted.cleanup.mockClear();
-    hoisted.deferNotFound.mockReset().mockResolvedValue({kind: "exhausted"});
+    hoisted.deferNotFound.mockReset().mockResolvedValue({ kind: "exhausted" });
   });
 
   it("cleans up an inactive matured candidate in finally", async () => {
@@ -224,70 +287,115 @@ describe("pending recovery candidate worker", () => {
       retrySuppressionAdmission: false,
     });
     expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
-    expect(hoisted.records).toContainEqual(expect.objectContaining({
-      event: "recovery.pending_candidate.materialization_completed",
-      data: expect.objectContaining({shopId: "shop_1", jobId: job.id, outcome: "discarded-shop-unavailable", candidateIndexCleanup: "completed"}),
-    }));
+    expect(hoisted.records).toContainEqual(
+      expect.objectContaining({
+        event: "recovery.pending_candidate.materialization_completed",
+        data: expect.objectContaining({
+          shopId: "shop_1",
+          jobId: job.id,
+          outcome: "discarded-shop-unavailable",
+          candidateIndexCleanup: "completed",
+        }),
+      }),
+    );
   });
 
   it("defers only Shopify not-found without cleanup or consuming normal error attempts", async () => {
-    hoisted.materialize.mockResolvedValueOnce({outcome:"discarded-not-found", checkoutToken:"checkout_1"});
+    hoisted.materialize.mockResolvedValueOnce({
+      outcome: "discarded-not-found",
+      checkoutToken: "checkout_1",
+    });
     const move = vi.fn(async () => undefined);
     const save = vi.fn(async () => undefined);
-    const job = {name:EVALUATE_PENDING_RECOVERY_JOB,id:"job-visible-later",
-      data:{shopId:"shop_1",checkoutToken:"checkout_1"},attemptsMade:0,
-      opts:{attempts:3},updateData:save,moveToDelayed:move};
-    hoisted.deferNotFound.mockImplementationOnce(async (_candidate, _id, action) => {
-      await (action as (c:unknown, t:number)=>Promise<void>)(job.data, 12345);
-      return {kind:"deferred",attempt:2,dueAtMs:12345};
-    });
+    const job = {
+      name: EVALUATE_PENDING_RECOVERY_JOB,
+      id: "job-visible-later",
+      data: { shopId: "shop_1", checkoutToken: "checkout_1" },
+      attemptsMade: 0,
+      opts: { attempts: 3 },
+      updateData: save,
+      moveToDelayed: move,
+    };
+    hoisted.deferNotFound.mockImplementationOnce(
+      async (_candidate, _id, action) => {
+        await (action as (c: unknown, t: number) => Promise<void>)(
+          job.data,
+          12345,
+        );
+        return { kind: "deferred", attempt: 2, dueAtMs: 12345 };
+      },
+    );
     await expect(hoisted.processor?.(job)).rejects.toThrow();
     expect(save).toHaveBeenCalledOnce();
     expect(move).toHaveBeenCalledWith(12345, undefined);
     expect(hoisted.cleanup).not.toHaveBeenCalled();
-    expect(hoisted.records).toContainEqual(expect.objectContaining({
-      event:"recovery.pending_candidate.shopify_verification_deferred",
-      data:expect.objectContaining({jobId:job.id,attempt:2}),
-    }));
+    expect(hoisted.records).toContainEqual(
+      expect.objectContaining({
+        event: "recovery.pending_candidate.shopify_verification_deferred",
+        data: expect.objectContaining({ jobId: job.id, attempt: 2 }),
+      }),
+    );
     expect(job.opts.attempts).toBe(3);
   });
 
   it("does not remove the new checkout owner's indexes after supersession", async () => {
-    hoisted.materialize.mockResolvedValueOnce({outcome:"discarded-not-found",checkoutToken:"checkout_1"});
-    hoisted.deferNotFound.mockResolvedValueOnce({kind:"superseded"});
-    await hoisted.processor?.({name:EVALUATE_PENDING_RECOVERY_JOB,id:"old-job",
-      data:{shopId:"shop_1",checkoutToken:"checkout_1"},attemptsMade:0});
+    hoisted.materialize.mockResolvedValueOnce({
+      outcome: "discarded-not-found",
+      checkoutToken: "checkout_1",
+    });
+    hoisted.deferNotFound.mockResolvedValueOnce({ kind: "superseded" });
+    await hoisted.processor?.({
+      name: EVALUATE_PENDING_RECOVERY_JOB,
+      id: "old-job",
+      data: { shopId: "shop_1", checkoutToken: "checkout_1" },
+      attemptsMade: 0,
+    });
     expect(hoisted.cleanup).not.toHaveBeenCalled();
   });
 
   it("cleans up only after provider verification horizon is exhausted", async () => {
-    hoisted.materialize.mockResolvedValueOnce({outcome:"discarded-not-found",checkoutToken:"checkout_1"});
-    const job = {name:EVALUATE_PENDING_RECOVERY_JOB,id:"final-job",
-      data:{shopId:"shop_1",checkoutToken:"checkout_1"},attemptsMade:0};
+    hoisted.materialize.mockResolvedValueOnce({
+      outcome: "discarded-not-found",
+      checkoutToken: "checkout_1",
+    });
+    const job = {
+      name: EVALUATE_PENDING_RECOVERY_JOB,
+      id: "final-job",
+      data: { shopId: "shop_1", checkoutToken: "checkout_1" },
+      attemptsMade: 0,
+    };
     await hoisted.processor?.(job);
-    expect(hoisted.cleanup).toHaveBeenCalledWith(job.data,job.id);
-    expect(hoisted.records).toContainEqual(expect.objectContaining({
-      event:"recovery.pending_candidate.shopify_verification_terminal",
-      data:expect.objectContaining({reason:"exhausted"}),
-    }));
+    expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
+    expect(hoisted.records).toContainEqual(
+      expect.objectContaining({
+        event: "recovery.pending_candidate.shopify_verification_terminal",
+        data: expect.objectContaining({ reason: "exhausted" }),
+      }),
+    );
   });
 
   it("processes a manually retried job after BullMQ clears its failure reason", async () => {
     const job = {
-      name: EVALUATE_PENDING_RECOVERY_JOB, id: "job-retry",
+      name: EVALUATE_PENDING_RECOVERY_JOB,
+      id: "job-retry",
       data: { shopId: "shop_1", checkoutToken: "checkout_1" },
       attemptsMade: 3,
     };
     await hoisted.processor?.(job);
     expect(hoisted.materialize).toHaveBeenCalledWith(job.data, {
-      jobId: job.id, retrySuppressionAdmission: false,
+      jobId: job.id,
+      retrySuppressionAdmission: false,
     });
     expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
   });
 
   it("logs both compound candidate failures through Shared and invokes retained worker listeners", async () => {
-    const materializationError = new Error("materialization failed phone +447000111222");
-    const cleanupError = Object.assign(new Error("cleanup failed"), { code: "P2034" });
+    const materializationError = new Error(
+      "materialization failed phone +447000111222",
+    );
+    const cleanupError = Object.assign(new Error("cleanup failed"), {
+      code: "P2034",
+    });
     hoisted.materialize.mockRejectedValueOnce(materializationError);
     hoisted.cleanup.mockRejectedValueOnce(cleanupError);
     const job = {
@@ -308,21 +416,27 @@ describe("pending recovery candidate worker", () => {
     expect(composite).toBeInstanceOf(Error);
     expect((composite as Error).cause).toBeInstanceOf(AggregateError);
     expect(((composite as Error).cause as AggregateError).errors).toEqual([
-      materializationError, cleanupError,
+      materializationError,
+      cleanupError,
     ]);
-    expect(hoisted.records).toContainEqual(expect.objectContaining({
-      event: "recovery.pending_candidate.processing_cleanup_failed",
-      level: "error",
-      data: expect.objectContaining({
-        queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
-        attempt: 2,
-        shopId: "shop_1",
-        materializationError: expect.objectContaining({
-          message: "materialization failed phone [REDACTED_PHONE]",
+    expect(hoisted.records).toContainEqual(
+      expect.objectContaining({
+        event: "recovery.pending_candidate.processing_cleanup_failed",
+        level: "error",
+        data: expect.objectContaining({
+          queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
+          attempt: 2,
+          shopId: "shop_1",
+          materializationError: expect.objectContaining({
+            message: "materialization failed phone [REDACTED_PHONE]",
+          }),
+          cleanupError: expect.objectContaining({
+            message: "cleanup failed",
+            code: "P2034",
+          }),
         }),
-        cleanupError: expect.objectContaining({ message: "cleanup failed", code: "P2034" }),
       }),
-    }));
+    );
     expect(JSON.stringify(hoisted.records)).not.toContain("+447000111222");
 
     const failed = hoisted.listeners.get("failed") ?? [];
@@ -330,19 +444,27 @@ describe("pending recovery candidate worker", () => {
     expect(failed.length).toBeGreaterThan(0);
     expect(errors.length).toBeGreaterThan(0);
     failed.forEach((listener) => listener(job, composite));
-    errors.forEach((listener) => listener(new Error("worker connection failed")));
-    expect(hoisted.records).toContainEqual(expect.objectContaining({
-      event: "recovery.pending_candidate.job_failed",
-      level: "error",
-      data: expect.objectContaining({ attempt: 2, shopId: "shop_1" }),
-    }));
-    expect(hoisted.records).toContainEqual(expect.objectContaining({
-      event: "recovery.pending_candidate.worker_error",
-      level: "error",
-      data: expect.objectContaining({ sourceError: expect.objectContaining({
-        message: "worker connection failed",
-      }) }),
-    }));
+    errors.forEach((listener) =>
+      listener(new Error("worker connection failed")),
+    );
+    expect(hoisted.records).toContainEqual(
+      expect.objectContaining({
+        event: "recovery.pending_candidate.job_failed",
+        level: "error",
+        data: expect.objectContaining({ attempt: 2, shopId: "shop_1" }),
+      }),
+    );
+    expect(hoisted.records).toContainEqual(
+      expect.objectContaining({
+        event: "recovery.pending_candidate.worker_error",
+        level: "error",
+        data: expect.objectContaining({
+          sourceError: expect.objectContaining({
+            message: "worker connection failed",
+          }),
+        }),
+      }),
+    );
   });
 
   it("retries a persisted DETECTED recovery after enqueue and version-read failures", async () => {
@@ -355,8 +477,13 @@ describe("pending recovery candidate worker", () => {
     } as never);
     const billing = {
       admit: hoisted.billingAdmit,
-      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "absent" })),
-      settleConfirmedInitialOutreach: vi.fn(async () => ({ kind: "held", reason: "settlement-not-committed" })),
+      revalidateExistingInitialOutreach: vi.fn(async () => ({
+        kind: "absent",
+      })),
+      settleConfirmedInitialOutreach: vi.fn(async () => ({
+        kind: "held",
+        reason: "settlement-not-committed",
+      })),
       revalidateBeforeProvider: vi.fn(),
       releaseBeforeProvider: vi.fn(),
       handleProviderFailure: vi.fn(),
@@ -366,7 +493,8 @@ describe("pending recovery candidate worker", () => {
       billing,
       { ensureScheduledInitialFollowUp: vi.fn() } as never,
       {
-        upsertRecovery: (event, generation) => initiation.upsertRecovery(event, generation),
+        upsertRecovery: (event, generation) =>
+          initiation.upsertRecovery(event, generation),
         resolveRecipient: (event) => event.customer.phone ?? "",
         markRecoveryCapacityBlocked: vi.fn(),
       },
@@ -386,23 +514,42 @@ describe("pending recovery candidate worker", () => {
       totalPrice: "42.00",
       abandonedCheckoutUrl: "https://checkout/current",
       consentReceiptAttribute: { kind: "MISSING" as const },
-      customer: { shopifyCustomerId: null, phone: "15551234567", email: null, firstName: null, lastName: null },
+      customer: {
+        shopifyCustomerId: null,
+        phone: "15551234567",
+        email: null,
+        firstName: null,
+        lastName: null,
+      },
       lineItems: [],
-      internationalContext: { countryCode: "US", currencyCode: "GBP", languageTag: null, languageSource: null, timeZone: null },
+      internationalContext: {
+        countryCode: "US",
+        currencyCode: "GBP",
+        languageTag: null,
+        languageSource: null,
+        timeZone: null,
+      },
     };
     const checkoutOrderGuard = new CheckoutOrderGuardService();
     const materializer = new RecoveryMaterializationService({
-      executionEligibility: { evaluate: vi.fn(async () => ({ allowed: true, shopId: "shop_1" })) },
+      executionEligibility: {
+        evaluate: vi.fn(async () => ({ allowed: true, shopId: "shop_1" })),
+      },
       abandonedCheckoutLookup: {
         resolveShopDomain: vi.fn(async () => "shop.example"),
-        lookup: vi.fn(async () => ({ kind: "found" as const, checkout: freshCheckout })),
+        lookup: vi.fn(async () => ({
+          kind: "found" as const,
+          checkout: freshCheckout,
+        })),
       },
       pendingRecoveryCandidate: {
-        withCheckoutLock: checkoutOrderGuard.withCheckoutLock.bind(checkoutOrderGuard),
+        withCheckoutLock:
+          checkoutOrderGuard.withCheckoutLock.bind(checkoutOrderGuard),
         hasOrderProcessed: vi.fn(async () => false),
         findCandidateJobIdByCheckout: vi.fn(async () => "candidate-job-1"),
       },
-      findLatestRecovery: (shopId, checkoutToken) => findLatestRecovery(shopId, checkoutToken),
+      findLatestRecovery: (shopId, checkoutToken) =>
+        findLatestRecovery(shopId, checkoutToken),
       snapshotBuilder: {
         build: vi.fn(async () => ({
           shop: "shop.example",
@@ -418,10 +565,19 @@ describe("pending recovery candidate worker", () => {
         })),
       },
       recipientResolver: { resolve: vi.fn(async () => "15551234567") },
-      initiate: (seed, generation, recipient, customerId) => initiation.handleCheckoutCreated(seed, generation, recipient, undefined, undefined, customerId),
+      initiate: (seed, generation, recipient, customerId) =>
+        initiation.handleCheckoutCreated(
+          seed,
+          generation,
+          recipient,
+          undefined,
+          undefined,
+          customerId,
+        ),
     });
     hoisted.materialize.mockImplementation(async (candidate, options) =>
-      materializer.materialize(candidate as never, options as never));
+      materializer.materialize(candidate as never, options as never),
+    );
 
     const candidate = {
       shopId: "shop_1",
@@ -446,9 +602,13 @@ describe("pending recovery candidate worker", () => {
     // hasOrderProcessed() is stubbed by this materialization fixture, so the
     // first Redis GET is the checkout-lock cleanup, not an order tombstone read.
     // Fail that GET; later cleanup during the retry can succeed normally.
-    hoisted.redis.get.mockReset().mockResolvedValue(null)
+    hoisted.redis.get
+      .mockReset()
+      .mockResolvedValue(null)
       .mockRejectedValueOnce(new Error("Redis lock cleanup unavailable"));
-    hoisted.cleanup.mockRejectedValueOnce(new Error("Redis candidate index cleanup unavailable"));
+    hoisted.cleanup.mockRejectedValueOnce(
+      new Error("Redis candidate index cleanup unavailable"),
+    );
 
     let failedReason: string;
     try {
@@ -457,8 +617,12 @@ describe("pending recovery candidate worker", () => {
     } catch (error) {
       failedReason = error instanceof Error ? error.message : String(error);
     }
-    expect(failedReason).toMatch(new RegExp(`^${RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED}:`));
-    expect(failedReason).toContain("checkout lock cleanup failed: Redis lock cleanup unavailable");
+    expect(failedReason).toMatch(
+      new RegExp(`^${RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED}:`),
+    );
+    expect(failedReason).toContain(
+      "checkout lock cleanup failed: Redis lock cleanup unavailable",
+    );
     expect(failedReason).toContain("candidate index cleanup unavailable");
     expect(hoisted.durableRecovery).toMatchObject({
       id: "recovery-1",
@@ -495,7 +659,7 @@ describe("pending recovery candidate worker", () => {
     hoisted.durableRecovery = null;
     hoisted.scheduleResume.mockReset().mockResolvedValue("resume-job");
     hoisted.cleanup.mockClear();
-    hoisted.deferNotFound.mockReset().mockResolvedValue({kind: "exhausted"});
+    hoisted.deferNotFound.mockReset().mockResolvedValue({ kind: "exhausted" });
     hoisted.createRecovery.mockClear();
     hoisted.updateRecoveryMany.mockClear();
     const versionReadError = new Error("database version read unavailable");

@@ -14,19 +14,22 @@ void startReadyWorkerProcess({
   serviceName: "moda-messaging-worker",
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
-    const [{ closeWorkerResources }, { createWhatsappWorker, whatsappQueue }] = await Promise.all([
-      import("./resources.js"),
-      import("../workers/whatsapp.worker.js"),
-    ]);
+    const [{ closeWorkerResources }, { createWhatsappWorker, whatsappQueue }] =
+      await Promise.all([
+        import("./resources.js"),
+        import("../workers/whatsapp.worker.js"),
+      ]);
     const whatsappWorker = createWhatsappWorker();
-    const closePendingTurnRepair = startProductionPendingTurnRepair(whatsappQueue);
+    const closePendingTurnRepair =
+      startProductionPendingTurnRepair(whatsappQueue);
     const closeMultipartRepair = startMultipartRepair();
     const closeHumanDispatcher = await startHumanCommandDispatcher();
     const closeTemplateDuePoller = startProductionMetaTemplateDuePoller();
-    const stopQueueConcurrencyController = await startQueueConcurrencyController({
-      config: backgroundRuntimeConfigService,
-      lease: backgroundRuntimeLeaseService,
-    });
+    const stopQueueConcurrencyController =
+      await startQueueConcurrencyController({
+        config: backgroundRuntimeConfigService,
+        lease: backgroundRuntimeLeaseService,
+      });
 
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
